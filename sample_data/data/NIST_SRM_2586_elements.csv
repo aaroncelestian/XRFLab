@@ -1,0 +1,44 @@
+Element,Symbol,Concentration_mg_kg,Uncertainty_mg_kg,Value_Type,Notes
+Aluminum,Al,66520,760,Non-Certified,
+Arsenic,As,8.7,1.5,Certified,
+Barium,Ba,413,18,Non-Certified,
+Beryllium,Be,1.4,,Potential Interest,No uncertainty assigned
+Cadmium,Cd,2.71,0.54,Certified,
+Calcium,Ca,22180,540,Non-Certified,
+Cerium,Ce,57.1,1.9,Non-Certified,
+Chromium,Cr,301,45,Certified,
+Cobalt,Co,35,,Potential Interest,No uncertainty assigned
+Copper,Cu,81,,Potential Interest,No uncertainty assigned
+Dysprosium,Dy,4.69,0.14,Non-Certified,
+Erbium,Er,3.3,,Potential Interest,No uncertainty assigned
+Europium,Eu,1.33,0.03,Non-Certified,
+Gadolinium,Gd,6.04,0.27,Non-Certified,
+Gallium,Ga,14,,Potential Interest,No uncertainty assigned
+Holmium,Ho,1.1,,Potential Interest,No uncertainty assigned
+Iron,Fe,51610,890,Non-Certified,
+Lanthanum,La,27.0,1.0,Non-Certified,
+Lead,Pb,432,17,Certified,
+Lithium,Li,25,,Potential Interest,No uncertainty assigned
+Magnesium,Mg,17070,840,Non-Certified,
+Manganese,Mn,1000,18,Non-Certified,
+Mercury,Hg,0.367,0.038,Non-Certified,
+Neodymium,Nd,27.2,0.8,Non-Certified,
+Nickel,Ni,75,,Potential Interest,No uncertainty assigned
+Niobium,Nb,6,,Potential Interest,No uncertainty assigned
+Phosphorus,P,1001,77,Non-Certified,
+Potassium,K,9760,180,Non-Certified,
+Praseodymium,Pr,6.78,0.23,Non-Certified,
+Samarium,Sm,6.02,0.14,Non-Certified,
+Scandium,Sc,24,,Potential Interest,No uncertainty assigned
+Selenium,Se,0.6,,Potential Interest,No uncertainty assigned
+Silicon,Si,291500,2100,Non-Certified,
+Sodium,Na,4680,730,Non-Certified,
+Strontium,Sr,84.1,8.0,Non-Certified,
+Terbium,Tb,0.79,0.02,Non-Certified,
+Thorium,Th,7,,Potential Interest,No uncertainty assigned
+Thulium,Tm,0.5,,Potential Interest,No uncertainty assigned
+Titanium,Ti,6050,660,Non-Certified,
+Vanadium,V,160,,Potential Interest,No uncertainty assigned
+Ytterbium,Yb,2.06,0.05,Non-Certified,
+Yttrium,Y,20.5,0.8,Non-Certified,
+Zinc,Zn,352,16,Non-Certified,

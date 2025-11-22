@@ -40,8 +40,14 @@ class IOHandler:
             raise ValueError(f"Unsupported file format: {suffix}")
     
     def _load_text_spectrum(self, file_path: Path) -> Spectrum:
-        """Load spectrum from text file (two-column: energy, counts)"""
+        """Load spectrum from text file (two-column: energy, counts or EMSA format)"""
         try:
+            # Check if it's EMSA format
+            with open(file_path, 'r') as f:
+                first_line = f.readline()
+                if first_line.startswith('#FORMAT') and 'EMSA' in first_line:
+                    return self._load_emsa_spectrum(file_path)
+            
             # Try to load as two-column data
             data = np.loadtxt(file_path)
             
@@ -96,6 +102,77 @@ class IOHandler:
             )
         except Exception as e:
             raise ValueError(f"Failed to load CSV spectrum: {str(e)}")
+    
+    def _load_emsa_spectrum(self, file_path: Path) -> Spectrum:
+        """Load spectrum from EMSA/MAS format file"""
+        try:
+            metadata = {}
+            energy_data = []
+            counts_data = []
+            
+            # Parse EMSA header and data
+            with open(file_path, 'r') as f:
+                in_data_section = False
+                xperchan = 0.01  # Default
+                offset = 0.0
+                
+                for line in f:
+                    line = line.strip()
+                    
+                    # Parse header
+                    if line.startswith('#'):
+                        if ':' in line:
+                            key, value = line[1:].split(':', 1)
+                            key = key.strip()
+                            value = value.strip()
+                            metadata[key] = value
+                            
+                            # Extract key parameters
+                            if key == 'XPERCHAN':
+                                xperchan = float(value)
+                            elif key == 'OFFSET':
+                                offset = float(value)
+                            elif key == 'LIVETIME':
+                                metadata['live_time'] = float(value)
+                            elif key == 'REALTIME':
+                                metadata['real_time'] = float(value)
+                            elif key == 'BEAMKV':
+                                metadata['excitation_energy'] = float(value)
+                        
+                        if 'SPECTRUM' in line or 'Spectral Data Starts Here' in line:
+                            in_data_section = True
+                        continue
+                    
+                    # Parse data section
+                    if in_data_section and line:
+                        parts = line.split(',')
+                        if len(parts) >= 2:
+                            try:
+                                energy_val = float(parts[0].strip())
+                                counts_val = float(parts[1].strip())
+                                energy_data.append(energy_val)
+                                counts_data.append(counts_val)
+                            except ValueError:
+                                continue
+            
+            # Convert to numpy arrays
+            energy = np.array(energy_data)
+            counts = np.array(counts_data)
+            
+            # If energy is not explicitly in file, calculate from channels
+            if len(energy) == 0 or np.allclose(energy, 0):
+                channels = np.arange(len(counts))
+                energy = offset + channels * xperchan
+            
+            return Spectrum(
+                energy=energy,
+                counts=counts,
+                live_time=float(metadata.get('live_time', 100.0)),
+                real_time=float(metadata.get('real_time', 100.0)),
+                metadata=metadata
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to load EMSA spectrum: {str(e)}")
     
     def _load_mca_spectrum(self, file_path: Path) -> Spectrum:
         """Load spectrum from MCA file format"""

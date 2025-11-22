@@ -33,23 +33,76 @@ def generate_sample_spectrum(
     # Initialize counts with background
     counts = _generate_background(energy, intensity=1000)
     
-    # Add characteristic peaks for each element
+    # Add characteristic peaks for each element with realistic intensity ratios
+    # Intensities based on relative fluorescence yields and transition probabilities
     peak_data = {
-        'Fe': [(6.404, 5000), (7.058, 1000)],  # Ka, Kb
-        'Cu': [(8.048, 3000), (8.905, 600)],   # Ka, Kb
-        'Zn': [(8.639, 2500), (9.572, 500)],   # Ka, Kb
-        'Ca': [(3.692, 4000), (4.013, 800)],   # Ka, Kb
-        'Ti': [(4.511, 3500), (4.932, 700)],   # Ka, Kb
-        'Mn': [(5.899, 3000), (6.490, 600)],   # Ka, Kb
-        'Ni': [(7.478, 2800), (8.265, 560)],   # Ka, Kb
-        'Cr': [(5.415, 3200), (5.947, 640)],   # Ka, Kb
+        'Fe': [
+            # K-series (Kα doublet and Kβ)
+            (6.404, 5000),   # Kα1 (strongest)
+            (6.391, 4500),   # Kα2 (~90% of Kα1)
+            (7.058, 1000),   # Kβ1
+            (7.098, 100),    # Kβ3 (weak)
+            # L-series
+            (0.705, 800),    # Lα1
+            (0.718, 400),    # Lβ1
+            (0.792, 100),    # Lγ (weak)
+        ],
+        'Cu': [
+            (8.048, 3000),   # Kα1
+            (8.028, 2700),   # Kα2
+            (8.905, 600),    # Kβ1
+            (8.977, 60),     # Kβ3
+        ],
+        'Zn': [
+            (8.639, 2500),   # Kα1
+            (8.616, 2250),   # Kα2
+            (9.572, 500),    # Kβ1
+            (9.650, 50),     # Kβ3
+        ],
+        'Ca': [
+            # K-series
+            (3.692, 4000),   # Kα1
+            (3.688, 3600),   # Kα2
+            (4.013, 800),    # Kβ1
+            # L-series (weak for Ca)
+            (0.341, 200),    # Lα
+        ],
+        'Ti': [
+            # K-series
+            (4.511, 3500),   # Kα1
+            (4.505, 3150),   # Kα2
+            (4.932, 700),    # Kβ1
+            # L-series
+            (0.452, 300),    # Lα
+            (0.458, 150),    # Lβ
+        ],
+        'Mn': [
+            (5.899, 3000),   # Kα1
+            (5.888, 2700),   # Kα2
+            (6.490, 600),    # Kβ1
+            (6.539, 60),     # Kβ3
+        ],
+        'Ni': [
+            (7.478, 2800),   # Kα1
+            (7.461, 2520),   # Kα2
+            (8.265, 560),    # Kβ1
+            (8.333, 56),     # Kβ3
+        ],
+        'Cr': [
+            (5.415, 3200),   # Kα1
+            (5.405, 2880),   # Kα2
+            (5.947, 640),    # Kβ1
+            (5.989, 64),     # Kβ3
+        ],
     }
     
-    # Add peaks for selected elements
+    # Add peaks for selected elements with energy-dependent FWHM
     for element in elements:
         if element in peak_data:
             for peak_energy, intensity in peak_data[element]:
-                counts += _gaussian_peak(energy, peak_energy, intensity, fwhm=0.15)
+                # Use energy-dependent FWHM matching the fitter
+                fwhm = _calculate_fwhm(peak_energy)
+                counts += _voigt_peak(energy, peak_energy, intensity, fwhm=fwhm)
     
     # Add Poisson noise
     counts = np.random.poisson(counts + noise_level)
@@ -70,6 +123,16 @@ def generate_sample_spectrum(
     return spectrum
 
 
+def _calculate_fwhm(energy):
+    """
+    Calculate energy-dependent FWHM matching the peak fitter
+    FWHM(E) = sqrt(FWHM_0^2 + 2.35 * epsilon * E)
+    """
+    FWHM_0 = 0.100  # keV - must match peak_fitting.py
+    EPSILON = 0.0025  # Must match peak_fitting.py
+    return np.sqrt(FWHM_0**2 + 2.35 * EPSILON * energy)
+
+
 def _generate_background(energy, intensity=1000):
     """Generate realistic XRF background"""
     # Exponential decay with some structure
@@ -87,6 +150,28 @@ def _gaussian_peak(energy, center, intensity, fwhm=0.15):
     """Generate Gaussian peak"""
     sigma = fwhm / 2.355  # Convert FWHM to sigma
     return intensity * np.exp(-((energy - center) / sigma) ** 2 / 2)
+
+
+def _voigt_peak(energy, center, intensity, fwhm=0.15):
+    """
+    Generate Voigt peak (convolution of Gaussian and Lorentzian)
+    More realistic for X-ray peaks
+    """
+    from scipy.special import wofz
+    
+    sigma = fwhm / 2.355  # Convert FWHM to sigma
+    gamma = sigma * 0.15  # Lorentzian width (15% of Gaussian width)
+    
+    # Voigt profile using Faddeeva function
+    z = ((energy - center) + 1j * gamma) / (sigma * np.sqrt(2))
+    voigt = np.real(wofz(z)) / (sigma * np.sqrt(2 * np.pi))
+    
+    # Normalize to match intensity
+    peak_max = np.max(voigt)
+    if peak_max > 0:
+        voigt = voigt / peak_max * intensity
+    
+    return voigt
 
 
 def save_sample_spectrum(file_path, **kwargs):

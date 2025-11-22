@@ -190,8 +190,18 @@ class ElementPanel(QWidget):
         self.peak_shape_combo.addItems([
             "Gaussian",
             "Voigt",
-            "Pseudo-Voigt"
+            "Pseudo-Voigt",
+            "Hypermet",
+            "Tail-Gaussian"
         ])
+        self.peak_shape_combo.setCurrentText("Voigt")  # Set Voigt as default
+        self.peak_shape_combo.setToolTip(
+            "Gaussian: Simple symmetric peak\n"
+            "Voigt: More accurate for X-ray peaks\n"
+            "Pseudo-Voigt: Fast approximation of Voigt\n"
+            "Hypermet: Includes low-energy tail\n"
+            "Tail-Gaussian: Simplified tail model"
+        )
         shape_layout.addWidget(self.peak_shape_combo)
         layout.addLayout(shape_layout)
         
@@ -203,6 +213,20 @@ class ElementPanel(QWidget):
         # Pile-up correction checkbox
         self.pileup_check = QCheckBox("Pile-up Correction")
         layout.addWidget(self.pileup_check)
+        
+        # X-ray tube lines
+        tube_layout = QHBoxLayout()
+        self.tube_lines_check = QCheckBox("Include Tube Lines:")
+        self.tube_lines_check.setChecked(True)
+        self.tube_lines_check.setToolTip("Model X-ray tube characteristic lines (excluded from quantification)")
+        tube_layout.addWidget(self.tube_lines_check)
+        
+        self.tube_element_combo = QComboBox()
+        self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
+        self.tube_element_combo.setCurrentText("Rh")
+        self.tube_element_combo.setToolTip("X-ray tube anode element")
+        tube_layout.addWidget(self.tube_element_combo)
+        layout.addLayout(tube_layout)
         
         # Fit button
         self.fit_button = QPushButton("Fit Spectrum")
@@ -305,9 +329,22 @@ class ElementPanel(QWidget):
     
     def get_fitting_params(self):
         """Return dictionary of fitting parameters"""
+        # Convert UI peak shape names to internal format
+        peak_shape_map = {
+            'Gaussian': 'gaussian',
+            'Voigt': 'voigt',
+            'Pseudo-Voigt': 'pseudo_voigt',
+            'Hypermet': 'hypermet',
+            'Tail-Gaussian': 'tail_gaussian'
+        }
+        peak_shape = self.peak_shape_combo.currentText()
+        
         return {
             'background_method': self.background_combo.currentText(),
-            'peak_shape': self.peak_shape_combo.currentText(),
+            'peak_shape': peak_shape_map.get(peak_shape, peak_shape.lower()),
             'include_escape_peaks': self.escape_peaks_check.isChecked(),
-            'pileup_correction': self.pileup_check.isChecked()
+            'pileup_correction': self.pileup_check.isChecked(),
+            'include_tube_lines': self.tube_lines_check.isChecked(),
+            'tube_element': self.tube_element_combo.currentText(),
+            'excitation_kv': self.excitation_spin.value()
         }

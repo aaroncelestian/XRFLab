@@ -4,7 +4,8 @@ Main window for XRF Fundamental Parameters Analysis Application
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog
+    QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
+    QTabWidget
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
@@ -12,7 +13,9 @@ from PySide6.QtGui import QAction, QKeySequence, QIcon
 from ui.spectrum_widget import SpectrumWidget
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
+from ui.calibration_panel import CalibrationPanel
 from utils.io_handler import IOHandler
+from core.fitting import SpectrumFitter
 
 
 class MainWindow(QMainWindow):
@@ -25,7 +28,9 @@ class MainWindow(QMainWindow):
         
         # Initialize components
         self.io_handler = IOHandler()
+        self.fitter = SpectrumFitter()
         self.current_spectrum = None
+        self.fit_result = None
         self.settings = QSettings()
         
         # Setup UI
@@ -159,12 +164,32 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.toggle_log_action)
     
     def _create_central_widget(self):
-        """Create the main layout with three panels"""
+        """Create the main layout with tabs for Analysis and Calibration"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        layout = QHBoxLayout(central_widget)
+        layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        
+        # Analysis tab (main interface)
+        analysis_tab = self._create_analysis_tab()
+        self.tab_widget.addTab(analysis_tab, "Analysis")
+        
+        # Calibration tab
+        self.calibration_panel = CalibrationPanel()
+        self.calibration_panel.calibration_complete.connect(self.on_calibration_applied)
+        self.tab_widget.addTab(self.calibration_panel, "Instrument Calibration")
+        
+        layout.addWidget(self.tab_widget)
+    
+    def _create_analysis_tab(self):
+        """Create the analysis tab with three panels"""
+        analysis_widget = QWidget()
+        layout = QHBoxLayout(analysis_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
         
         # Create main splitter
         main_splitter = QSplitter(Qt.Horizontal)
@@ -190,6 +215,8 @@ class MainWindow(QMainWindow):
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
         self.element_panel.element_clicked.connect(self.on_element_clicked)
+        
+        return analysis_widget
     
     def _create_status_bar(self):
         """Create status bar"""
@@ -236,6 +263,7 @@ class MainWindow(QMainWindow):
                 spectrum = self.io_handler.load_spectrum(file_path)
                 self.current_spectrum = spectrum
                 self.spectrum_widget.set_spectrum(spectrum)
+                self.calibration_panel.set_spectrum(spectrum)  # Pass to calibration panel
                 self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
             except Exception as e:
                 QMessageBox.critical(
@@ -296,8 +324,54 @@ class MainWindow(QMainWindow):
             return
         
         self.status_bar.showMessage("Fitting spectrum...", 0)
-        # TODO: Implement spectrum fitting
-        self.status_bar.showMessage("Fitting complete", 5000)
+        
+        try:
+            # Get selected elements
+            elements = self.element_panel.get_selected_elements()
+            
+            # Get fitting parameters
+            fit_params = self.element_panel.get_fitting_params()
+            background_method = fit_params['background_method'].lower()
+            peak_shape = fit_params['peak_shape'].lower()
+            
+            # Perform fitting
+            self.fit_result = self.fitter.fit_spectrum(
+                energy=self.current_spectrum.energy,
+                counts=self.current_spectrum.counts,
+                elements=elements,
+                background_method=background_method,
+                peak_shape=peak_shape,
+                auto_find_peaks=True
+            )
+            
+            # Update spectrum display
+            self.spectrum_widget.set_fitted_spectrum(self.fit_result.fitted_spectrum)
+            self.spectrum_widget.set_background(self.fit_result.background)
+            
+            # Update results panel
+            self.results_panel.set_fit_statistics(self.fit_result.statistics)
+            self.results_panel.set_peaks(self.fit_result.peaks)
+            
+            # Perform quantification
+            exp_params = self.element_panel.get_experimental_params()
+            concentrations = self.fitter.quantify_elements(
+                self.fit_result.peaks, exp_params
+            )
+            self.results_panel.set_quantification(concentrations)
+            
+            self.status_bar.showMessage(
+                f"Fitting complete: {len(self.fit_result.peaks)} peaks fitted, "
+                f"χ²ᵣ = {self.fit_result.statistics['reduced_chi_squared']:.2f}",
+                5000
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Fitting Error",
+                f"An error occurred during fitting:\n{str(e)}"
+            )
+            self.status_bar.showMessage("Fitting failed", 5000)
     
     def quantify(self):
         """Perform quantitative analysis"""
@@ -367,6 +441,17 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.show_element_lines(symbol, z)
         
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
+    
+    def on_calibration_applied(self, calibration_result):
+        """Handle calibration being applied"""
+        self.status_bar.showMessage(
+            f"Calibration applied: FWHM₀={calibration_result.fwhm_0*1000:.1f} eV, "
+            f"ε={calibration_result.epsilon*1000:.2f} eV",
+            5000
+        )
+        
+        # Switch back to analysis tab
+        self.tab_widget.setCurrentIndex(0)
     
     def closeEvent(self, event):
         """Handle window close event"""

@@ -131,23 +131,21 @@ class ResultsPanel(QWidget):
         
         return group
     
-    def set_fit_statistics(self, chi_squared, r_squared, iterations):
+    def set_fit_statistics(self, statistics):
         """
-        Update fit statistics display
+        Update fit statistics
         
         Args:
-            chi_squared: Chi-squared value
-            r_squared: R-squared value
-            iterations: Number of iterations
+            statistics: Dictionary with chi_squared, reduced_chi_squared, r_squared, etc.
         """
+        chi_squared = statistics.get('chi_squared', 0)
+        r_squared = statistics.get('r_squared', 0)
+        reduced_chi = statistics.get('reduced_chi_squared', 0)
+        iterations = statistics.get('iterations', 1)
+        
         self.chi_squared_label.setText(f"χ²: {chi_squared:.4f}")
         self.r_squared_label.setText(f"R²: {r_squared:.4f}")
-        
-        # Calculate reduced chi-squared (assuming degrees of freedom)
-        # This is a placeholder - actual calculation needs proper DOF
-        reduced_chi = chi_squared / max(1, iterations)
         self.reduced_chi_label.setText(f"χ²ᵣ: {reduced_chi:.4f}")
-        
         self.iterations_label.setText(f"Iterations: {iterations}")
     
     def set_results(self, results):
@@ -199,26 +197,52 @@ class ResultsPanel(QWidget):
         else:
             self.total_label.setStyleSheet("color: red;")
     
-    def set_identified_peaks(self, peaks):
+    def set_peaks(self, peaks):
         """
-        Update identified peaks list
+        Update identified peaks list from Peak objects
         
         Args:
-            peaks: List of dictionaries with keys:
-                   'energy', 'element', 'line', 'intensity'
+            peaks: List of Peak objects from fitting
         """
         text_lines = []
         for peak in peaks:
-            energy = peak['energy']
-            element = peak['element']
-            line = peak['line']
-            intensity = peak.get('intensity', 0)
-            
-            text_lines.append(
-                f"{element}-{line}: {energy:.3f} keV (I={intensity:.0f})"
-            )
+            if peak.element and peak.line:
+                text_lines.append(
+                    f"{peak.element}-{peak.line}: {peak.energy:.3f} keV "
+                    f"(Area={peak.area:.0f}, FWHM={peak.fwhm:.3f} keV)"
+                )
+            else:
+                text_lines.append(
+                    f"Unknown: {peak.energy:.3f} keV "
+                    f"(Area={peak.area:.0f}, FWHM={peak.fwhm:.3f} keV)"
+                )
         
-        self.peaks_text.setPlainText("\n".join(text_lines))
+        if text_lines:
+            self.peaks_text.setPlainText("\n".join(text_lines))
+        else:
+            self.peaks_text.setPlainText("No peaks identified")
+    
+    def set_quantification(self, concentrations):
+        """
+        Update quantification results from concentration dictionary
+        
+        Args:
+            concentrations: Dict with element symbols as keys, each containing
+                          'concentration', 'error', 'lines' (list), 'total_area'
+        """
+        results = []
+        for element, data in concentrations.items():
+            # Format lines list as comma-separated string
+            lines_str = ', '.join(data.get('lines', []))
+            
+            results.append({
+                'element': element,
+                'concentration': data['concentration'],
+                'error': data['error'],
+                'line': lines_str  # All contributing lines
+            })
+        
+        self.set_results(results)
     
     def clear_results(self):
         """Clear all results and statistics"""

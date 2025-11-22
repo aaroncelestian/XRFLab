@@ -92,6 +92,45 @@ def get_element_lines(symbol, z):
     return lines
 
 
+def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
+    """
+    Get X-ray tube characteristic lines
+    
+    Args:
+        tube_element: Tube anode element (e.g., 'Rh', 'W', 'Mo', 'Ag')
+        excitation_kv: Tube voltage in keV
+        
+    Returns:
+        dict: Dictionary with line series and their energies
+    """
+    # Map tube elements to atomic numbers
+    tube_z_map = {
+        'Rh': 45,  # Rhodium
+        'W': 74,   # Tungsten
+        'Mo': 42,  # Molybdenum
+        'Ag': 47,  # Silver
+        'Cr': 24,  # Chromium
+        'Cu': 29,  # Copper
+    }
+    
+    if tube_element not in tube_z_map:
+        return {'K': [], 'L': [], 'M': []}
+    
+    z = tube_z_map[tube_element]
+    
+    # Get all emission lines for tube element
+    lines = get_element_lines(tube_element, z)
+    
+    # Filter lines below excitation voltage
+    filtered_lines = {'K': [], 'L': [], 'M': []}
+    for series in ['K', 'L', 'M']:
+        for line in lines.get(series, []):
+            if line['energy'] < excitation_kv:
+                filtered_lines[series].append(line)
+    
+    return filtered_lines
+
+
 def get_element_info(symbol, z):
     """
     Get detailed information about an element
