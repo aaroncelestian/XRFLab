@@ -4,9 +4,11 @@ Instrument calibration panel UI
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QLineEdit, QTextEdit,
-                               QFileDialog, QProgressBar, QMessageBox)
+                               QFileDialog, QProgressBar, QMessageBox, QSplitter)
 from PySide6.QtCore import Qt, Signal, QThread
 from pathlib import Path
+import pyqtgraph as pg
+import numpy as np
 from core.calibration import InstrumentCalibrator, CalibrationResult
 
 
@@ -15,13 +17,14 @@ class CalibrationWorker(QThread):
     finished = Signal(object)  # CalibrationResult
     progress = Signal(str)  # Progress message
     
-    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy):
+    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, experimental_params=None):
         super().__init__()
         self.calibrator = calibrator
         self.energy = energy
         self.counts = counts
         self.concentrations = concentrations
         self.excitation_energy = excitation_energy
+        self.experimental_params = experimental_params
     
     def run(self):
         """Run calibration in background thread"""
@@ -31,7 +34,8 @@ class CalibrationWorker(QThread):
                 self.energy,
                 self.counts,
                 self.concentrations,
-                self.excitation_energy
+                self.excitation_energy,
+                experimental_params=self.experimental_params
             )
             self.finished.emit(result)
         except Exception as e:
@@ -68,61 +72,71 @@ class CalibrationPanel(QWidget):
         """Initialize the user interface"""
         layout = QVBoxLayout(self)
         
-        # Instructions
+        # Compact instructions
         instructions = QLabel(
-            "<b>Instrument Calibration</b><br>"
-            "Use a reference standard (e.g., NIST SRM) to calibrate detector parameters.<br>"
-            "1. Load reference spectrum<br>"
-            "2. Load reference concentrations (CSV)<br>"
-            "3. Run calibration<br>"
-            "4. Apply or save calibration"
+            "<b>Instrument Calibration:</b> "
+            "Load spectrum from main window → Load concentrations CSV → Run calibration → Apply/Save"
         )
         instructions.setWordWrap(True)
+        instructions.setStyleSheet("padding: 5px; background-color: #f0f0f0; border-radius: 3px;")
         layout.addWidget(instructions)
+        
+        # Create splitter for controls and plot
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left side: Controls
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
         
         # Reference spectrum group
         spectrum_group = self._create_spectrum_group()
-        layout.addWidget(spectrum_group)
+        controls_layout.addWidget(spectrum_group)
         
         # Reference concentrations group
         conc_group = self._create_concentrations_group()
-        layout.addWidget(conc_group)
+        controls_layout.addWidget(conc_group)
         
         # Calibration controls
         controls_group = self._create_controls_group()
-        layout.addWidget(controls_group)
+        controls_layout.addWidget(controls_group)
         
         # Results display
         results_group = self._create_results_group()
-        layout.addWidget(results_group)
+        controls_layout.addWidget(results_group)
         
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
+        controls_layout.addWidget(self.progress_bar)
         
-        layout.addStretch()
+        controls_layout.addStretch()
+        
+        # Right side: Spectrum comparison plot
+        plot_widget = self._create_plot_widget()
+        
+        splitter.addWidget(controls_widget)
+        splitter.addWidget(plot_widget)
+        splitter.setSizes([400, 600])
+        
+        layout.addWidget(splitter)
     
     def _create_spectrum_group(self):
         """Create reference spectrum selection group"""
         group = QGroupBox("Reference Spectrum")
         layout = QVBoxLayout(group)
         
-        # File selection
-        file_layout = QHBoxLayout()
-        self.spectrum_path_edit = QLineEdit()
-        self.spectrum_path_edit.setPlaceholderText("Select reference spectrum file...")
-        self.spectrum_path_edit.setReadOnly(True)
-        file_layout.addWidget(self.spectrum_path_edit)
+        # Info label (no file selection - must load from main window)
+        info_text = QLabel(
+            "<b>Note:</b> Load spectrum from main window (File → Open Spectrum)<br>"
+            "This ensures metadata is properly extracted for calibration."
+        )
+        info_text.setWordWrap(True)
+        layout.addWidget(info_text)
         
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self._browse_spectrum)
-        file_layout.addWidget(browse_btn)
-        
-        layout.addLayout(file_layout)
-        
-        # Spectrum info
+        # Status label
         self.spectrum_info_label = QLabel("No spectrum loaded")
+        self.spectrum_info_label.setStyleSheet("color: gray; margin-top: 10px;")
         layout.addWidget(self.spectrum_info_label)
         
         return group
@@ -191,6 +205,49 @@ class CalibrationPanel(QWidget):
         layout.addWidget(self.results_text)
         
         return group
+    
+    def _create_plot_widget(self):
+        """Create spectrum comparison plot"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create plot with two subplots
+        self.plot_widget = pg.GraphicsLayoutWidget()
+        
+        # Top plot: Measured vs Calculated
+        self.spectrum_plot = self.plot_widget.addPlot(row=0, col=0)
+        self.spectrum_plot.setLabel('left', 'Counts')
+        self.spectrum_plot.setLabel('bottom', 'Energy (keV)')
+        self.spectrum_plot.setTitle('Calibration Fit')
+        self.spectrum_plot.addLegend()
+        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
+        
+        # Plot curves
+        self.measured_curve = self.spectrum_plot.plot(
+            pen=pg.mkPen('b', width=2), name='Measured'
+        )
+        self.calculated_curve = self.spectrum_plot.plot(
+            pen=pg.mkPen('r', width=2, style=Qt.DashLine), name='Calculated'
+        )
+        
+        # Bottom plot: Residuals
+        self.residual_plot = self.plot_widget.addPlot(row=1, col=0)
+        self.residual_plot.setLabel('left', 'Residuals')
+        self.residual_plot.setLabel('bottom', 'Energy (keV)')
+        self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.residual_plot.addLine(y=0, pen=pg.mkPen('k', style=Qt.DashLine))
+        
+        self.residual_curve = self.residual_plot.plot(
+            pen=pg.mkPen('g', width=1)
+        )
+        
+        # Link x-axes
+        self.residual_plot.setXLink(self.spectrum_plot)
+        
+        layout.addWidget(self.plot_widget)
+        
+        return widget
     
     def _browse_spectrum(self):
         """Browse for reference spectrum file"""
@@ -268,13 +325,23 @@ class CalibrationPanel(QWidget):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate
         
+        # Get experimental parameters from spectrum metadata
+        experimental_params = {}
+        if hasattr(self.current_spectrum, 'metadata') and self.current_spectrum.metadata:
+            experimental_params = {
+                'incident_angle': self.current_spectrum.metadata.get('incident_angle', 45.0),
+                'takeoff_angle': self.current_spectrum.metadata.get('takeoff_angle', 45.0),
+                'tube_current': self.current_spectrum.metadata.get('tube_current', 1.0),
+            }
+        
         # Run calibration in background thread
         self.worker = CalibrationWorker(
             self.calibrator,
             self.current_spectrum.energy,
             self.current_spectrum.counts,
             self.reference_concentrations,
-            excitation_energy
+            excitation_energy,
+            experimental_params
         )
         self.worker.finished.connect(self._on_calibration_finished)
         self.worker.progress.connect(self._on_calibration_progress)
@@ -291,6 +358,10 @@ class CalibrationPanel(QWidget):
         # Re-enable buttons
         self.calibrate_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
+        
+        # Update plot with calibration results
+        if result.success and self.current_spectrum is not None:
+            self._update_calibration_plot(result)
         
         # Display results
         if result.success:
@@ -404,9 +475,67 @@ class CalibrationPanel(QWidget):
         """Set spectrum from main window"""
         self.current_spectrum = spectrum
         if spectrum:
-            self.spectrum_path_edit.setText("Current spectrum")
             self.spectrum_info_label.setText(
-                f"Loaded: {len(spectrum.energy)} channels, "
+                f"✓ Loaded from main window: {len(spectrum.energy)} channels, "
                 f"{spectrum.energy[0]:.2f}-{spectrum.energy[-1]:.2f} keV"
             )
+            self.spectrum_info_label.setStyleSheet("color: green; margin-top: 10px;")
             self._check_ready()
+            
+            # Plot measured spectrum
+            self.measured_curve.setData(spectrum.energy, spectrum.counts)
+    
+    def _update_calibration_plot(self, result: CalibrationResult):
+        """Update plot with calibration results"""
+        if self.current_spectrum is None or self.reference_concentrations is None:
+            return
+        
+        try:
+            # Calculate spectrum with optimized parameters
+            element_data = self.calibrator._prepare_element_data(
+                self.reference_concentrations,
+                float(self.current_spectrum.metadata.get('excitation_energy', 50.0))
+            )
+            
+            # Only use FWHM_0 and epsilon (Gaussian peaks, no gamma)
+            params = np.array([
+                result.fwhm_0,
+                result.epsilon
+            ])
+            
+            calculated_spectrum = self.calibrator._calculate_spectrum(
+                self.current_spectrum.energy,
+                element_data,
+                params
+            )
+            
+            # Scale calculated to match measured peak height for visualization
+            if np.max(calculated_spectrum) > 0:
+                scale_factor = np.max(self.current_spectrum.counts) / np.max(calculated_spectrum)
+                calculated_spectrum_scaled = calculated_spectrum * scale_factor
+            else:
+                calculated_spectrum_scaled = calculated_spectrum
+            
+            # Calculate residuals
+            residuals = self.current_spectrum.counts - calculated_spectrum_scaled
+            
+            # Update plots
+            self.measured_curve.setData(
+                self.current_spectrum.energy,
+                self.current_spectrum.counts
+            )
+            self.calculated_curve.setData(
+                self.current_spectrum.energy,
+                calculated_spectrum_scaled
+            )
+            self.residual_curve.setData(
+                self.current_spectrum.energy,
+                residuals
+            )
+            
+            # Auto-range
+            self.spectrum_plot.autoRange()
+            self.residual_plot.autoRange()
+            
+        except Exception as e:
+            print(f"Error updating calibration plot: {e}")

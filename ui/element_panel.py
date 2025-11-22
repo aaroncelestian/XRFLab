@@ -317,6 +317,43 @@ class ElementPanel(QWidget):
         """Return list of selected elements"""
         return self.selected_elements
     
+    def update_from_spectrum_metadata(self, metadata: dict):
+        """
+        Auto-populate experimental parameters from spectrum metadata
+        
+        Args:
+            metadata: Spectrum metadata dictionary
+        """
+        # Update excitation energy
+        if 'excitation_energy' in metadata:
+            self.excitation_spin.setValue(float(metadata['excitation_energy']))
+        
+        # Update tube current
+        if 'tube_current' in metadata:
+            # Convert from nA to mA if needed
+            current = float(metadata['tube_current'])
+            if current > 1000:  # Likely in nA
+                current = current / 1000.0  # Convert to µA
+            if current > 1000:  # Still large, likely in µA
+                current = current / 1000.0  # Convert to mA
+            self.current_spin.setValue(current)
+        
+        # Update live time
+        if 'live_time' in metadata:
+            self.live_time_spin.setValue(float(metadata['live_time']))
+        
+        # Update incident angle
+        if 'incident_angle' in metadata:
+            self.angle_spin.setValue(float(metadata['incident_angle']))
+        
+        # Note: takeoff angle is in metadata but not in UI (could add if needed)
+        
+        print(f"Updated experimental parameters from spectrum metadata:")
+        print(f"  Excitation: {self.excitation_spin.value()} keV")
+        print(f"  Current: {self.current_spin.value()} mA")
+        print(f"  Live time: {self.live_time_spin.value()} s")
+        print(f"  Incident angle: {self.angle_spin.value()}°")
+    
     def get_experimental_params(self):
         """Return dictionary of experimental parameters"""
         return {

@@ -138,6 +138,22 @@ class IOHandler:
                                 metadata['real_time'] = float(value)
                             elif key == 'BEAMKV':
                                 metadata['excitation_energy'] = float(value)
+                            elif key == 'PROBECUR':
+                                metadata['tube_current'] = float(value)
+                            elif key == 'ELEVANGLE':
+                                metadata['takeoff_angle'] = float(value)
+                            elif key == 'XTILTSTGE':
+                                metadata['incident_angle'] = float(value) if float(value) != 0 else 45.0
+                            elif key == 'AZIMANGLE':
+                                metadata['azimuth_angle'] = float(value)
+                            elif key == 'MAGCAM':
+                                metadata['magnification'] = float(value)
+                            elif key == 'XPOSITION mm':
+                                metadata['x_position'] = float(value)
+                            elif key == 'YPOSITION mm':
+                                metadata['y_position'] = float(value)
+                            elif key == 'ZPOSITION mm':
+                                metadata['z_position'] = float(value)
                         
                         if 'SPECTRUM' in line or 'Spectral Data Starts Here' in line:
                             in_data_section = True

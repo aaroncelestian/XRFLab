@@ -186,28 +186,44 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tab_widget)
     
     def _create_analysis_tab(self):
-        """Create the analysis tab with three panels"""
+        """Create the analysis tab with improved layout"""
         analysis_widget = QWidget()
         layout = QHBoxLayout(analysis_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # Create main splitter
+        # Create main horizontal splitter (left panel | right side)
         main_splitter = QSplitter(Qt.Horizontal)
         
         # Left panel - Element selection and parameters
         self.element_panel = ElementPanel()
         main_splitter.addWidget(self.element_panel)
         
-        # Center panel - Spectrum display
+        # Right side - Vertical splitter (spectrum on top | results below)
+        right_splitter = QSplitter(Qt.Vertical)
+        
+        # Top: Spectrum display with residuals
         self.spectrum_widget = SpectrumWidget()
-        main_splitter.addWidget(self.spectrum_widget)
+        right_splitter.addWidget(self.spectrum_widget)
         
-        # Right panel - Results
+        # Bottom: Results panels in horizontal layout
+        results_widget = QWidget()
+        results_layout = QHBoxLayout(results_widget)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(5)
+        
+        # Create results panel (will be split into three sections)
         self.results_panel = ResultsPanel()
-        main_splitter.addWidget(self.results_panel)
+        results_layout.addWidget(self.results_panel)
         
-        # Set initial sizes (30%, 50%, 20%)
-        main_splitter.setSizes([420, 700, 280])
+        right_splitter.addWidget(results_widget)
+        
+        # Set sizes for vertical splitter (70% spectrum, 30% results)
+        right_splitter.setSizes([700, 300])
+        
+        main_splitter.addWidget(right_splitter)
+        
+        # Set initial sizes for horizontal splitter (30% left, 70% right)
+        main_splitter.setSizes([400, 1000])
         
         layout.addWidget(main_splitter)
         
@@ -264,6 +280,11 @@ class MainWindow(QMainWindow):
                 self.current_spectrum = spectrum
                 self.spectrum_widget.set_spectrum(spectrum)
                 self.calibration_panel.set_spectrum(spectrum)  # Pass to calibration panel
+                
+                # Auto-populate experimental parameters from spectrum metadata
+                if hasattr(spectrum, 'metadata') and spectrum.metadata:
+                    self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
+                
                 self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
             except Exception as e:
                 QMessageBox.critical(
@@ -334,14 +355,21 @@ class MainWindow(QMainWindow):
             background_method = fit_params['background_method'].lower()
             peak_shape = fit_params['peak_shape'].lower()
             
-            # Perform fitting
+            # Get experimental parameters
+            exp_params = self.element_panel.get_experimental_params()
+            
+            # Perform fitting (pass all parameters including tube lines and experimental params)
             self.fit_result = self.fitter.fit_spectrum(
                 energy=self.current_spectrum.energy,
                 counts=self.current_spectrum.counts,
                 elements=elements,
                 background_method=background_method,
                 peak_shape=peak_shape,
-                auto_find_peaks=True
+                auto_find_peaks=True,
+                tube_element=fit_params.get('tube_element', 'Rh'),
+                excitation_kv=fit_params.get('excitation_kv', 50.0),
+                include_tube_lines=fit_params.get('include_tube_lines', True),
+                experimental_params=exp_params
             )
             
             # Update spectrum display
