@@ -2,7 +2,7 @@
 # Setup script for XRF Fundamental Parameters Analysis Application
 
 echo "=========================================="
-echo "XRF Analysis Application Setup"
+echo "XRFLab Application Setup"
 echo "=========================================="
 echo ""
 

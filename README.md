@@ -1,4 +1,4 @@
-# XRF Fundamental Parameters Analysis
+# XRFLab
 
 A professional desktop application for X-ray fluorescence (XRF) spectroscopy data analysis using the fundamental parameters method.
 
@@ -6,13 +6,22 @@ A professional desktop application for X-ray fluorescence (XRF) spectroscopy dat
 ![PySide6](https://img.shields.io/badge/PySide6-6.6+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## 📚 Documentation
+
+- **[Quick Start Guide](docs/QUICKSTART.md)** - Get started in 5 minutes
+- **[Project Summary](docs/PROJECT_SUMMARY.md)** - Detailed implementation overview
+- **[Layout Guide](docs/LAYOUT_GUIDE.md)** - UI layout and design
+- **[Periodic Table Feature](docs/PERIODIC_TABLE_UPDATE.md)** - Interactive element selection
+- **[Changelog](docs/CHANGELOG.md)** - Version history and updates
+- **[Project Specifications](docs/starter.MD)** - Original detailed requirements
+
 ## Features
 
 ### Current Implementation (Phase 1)
 - ✅ **Modern GUI** with PySide6 (Qt6)
 - ✅ **High-performance plotting** using PyQtGraph
 - ✅ **Interactive spectrum display** with crosshair and zoom/pan
-- ✅ **Element selection panel** with searchable tree widget
+- ✅ **Interactive periodic table** for element selection (118 elements, color-coded)
 - ✅ **Results display** with statistics and quantification table
 - ✅ **Multiple file format support** (TXT, CSV, MCA, HDF5)
 - ✅ **Professional styling** with custom Qt stylesheet
@@ -92,18 +101,27 @@ This will create a `sample_data/` directory with synthetic spectra:
 ## Project Structure
 
 ```
-FpXrF/
+XRFLab/
 ├── main.py                 # Application entry point
 ├── requirements.txt        # Python dependencies
 ├── README.md              # This file
-├── starter.MD             # Detailed project specifications
+├── setup.sh               # Automated setup script
+│
+├── docs/                  # Documentation
+│   ├── starter.MD         # Detailed project specifications
+│   ├── QUICKSTART.md      # Quick start guide
+│   ├── PROJECT_SUMMARY.md # Implementation summary
+│   ├── LAYOUT_GUIDE.md    # UI layout guide
+│   ├── PERIODIC_TABLE_UPDATE.md  # Periodic table feature
+│   └── CHANGELOG.md       # Version history
 │
 ├── ui/                    # User interface modules
 │   ├── __init__.py
 │   ├── main_window.py     # Main application window
 │   ├── spectrum_widget.py # Spectrum plotting widget
 │   ├── element_panel.py   # Element selection panel
-│   └── results_panel.py   # Results display panel
+│   ├── results_panel.py   # Results display panel
+│   └── periodic_table_widget.py  # Periodic table widget
 │
 ├── core/                  # Core analysis modules
 │   ├── __init__.py

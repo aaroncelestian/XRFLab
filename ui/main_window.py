@@ -20,7 +20,7 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("XRF Fundamental Parameters Analysis")
+        self.setWindowTitle("XRFLab - Fundamental Parameters Analysis")
         self.setGeometry(100, 100, 1400, 900)
         
         # Initialize components
@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
     def _create_toolbar(self):
         """Create toolbar with quick-access buttons"""
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setObjectName("MainToolbar")  # Set object name to avoid warning
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
@@ -188,6 +189,7 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
+        self.element_panel.element_clicked.connect(self.on_element_clicked)
     
     def _create_status_bar(self):
         """Create status bar"""
@@ -343,8 +345,8 @@ class MainWindow(QMainWindow):
         """Show about dialog"""
         QMessageBox.about(
             self,
-            "About XRF Analysis",
-            "<h3>XRF Fundamental Parameters Analysis</h3>"
+            "About XRFLab",
+            "<h3>XRFLab</h3>"
             "<p>Version 1.0.0</p>"
             "<p>A professional application for X-ray fluorescence spectroscopy analysis "
             "using fundamental parameters method.</p>"
@@ -355,6 +357,16 @@ class MainWindow(QMainWindow):
         """Handle element selection changes"""
         # TODO: Update spectrum display with selected elements
         pass
+    
+    def on_element_clicked(self, symbol, z):
+        """Handle element click - show emission lines on spectrum"""
+        # Clear existing markers
+        self.spectrum_widget.clear_peak_markers()
+        
+        # Show emission lines for clicked element
+        self.spectrum_widget.show_element_lines(symbol, z)
+        
+        self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
     
     def closeEvent(self, event):
         """Handle window close event"""

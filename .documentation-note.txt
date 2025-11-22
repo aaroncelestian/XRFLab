@@ -1,0 +1,26 @@
+DOCUMENTATION ORGANIZATION
+==========================
+
+All markdown documentation files are now organized in the docs/ folder.
+
+STRUCTURE:
+----------
+FpXrF/
+├── README.md                    # Main project README (stays at root)
+└── docs/                        # All other documentation
+    ├── README.md                # Documentation index
+    ├── QUICKSTART.md            # Quick start guide
+    ├── starter.MD               # Original specifications
+    ├── PROJECT_SUMMARY.md       # Implementation summary
+    ├── LAYOUT_GUIDE.md          # UI layout guide
+    ├── PERIODIC_TABLE_UPDATE.md # Periodic table feature
+    └── CHANGELOG.md             # Version history
+
+GUIDELINES:
+-----------
+1. Keep README.md at project root for GitHub
+2. Put all other .md/.MD files in docs/
+3. Update docs/README.md when adding new documentation
+4. Link to docs/ files from main README when appropriate
+
+CREATED: 2024-11-22

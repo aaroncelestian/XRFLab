@@ -7,6 +7,7 @@ import pyqtgraph as pg
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
+from core.xray_data import get_element_lines
 
 
 class SpectrumWidget(QWidget):
@@ -126,6 +127,45 @@ class SpectrumWidget(QWidget):
         for marker in self.peak_markers:
             plot_item.removeItem(marker)
         self.peak_markers.clear()
+    
+    def show_element_lines(self, symbol, z):
+        """
+        Show emission lines for an element
+        
+        Args:
+            symbol: Element symbol
+            z: Atomic number
+        """
+        # Get emission lines
+        lines = get_element_lines(symbol, z)
+        
+        # Define colors for different series
+        series_colors = {
+            'K': 'r',      # Red for K lines
+            'L': 'g',      # Green for L lines
+            'M': 'b',      # Blue for M lines
+            'N': 'm'       # Magenta for N lines
+        }
+        
+        plot_item = self.plot_widget.getPlotItem()
+        
+        # Add markers for each line
+        for series, color in series_colors.items():
+            if lines[series]:
+                for line_data in lines[series]:
+                    energy = line_data['energy']
+                    name = line_data['name']
+                    
+                    # Create vertical line
+                    line_item = pg.InfiniteLine(
+                        pos=energy,
+                        angle=90,
+                        pen=pg.mkPen(color, width=1.5, style=Qt.DashLine),
+                        label=f"{symbol}-{name}",
+                        labelOpts={'position': 0.9, 'color': color, 'angle': 90}
+                    )
+                    plot_item.addItem(line_item)
+                    self.peak_markers.append(line_item)
     
     def set_log_scale(self, enabled):
         """Enable or disable logarithmic Y-axis"""

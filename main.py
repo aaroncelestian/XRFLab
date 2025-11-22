@@ -18,8 +18,8 @@ def main():
     )
     
     app = QApplication(sys.argv)
-    app.setApplicationName("XRF Fundamental Parameters Analysis")
-    app.setOrganizationName("XRF Analysis")
+    app.setApplicationName("XRFLab")
+    app.setOrganizationName("XRFLab")
     app.setApplicationVersion("1.0.0")
     
     # Create and show main window

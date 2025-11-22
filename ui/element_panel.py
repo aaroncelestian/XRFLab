@@ -5,9 +5,12 @@ Element selection panel for XRF analysis
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QLineEdit, QComboBox, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QCheckBox
+    QPushButton, QCheckBox, QTabWidget, QDialog, QTextEdit, QDialogButtonBox
 )
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
+from ui.periodic_table_widget import PeriodicTableWidget
+from core.xray_data import get_element_lines, get_element_info
 
 
 class ElementPanel(QWidget):
@@ -15,6 +18,7 @@ class ElementPanel(QWidget):
     
     elements_changed = Signal(list)  # Emitted when selected elements change
     fit_requested = Signal()  # Emitted when fit button is clicked
+    element_clicked = Signal(str, int)  # Emitted when element clicked (symbol, Z)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -148,40 +152,16 @@ class ElementPanel(QWidget):
         return group
     
     def _create_element_selection_group(self):
-        """Create element selection tree"""
+        """Create element selection with periodic table"""
         group = QGroupBox("Element Selection")
         layout = QVBoxLayout(group)
         
-        # Search box
-        search_layout = QHBoxLayout()
-        search_layout.addWidget(QLabel("Search:"))
-        self.element_search = QLineEdit()
-        self.element_search.setPlaceholderText("Type element symbol or name")
-        self.element_search.textChanged.connect(self._filter_elements)
-        search_layout.addWidget(self.element_search)
-        layout.addLayout(search_layout)
-        
-        # Element tree
-        self.element_tree = QTreeWidget()
-        self.element_tree.setHeaderLabels(["Element", "Z", "Lines"])
-        self.element_tree.setColumnWidth(0, 100)
-        self.element_tree.setColumnWidth(1, 40)
-        self.element_tree.itemChanged.connect(self._on_element_selection_changed)
-        layout.addWidget(self.element_tree)
-        
-        # Populate with common elements
-        self._populate_element_tree()
-        
-        # Quick selection buttons
-        button_layout = QHBoxLayout()
-        self.select_all_btn = QPushButton("Select All")
-        self.select_all_btn.clicked.connect(self._select_all_elements)
-        button_layout.addWidget(self.select_all_btn)
-        
-        self.clear_all_btn = QPushButton("Clear All")
-        self.clear_all_btn.clicked.connect(self._clear_all_elements)
-        button_layout.addWidget(self.clear_all_btn)
-        layout.addLayout(button_layout)
+        # Create periodic table widget
+        self.periodic_table = PeriodicTableWidget()
+        self.periodic_table.elements_changed.connect(self._on_periodic_table_changed)
+        self.periodic_table.element_clicked.connect(self.element_clicked.emit)
+        self.periodic_table.element_info_requested.connect(self._show_element_info)
+        layout.addWidget(self.periodic_table)
         
         return group
     
@@ -246,115 +226,64 @@ class ElementPanel(QWidget):
         
         return group
     
-    def _populate_element_tree(self):
-        """Populate element tree with common elements"""
-        # Common elements organized by category
-        categories = {
-            "Light Elements": [
-                ("C", 6, "K"),
-                ("N", 7, "K"),
-                ("O", 8, "K"),
-                ("F", 9, "K"),
-                ("Na", 11, "K"),
-                ("Mg", 12, "K"),
-                ("Al", 13, "K"),
-                ("Si", 14, "K"),
-                ("P", 15, "K"),
-                ("S", 16, "K"),
-                ("Cl", 17, "K"),
-                ("K", 19, "K"),
-            ],
-            "Transition Metals": [
-                ("Ti", 22, "K, L"),
-                ("V", 23, "K, L"),
-                ("Cr", 24, "K, L"),
-                ("Mn", 25, "K, L"),
-                ("Fe", 26, "K, L"),
-                ("Co", 27, "K, L"),
-                ("Ni", 28, "K, L"),
-                ("Cu", 29, "K, L"),
-                ("Zn", 30, "K, L"),
-            ],
-            "Heavy Elements": [
-                ("Sr", 38, "K, L"),
-                ("Y", 39, "K, L"),
-                ("Zr", 40, "K, L"),
-                ("Mo", 42, "K, L"),
-                ("Ag", 47, "K, L"),
-                ("Sn", 50, "K, L"),
-                ("Ba", 56, "K, L"),
-                ("W", 74, "L, M"),
-                ("Pb", 82, "L, M"),
-            ]
-        }
-        
-        for category, elements in categories.items():
-            category_item = QTreeWidgetItem(self.element_tree, [category])
-            category_item.setFlags(category_item.flags() | Qt.ItemIsAutoTristate)
-            
-            for symbol, z, lines in elements:
-                element_item = QTreeWidgetItem(category_item, [symbol, str(z), lines])
-                element_item.setFlags(element_item.flags() | Qt.ItemIsUserCheckable)
-                element_item.setCheckState(0, Qt.Unchecked)
-        
-        self.element_tree.expandAll()
-    
-    def _filter_elements(self, text):
-        """Filter element tree based on search text"""
-        text = text.lower()
-        
-        for i in range(self.element_tree.topLevelItemCount()):
-            category = self.element_tree.topLevelItem(i)
-            category_visible = False
-            
-            for j in range(category.childCount()):
-                element = category.child(j)
-                symbol = element.text(0).lower()
-                z = element.text(1)
-                
-                if text in symbol or text in z:
-                    element.setHidden(False)
-                    category_visible = True
-                else:
-                    element.setHidden(True)
-            
-            category.setHidden(not category_visible)
-    
-    def _on_element_selection_changed(self, item, column):
-        """Handle element selection changes"""
-        if item.childCount() > 0:  # Category item
-            return
-        
-        self.selected_elements = []
-        for i in range(self.element_tree.topLevelItemCount()):
-            category = self.element_tree.topLevelItem(i)
-            for j in range(category.childCount()):
-                element = category.child(j)
-                if element.checkState(0) == Qt.Checked:
-                    self.selected_elements.append({
-                        'symbol': element.text(0),
-                        'z': int(element.text(1)),
-                        'lines': element.text(2)
-                    })
-        
+    def _on_periodic_table_changed(self, elements):
+        """Handle periodic table selection changes"""
+        self.selected_elements = elements
         self.elements_changed.emit(self.selected_elements)
     
-    def _select_all_elements(self):
-        """Select all visible elements"""
-        for i in range(self.element_tree.topLevelItemCount()):
-            category = self.element_tree.topLevelItem(i)
-            for j in range(category.childCount()):
-                element = category.child(j)
-                if not element.isHidden():
-                    element.setCheckState(0, Qt.Checked)
-    
-    def _clear_all_elements(self):
-        """Clear all element selections"""
-        for i in range(self.element_tree.topLevelItemCount()):
-            category = self.element_tree.topLevelItem(i)
-            for j in range(category.childCount()):
-                element = category.child(j)
-                element.setCheckState(0, Qt.Unchecked)
+    def _show_element_info(self, symbol, z):
+        """Show detailed element information dialog"""
+        # Get element data
+        info = get_element_info(symbol, z)
+        lines = get_element_lines(symbol, z)
+        
+        # Create dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{info['name']} ({symbol}) - Element Information")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Element info
+        info_text = QTextEdit()
+        info_text.setReadOnly(True)
+        info_text.setMaximumHeight(150)
+        
+        info_html = f"""
+        <h2>{info['name']} ({symbol})</h2>
+        <p><b>Atomic Number:</b> {z}</p>
+        <p><b>Atomic Weight:</b> {info['atomic_weight']:.4f} g/mol</p>
+        <p><b>Density:</b> {info['density']:.4f} g/cm³</p>
+        """
+        info_text.setHtml(info_html)
+        layout.addWidget(info_text)
+        
+        # Emission lines
+        lines_text = QTextEdit()
+        lines_text.setReadOnly(True)
+        lines_text.setFont(QFont("Courier", 10))
+        
+        lines_content = "<h3>X-ray Emission Lines</h3>"
+        
+        for series in ['K', 'L', 'M', 'N']:
+            if lines[series]:
+                lines_content += f"<p><b>{series} Series:</b></p><ul>"
+                for line in lines[series]:
+                    lines_content += f"<li>{line['name']}: {line['energy']:.3f} keV</li>"
+                lines_content += "</ul>"
+        
+        if not any(lines.values()):
+            lines_content += "<p><i>No emission line data available</i></p>"
+        
+        lines_text.setHtml(lines_content)
+        layout.addWidget(lines_text)
+        
+        # Close button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
     
     def _on_sample_type_changed(self, sample_type):
         """Enable/disable thickness input based on sample type"""
