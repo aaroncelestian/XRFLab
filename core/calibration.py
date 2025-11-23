@@ -556,7 +556,8 @@ class InstrumentCalibrator:
                 # Apply energy-dependent efficiency correction
                 # Simple model: efficiency drops at mid-energies (3-5 keV)
                 # This accounts for detector window absorption, dead layer, etc.
-                eff_correction = 1.0 - 0.5 * np.exp(-((line_energy - 4.0)**2) / 2.0)
+                # Reduced from 0.5 to 0.2 (was too aggressive)
+                eff_correction = 1.0 - 0.2 * np.exp(-((line_energy - 4.0)**2) / 2.0)
                 
                 intensity = line_data['relative_intensity'] * intensity_scale * eff_correction
                 
@@ -568,23 +569,16 @@ class InstrumentCalibrator:
                 fwhm = np.sqrt(fwhm_0_scaled**2 + 2.355**2 * epsilon * line_energy)
                 sigma = fwhm / 2.355
                 
-                # Add Gaussian peak
-                gaussian_peak = self.peak_fitter.gaussian(
-                    energy, intensity, line_energy, sigma
+                # Use Voigt profile (Gaussian ⊗ Lorentzian)
+                # Voigt naturally has extended tails and asymmetry
+                # gamma controls the Lorentzian contribution (tail strength)
+                gamma_ratio = 0.05  # gamma/sigma ratio (5% Lorentzian character)
+                gamma = gamma_ratio * sigma
+                
+                voigt_peak = self.peak_fitter.voigt(
+                    energy, intensity, line_energy, sigma, gamma
                 )
-                spectrum += gaussian_peak
-                
-                # Add shelf/tail component (incomplete charge collection)
-                # Shelf is a step function on the low-energy side
-                # Amplitude is ~1-5% of peak height, width ~3*sigma
-                shelf_fraction = 0.02  # 2% of peak intensity
-                shelf_width = 3.0 * sigma  # keV
-                
-                # Step function: 1 for E < peak_energy, 0 for E > peak_energy
-                # Smoothed with error function
-                from scipy.special import erf
-                shelf = shelf_fraction * intensity * 0.5 * (1 - erf((energy - line_energy) / shelf_width))
-                spectrum += shelf
+                spectrum += voigt_peak
             except Exception as e:
                 print(f"Error calculating peak for {line_data}: {e}")
                 raise
@@ -602,8 +596,8 @@ class InstrumentCalibrator:
             compton_energy = rh_ka_energy / (1 + rh_ka_energy / 511.0 * (1 - cos_theta))
             
             # Compton peak is broader and weaker than elastic scatter
-            compton_intensity = rh_scatter_scale * 0.3  # 30% of elastic scatter
-            fwhm_compton = 0.200  # Compton peaks are broader (~200 eV)
+            compton_intensity = rh_scatter_scale * 0.5  # 50% of elastic scatter (increased)
+            fwhm_compton = 0.250  # Compton peaks are broader (~250 eV)
             sigma_compton = fwhm_compton / 2.355
             
             spectrum += self.peak_fitter.gaussian(
