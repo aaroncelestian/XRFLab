@@ -5,7 +5,7 @@ Instrument calibration panel UI
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QLineEdit, QTextEdit,
                                QFileDialog, QProgressBar, QMessageBox, QSplitter,
-                               QCheckBox)
+                               QCheckBox, QDoubleSpinBox)
 from PySide6.QtCore import Qt, Signal, QThread
 from pathlib import Path
 import pyqtgraph as pg
@@ -18,7 +18,7 @@ class CalibrationWorker(QThread):
     finished = Signal(object)  # CalibrationResult
     progress = Signal(str)  # Progress message
     
-    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, experimental_params=None, use_measured_intensities=True):
+    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, experimental_params=None, use_measured_intensities=True, bg_params=None):
         super().__init__()
         self.calibrator = calibrator
         self.energy = energy
@@ -27,6 +27,7 @@ class CalibrationWorker(QThread):
         self.excitation_energy = excitation_energy
         self.experimental_params = experimental_params
         self.use_measured_intensities = use_measured_intensities
+        self.bg_params = bg_params or {}
     
     def run(self):
         """Run calibration in background thread"""
@@ -38,7 +39,8 @@ class CalibrationWorker(QThread):
                 self.concentrations,
                 self.excitation_energy,
                 use_measured_intensities=self.use_measured_intensities,
-                experimental_params=self.experimental_params
+                experimental_params=self.experimental_params,
+                bg_params=self.bg_params
             )
             self.finished.emit(result)
         except Exception as e:
@@ -162,28 +164,77 @@ class CalibrationPanel(QWidget):
     def _create_controls_group(self):
         """Create calibration control buttons"""
         group = QGroupBox("Calibration")
-        layout = QHBoxLayout(group)
+        layout = QVBoxLayout(group)
         
+        # Note: Background is pre-subtracted using "Apply BG" button
+        # No need to fit background during calibration
+        
+        # Background parameter controls with live preview
+        bg_params_layout = QHBoxLayout()
+        
+        bg_params_layout.addWidget(QLabel("a:"))
+        self.bg_a_spin = QDoubleSpinBox()
+        self.bg_a_spin.setRange(0, 1000)
+        self.bg_a_spin.setValue(0)  # Default: 0
+        self.bg_a_spin.setDecimals(1)
+        self.bg_a_spin.setSingleStep(10)
+        self.bg_a_spin.setToolTip("Background constant offset")
+        self.bg_a_spin.valueChanged.connect(self._update_background_preview)
+        bg_params_layout.addWidget(self.bg_a_spin)
+        
+        bg_params_layout.addWidget(QLabel("b:"))
+        self.bg_b_spin = QDoubleSpinBox()
+        self.bg_b_spin.setRange(-50, 50)
+        self.bg_b_spin.setValue(7.0)  # Default: 7
+        self.bg_b_spin.setDecimals(2)
+        self.bg_b_spin.setSingleStep(1)
+        self.bg_b_spin.setToolTip("Background linear coefficient")
+        self.bg_b_spin.valueChanged.connect(self._update_background_preview)
+        bg_params_layout.addWidget(self.bg_b_spin)
+        
+        bg_params_layout.addWidget(QLabel("c:"))
+        self.bg_c_spin = QDoubleSpinBox()
+        self.bg_c_spin.setRange(-1, 1)
+        self.bg_c_spin.setValue(-0.2)  # Default: -0.2
+        self.bg_c_spin.setDecimals(3)
+        self.bg_c_spin.setSingleStep(0.1)
+        self.bg_c_spin.setToolTip("Background quadratic coefficient")
+        self.bg_c_spin.valueChanged.connect(self._update_background_preview)
+        bg_params_layout.addWidget(self.bg_c_spin)
+        
+        # Apply background button
+        self.apply_bg_btn = QPushButton("Apply BG")
+        self.apply_bg_btn.setToolTip("Subtract background from spectrum before calibration")
+        self.apply_bg_btn.clicked.connect(self._apply_background_subtraction)
+        self.apply_bg_btn.setEnabled(False)
+        bg_params_layout.addWidget(self.apply_bg_btn)
+        
+        bg_params_layout.addStretch()
+        layout.addLayout(bg_params_layout)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
         self.calibrate_btn = QPushButton("Run Calibration")
         self.calibrate_btn.clicked.connect(self._run_calibration)
         self.calibrate_btn.setEnabled(False)
-        layout.addWidget(self.calibrate_btn)
+        btn_layout.addWidget(self.calibrate_btn)
         
         self.apply_btn = QPushButton("Apply Calibration")
         self.apply_btn.clicked.connect(self._apply_calibration)
         self.apply_btn.setEnabled(False)
-        layout.addWidget(self.apply_btn)
+        btn_layout.addWidget(self.apply_btn)
         
         self.save_btn = QPushButton("Save Calibration...")
         self.save_btn.clicked.connect(self._save_calibration)
         self.save_btn.setEnabled(False)
-        layout.addWidget(self.save_btn)
+        btn_layout.addWidget(self.save_btn)
         
         self.load_btn = QPushButton("Load Calibration...")
         self.load_btn.clicked.connect(self._load_calibration)
-        layout.addWidget(self.load_btn)
+        btn_layout.addWidget(self.load_btn)
         
-        layout.addStretch()
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
         
         return group
     
@@ -200,7 +251,7 @@ class CalibrationPanel(QWidget):
             "QTextEdit { background-color: #1e1e1e; color: #d4d4d4; "
             "font-family: 'Courier New', monospace; font-size: 10pt; }"
         )
-        self.terminal_output.setPlainText("Ready to calibrate...")
+        self.terminal_output.setPlainText("Will be implemented later...")
         layout.addWidget(QLabel("Optimization Progress:"))
         layout.addWidget(self.terminal_output)
         
@@ -223,32 +274,36 @@ class CalibrationPanel(QWidget):
         
         # Create plot with two subplots
         self.plot_widget = pg.GraphicsLayoutWidget()
+        self.plot_widget.setBackground('w')  # White background
         
         # Top plot: Measured vs Calculated
         self.spectrum_plot = self.plot_widget.addPlot(row=0, col=0)
-        self.spectrum_plot.setLabel('left', 'Counts')
-        self.spectrum_plot.setLabel('bottom', 'Energy (keV)')
-        self.spectrum_plot.setTitle('Calibration Fit')
+        self.spectrum_plot.setLabel('left', 'Counts', color='k')
+        self.spectrum_plot.setLabel('bottom', 'Energy (keV)', color='k')
+        self.spectrum_plot.setTitle('Calibration Fit', color='k')
         self.spectrum_plot.addLegend()
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
         
-        # Plot curves
+        # Plot curves with new colors
         self.measured_curve = self.spectrum_plot.plot(
-            pen=pg.mkPen('b', width=2), name='Measured'
+            pen=pg.mkPen('#00008B', width=2), name='Measured'  # Dark blue
         )
         self.calculated_curve = self.spectrum_plot.plot(
-            pen=pg.mkPen('r', width=2, style=Qt.DashLine), name='Calculated'
+            pen=pg.mkPen('r', width=2, style=Qt.DashLine), name='Calculated'  # Red
+        )
+        self.background_curve = self.spectrum_plot.plot(
+            pen=pg.mkPen('#FFA500', width=1, style=Qt.DotLine), name='Background'  # Orange
         )
         
         # Bottom plot: Residuals
         self.residual_plot = self.plot_widget.addPlot(row=1, col=0)
-        self.residual_plot.setLabel('left', 'Residuals')
-        self.residual_plot.setLabel('bottom', 'Energy (keV)')
+        self.residual_plot.setLabel('left', 'Residuals', color='k')
+        self.residual_plot.setLabel('bottom', 'Energy (keV)', color='k')
         self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
         self.residual_plot.addLine(y=0, pen=pg.mkPen('k', style=Qt.DashLine))
         
         self.residual_curve = self.residual_plot.plot(
-            pen=pg.mkPen('g', width=1)
+            pen=pg.mkPen('k', width=1)  # Black residuals
         )
         
         # Link x-axes
@@ -299,6 +354,12 @@ class CalibrationPanel(QWidget):
                 f"Loaded: {len(self.current_spectrum.energy)} channels, "
                 f"{self.current_spectrum.energy[0]:.2f}-{self.current_spectrum.energy[-1]:.2f} keV"
             )
+            
+            # Enable Apply BG button
+            self.apply_bg_btn.setEnabled(True)
+            
+            # Update background preview
+            self._update_background_preview()
             
             self._check_ready()
             
@@ -356,8 +417,17 @@ class CalibrationPanel(QWidget):
         print(f"  Live time: {self.current_spectrum.live_time} s")
         print(f"  Incident angle: {experimental_params.get('incident_angle', 'N/A')}°")
         
+        # Get background parameters from UI
+        # Note: Background is pre-subtracted, not fitted during calibration
+        bg_params = {
+            'bg_a': self.bg_a_spin.value(),
+            'bg_b': self.bg_b_spin.value(),
+            'bg_c': self.bg_c_spin.value(),
+            'fit_background': False  # Always False - background is pre-subtracted
+        }
+        
         # Run calibration in background thread
-        # Always use fisx FP (use_measured_intensities=False)
+        # Use fisx FP for consistent intensities between optimization and plotting
         self.worker = CalibrationWorker(
             self.calibrator,
             self.current_spectrum.energy,
@@ -365,11 +435,62 @@ class CalibrationPanel(QWidget):
             self.reference_concentrations,
             excitation_energy,
             experimental_params,
-            use_measured_intensities=False  # Use fisx FP
+            use_measured_intensities=False,  # Use fisx FP for all calculations
+            bg_params=bg_params
         )
         self.worker.finished.connect(self._on_calibration_finished)
         self.worker.progress.connect(self._on_calibration_progress)
         self.worker.start()
+    
+    def _update_background_preview(self):
+        """Update the background preview curve"""
+        if not hasattr(self, 'current_spectrum') or self.current_spectrum is None:
+            return
+        
+        # Get background parameters
+        a = self.bg_a_spin.value()
+        b = self.bg_b_spin.value()
+        c = self.bg_c_spin.value()
+        
+        # Calculate background: a + b*E + c*E²
+        energy = self.current_spectrum.energy
+        background = a + b * energy + c * energy**2
+        
+        # Update background curve
+        self.background_curve.setData(energy, background)
+    
+    def _apply_background_subtraction(self):
+        """Subtract the background from the current spectrum"""
+        if not hasattr(self, 'current_spectrum') or self.current_spectrum is None:
+            return
+        
+        # Store original spectrum if not already stored
+        if not hasattr(self, 'original_spectrum'):
+            from copy import deepcopy
+            self.original_spectrum = deepcopy(self.current_spectrum)
+        
+        # Get background parameters
+        a = self.bg_a_spin.value()
+        b = self.bg_b_spin.value()
+        c = self.bg_c_spin.value()
+        
+        # Calculate background
+        energy = self.original_spectrum.energy
+        background = a + b * energy + c * energy**2
+        
+        # Subtract background (ensure no negative values)
+        self.current_spectrum.counts = np.maximum(self.original_spectrum.counts - background, 0)
+        
+        # Update the measured curve to show background-subtracted data
+        self.measured_curve.setData(self.current_spectrum.energy, self.current_spectrum.counts)
+        
+        # Clear the background curve since it's been subtracted
+        self.background_curve.setData([], [])
+        
+        print(f"Background subtracted: {a:.1f} + {b:.2f}*E + {c:.3f}*E²")
+        QMessageBox.information(self, "Background Applied", 
+                               f"Background subtracted from spectrum.\n"
+                               f"Background: {a:.1f} + {b:.2f}*E + {c:.3f}*E²")
     
     def _on_calibration_progress(self, message):
         """Handle calibration progress updates"""
@@ -493,23 +614,24 @@ class CalibrationPanel(QWidget):
                     PeakFitter.EPSILON = self.calibration_result.epsilon
                     PeakFitter.VOIGT_GAMMA_RATIO = self.calibration_result.voigt_gamma_ratio
                     PeakFitter.USE_CALIBRATED_SHAPES = True
-                    
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load:\n{str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to load calibration:\n{str(e)}")
     
     def set_spectrum(self, spectrum):
-        """Set spectrum from main window"""
+        """Set the current spectrum for calibration (called from main window)"""
         self.current_spectrum = spectrum
-        if spectrum:
-            self.spectrum_info_label.setText(
-                f"✓ Loaded from main window: {len(spectrum.energy)} channels, "
-                f"{spectrum.energy[0]:.2f}-{spectrum.energy[-1]:.2f} keV"
-            )
-            self.spectrum_info_label.setStyleSheet("color: green; margin-top: 10px;")
-            self._check_ready()
-            
-            # Plot measured spectrum
+        
+        # Enable Apply BG button
+        self.apply_bg_btn.setEnabled(True)
+        
+        # Update background preview
+        self._update_background_preview()
+        
+        # Update measured curve
+        if hasattr(self, 'measured_curve'):
             self.measured_curve.setData(spectrum.energy, spectrum.counts)
+        
+        self._check_ready()
     
     def _update_calibration_plot(self, result: CalibrationResult):
         """Update plot with calibration results"""
@@ -537,21 +659,16 @@ class CalibrationPanel(QWidget):
             )
             print(f"Got {len(element_data)} element lines")
             
-            # Use FWHM_0, epsilon, intensity scale, Rh scatter scale, and background
+            # Use FWHM_0, epsilon, intensity scale, and Rh scatter scale
             # Note: these are stored in efficiency_params
+            # Background is pre-subtracted, so no background parameters needed
             intensity_scale = result.efficiency_params.get('intensity_scale', 1.0) if result.efficiency_params else 1.0
             rh_scatter_scale = result.efficiency_params.get('rh_scatter_scale', 0.0) if result.efficiency_params else 0.0
-            bg_a = result.efficiency_params.get('bg_a', 0.0) if result.efficiency_params else 0.0
-            bg_b = result.efficiency_params.get('bg_b', 0.0) if result.efficiency_params else 0.0
-            bg_c = result.efficiency_params.get('bg_c', 0.0) if result.efficiency_params else 0.0
             params = np.array([
                 result.fwhm_0,
                 result.epsilon,
                 intensity_scale,
-                rh_scatter_scale,
-                bg_a,
-                bg_b,
-                bg_c
+                rh_scatter_scale
             ])
             
             calculated_spectrum = self.calibrator._calculate_spectrum(

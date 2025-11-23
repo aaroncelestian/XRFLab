@@ -54,7 +54,7 @@ class SpectrumWidget(QWidget):
         plot_item.setLabel('left', 'Counts', units='')
         plot_item.setLabel('bottom', 'Energy', units='keV')
         plot_item.showGrid(x=True, y=True, alpha=0.3)
-        plot_item.setLogMode(False, True)  # Log Y-axis by default
+        plot_item.setLogMode(False, False)  # Linear Y-axis by default
         plot_item.addLegend()
         
         # Enable antialiasing for smooth lines

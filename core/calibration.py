@@ -39,16 +39,26 @@ class InstrumentCalibrator:
                   excitation_energy: float = 50.0,
                   initial_params: Dict = None,
                   use_measured_intensities: bool = True,
-                  experimental_params: Dict = None) -> CalibrationResult:
+                  experimental_params: Dict = None,
+                  bg_params: Dict = None) -> CalibrationResult:
         """
-        Calibrate instrument parameters using a reference standard
+        Calibrate instrument parameters using reference spectrum
+        
+        OPTIMIZATION STRATEGY:
+        1. Pre-calculate all emission line intensities using fisx (ONCE)
+        2. During optimization, only calculate peak shapes (Gaussians)
+        3. Optimize detector parameters: FWHM_0, epsilon, intensity_scale, rh_scatter
+        4. Future: Add sum peaks, escape peaks, detector efficiency curve
         
         Args:
             energy: Energy array (keV)
             counts: Measured counts
-            reference_concentrations: Dict of {element: concentration_ppm}
-            excitation_energy: X-ray tube voltage (keV)
-            initial_params: Initial guesses for parameters
+            reference_concentrations: Dict of element concentrations
+            excitation_energy: Tube voltage (keV)
+            use_measured_intensities: Use measured peak intensities vs fisx calculation
+            experimental_params: Dict with tube_element, current, live_time, etc.
+            initial_params: Initial parameter guesses
+            bg_params: Background parameters (optional)
             
         Returns:
             CalibrationResult with optimized parameters
@@ -62,26 +72,21 @@ class InstrumentCalibrator:
             }
         
         # Convert to parameter array for optimization
-        # Parameters: FWHM_0, epsilon, intensity_scale, rh_scatter_scale, bg_a, bg_b, bg_c
+        # Parameters: FWHM_0, epsilon, intensity_scale, rh_scatter_scale
+        # Background is pre-subtracted, so no background parameters needed
         p0 = [
-            0.120,      # FWHM_0: Start at 120 eV (typical for SDD)
-            0.0025,     # epsilon: Start at 2.5 eV
-            100.0,      # Overall intensity scaling factor (start much higher)
-            0.001,      # Rh tube scatter scaling (start small)
-            100.0,      # Background constant (a)
-            0.0,        # Background linear (b)
-            0.0         # Background quadratic (c)
+            0.110,      # FWHM_0: Start at 110 eV (middle of range)
+            0.00001,    # epsilon: Start at 0.00001 (Fano factor ~0.12 for Si)
+            1000.0,     # Overall intensity scaling factor
+            0.01        # Rh tube scatter scaling (start small)
         ]
         
         # Parameter bounds - must be a list of (min, max) tuples for each parameter
         bounds = [
-            (0.080, 0.200),     # FWHM_0: 80-200 eV (allow wider range)
-            (0.001, 0.006),     # EPSILON: 1-6 eV (wider range)
+            (0.070, 0.150),     # FWHM_0: 70-150 eV (realistic SDD range)
+            (0.000001, 0.0001), # EPSILON: Fano-like factor (much smaller with 2.355² multiplier)
             (10.0, 100000.0),   # Intensity scale: much wider range
-            (0.0, 2.0),         # Rh scatter scale: 0-200% (very wide)
-            (0.0, 2000.0),      # Background constant: 0-2000 counts
-            (-100.0, 100.0),    # Background linear: gentle slope
-            (-10.0, 10.0)       # Background quadratic: gentle curvature
+            (0.0, 0.5)          # Rh scatter scale: 0-50% (allow stronger Rh lines)
         ]
         
         # Prepare element data
@@ -109,6 +114,7 @@ class InstrumentCalibrator:
         print("Starting instrument calibration...")
         print(f"  Total elements in CSV: {len(reference_concentrations)}")
         print(f"  Element lines for calibration: {len(element_data)}")
+        print(f"  Pre-calculated intensities - will NOT recalculate during optimization")
         print(f"  Initial FWHM_0: {p0[0]:.4f} keV")
         print(f"  Initial EPSILON: {p0[1]:.6f} keV")
         
@@ -125,7 +131,7 @@ class InstrumentCalibrator:
                 self.iteration_count += 1
                 chi2 = self._objective_function(xk, energy, counts, element_data, experimental_params)
                 if self.iteration_count % 5 == 0:  # Print every 5 iterations
-                    print(f"  Iteration {self.iteration_count}: FWHM={xk[0]:.4f} keV, ε={xk[1]:.6f} keV, scale={xk[2]:.1f}, Rh={xk[3]:.4f}, bg={xk[4]:.0f}+{xk[5]:.1f}E+{xk[6]:.2f}E², χ²={chi2:.2f}")
+                    print(f"  Iteration {self.iteration_count}: FWHM={xk[0]:.4f} keV, ε={xk[1]:.6f} keV, scale={xk[2]:.1f}, Rh={xk[3]:.4f}, χ²={chi2:.2f}")
             
             print("Starting optimization...")
             try:
@@ -136,7 +142,7 @@ class InstrumentCalibrator:
                     method='L-BFGS-B',
                     bounds=bounds,
                     callback=callback,
-                    options={'maxiter': 100, 'disp': False, 'ftol': 1e-9, 'gtol': 1e-7}
+                    options={'maxiter': 500, 'disp': False, 'ftol': 1e-10, 'gtol': 1e-8}
                 )
             except Exception as opt_error:
                 print(f"Optimization error: {opt_error}")
@@ -150,16 +156,13 @@ class InstrumentCalibrator:
             print(f"Result.x values: {result.x}")
             
             # Extract optimized parameters
-            if len(result.x) != 7:
-                raise ValueError(f"Expected 7 optimized parameters, got {len(result.x)}: {result.x}")
+            if len(result.x) != 4:
+                raise ValueError(f"Expected 4 optimized parameters, got {len(result.x)}: {result.x}")
             
             fwhm_0_opt = result.x[0]
             epsilon_opt = result.x[1]
             intensity_scale_opt = result.x[2]
             rh_scatter_scale_opt = result.x[3]
-            bg_a_opt = result.x[4]
-            bg_b_opt = result.x[5]
-            bg_c_opt = result.x[6]
             gamma_ratio_opt = 0.0  # Not used for Gaussian peaks
             
             # Calculate final fit quality
@@ -182,7 +185,6 @@ class InstrumentCalibrator:
             print(f"  Optimized EPSILON: {epsilon_opt:.6f} keV")
             print(f"  Optimized intensity scale: {intensity_scale_opt:.1f}")
             print(f"  Optimized Rh scatter scale: {rh_scatter_scale_opt:.4f}")
-            print(f"  Optimized background: {bg_a_opt:.0f} + {bg_b_opt:.2f}*E + {bg_c_opt:.3f}*E²")
             print(f"  R²: {r_squared:.4f}")
             print(f"  χ²: {chi_squared:.2f}")
             
@@ -192,10 +194,7 @@ class InstrumentCalibrator:
                 voigt_gamma_ratio=gamma_ratio_opt,
                 efficiency_params={
                     'intensity_scale': intensity_scale_opt,
-                    'rh_scatter_scale': rh_scatter_scale_opt,
-                    'bg_a': bg_a_opt,
-                    'bg_b': bg_b_opt,
-                    'bg_c': bg_c_opt
+                    'rh_scatter_scale': rh_scatter_scale_opt
                 },
                 chi_squared=chi_squared,
                 r_squared=r_squared,
@@ -540,32 +539,76 @@ class InstrumentCalibrator:
             Calculated spectrum
         """
         try:
-            fwhm_0, epsilon, intensity_scale, rh_scatter_scale, bg_a, bg_b, bg_c = params
+            fwhm_0, epsilon, intensity_scale, rh_scatter_scale = params
         except ValueError as e:
             print(f"Error unpacking params: {params}")
-            print(f"  Expected 7 values, got {len(params)}")
+            print(f"  Expected 4 values, got {len(params)}")
             raise
         
-        # Start with polynomial background: a + b*E + c*E²
-        spectrum = bg_a + bg_b * energy + bg_c * energy**2
+        # Start with zero background (background is pre-subtracted)
+        spectrum = np.zeros_like(energy)
         
         # Add fluorescence lines
         for line_data in element_data:
             try:
                 line_energy = line_data['energy']
-                intensity = line_data['relative_intensity'] * intensity_scale
                 
-                # Calculate FWHM at this energy
-                fwhm = np.sqrt(fwhm_0**2 + 2.35 * epsilon * line_energy)
+                # Apply energy-dependent efficiency correction
+                # Simple model: efficiency drops at mid-energies (3-5 keV)
+                # This accounts for detector window absorption, dead layer, etc.
+                eff_correction = 1.0 - 0.5 * np.exp(-((line_energy - 4.0)**2) / 2.0)
+                
+                intensity = line_data['relative_intensity'] * intensity_scale * eff_correction
+                
+                # Calculate FWHM at this energy: FWHM² = FWHM₀² + 2.355² · ε · E
+                # Standard detector resolution formula with Fano statistics
+                # But use energy-scaled FWHM_0 for better low-energy resolution
+                fwhm_0_scaled = fwhm_0 * np.sqrt(line_energy / 6.0)  # Scale with sqrt(E/6keV)
+                fwhm_0_scaled = max(fwhm_0_scaled, 0.070)  # Minimum 70 eV
+                fwhm = np.sqrt(fwhm_0_scaled**2 + 2.355**2 * epsilon * line_energy)
                 sigma = fwhm / 2.355
                 
-                # Add Gaussian peak (sharper than Voigt for XRF)
-                spectrum += self.peak_fitter.gaussian(
+                # Add Gaussian peak
+                gaussian_peak = self.peak_fitter.gaussian(
                     energy, intensity, line_energy, sigma
                 )
+                spectrum += gaussian_peak
+                
+                # Add shelf/tail component (incomplete charge collection)
+                # Shelf is a step function on the low-energy side
+                # Amplitude is ~1-5% of peak height, width ~3*sigma
+                shelf_fraction = 0.02  # 2% of peak intensity
+                shelf_width = 3.0 * sigma  # keV
+                
+                # Step function: 1 for E < peak_energy, 0 for E > peak_energy
+                # Smoothed with error function
+                from scipy.special import erf
+                shelf = shelf_fraction * intensity * 0.5 * (1 - erf((energy - line_energy) / shelf_width))
+                spectrum += shelf
             except Exception as e:
                 print(f"Error calculating peak for {line_data}: {e}")
                 raise
+        
+        # Add Compton scatter from Rh tube
+        # Compton scatter is inelastic - photon loses energy
+        # E_compton = E₀ / (1 + E₀/511 * (1 - cos(θ)))
+        # For Rh Kα (20.2 keV) at 90°: E_compton ≈ 18.8 keV
+        if rh_scatter_scale > 0 and experimental_params:
+            rh_ka_energy = 20.216  # keV
+            scatter_angle = 90.0  # degrees (typical geometry)
+            cos_theta = np.cos(np.radians(scatter_angle))
+            
+            # Compton formula
+            compton_energy = rh_ka_energy / (1 + rh_ka_energy / 511.0 * (1 - cos_theta))
+            
+            # Compton peak is broader and weaker than elastic scatter
+            compton_intensity = rh_scatter_scale * 0.3  # 30% of elastic scatter
+            fwhm_compton = 0.200  # Compton peaks are broader (~200 eV)
+            sigma_compton = fwhm_compton / 2.355
+            
+            spectrum += self.peak_fitter.gaussian(
+                energy, compton_intensity, compton_energy, sigma_compton
+            )
         
         # Add Rh tube scatter lines if rh_scatter_scale > 0
         if rh_scatter_scale > 0 and experimental_params:
@@ -576,9 +619,14 @@ class InstrumentCalibrator:
             rh_lines = self._get_tube_scatter_lines(tube_element, excitation_energy, rh_scatter_scale)
             for line_data in rh_lines:
                 line_energy = line_data['energy']
+                # Rh scatter lines do NOT get efficiency correction
+                # They are scattered from the tube, not fluorescence from sample
                 intensity = line_data['relative_intensity']
                 
-                fwhm = np.sqrt(fwhm_0**2 + 2.35 * epsilon * line_energy)
+                # Use energy-scaled FWHM for Rh lines too
+                fwhm_0_scaled = fwhm_0 * np.sqrt(line_energy / 6.0)
+                fwhm_0_scaled = max(fwhm_0_scaled, 0.070)
+                fwhm = np.sqrt(fwhm_0_scaled**2 + 2.355**2 * epsilon * line_energy)
                 sigma = fwhm / 2.355
                 
                 spectrum += self.peak_fitter.gaussian(
@@ -642,15 +690,20 @@ class InstrumentCalibrator:
             Chi-squared value
         """
         try:
+            # Downsample for speed during optimization (every 4th point)
+            downsample = 4
+            energy_ds = energy[::downsample]
+            measured_ds = measured_counts[::downsample]
+            
             # Calculate spectrum with Rh lines added dynamically
-            calculated = self._calculate_spectrum(energy, element_data, params, experimental_params)
+            calculated = self._calculate_spectrum(energy_ds, element_data, params, experimental_params)
             
             if np.max(calculated) == 0:
                 return 1e10  # No calculated signal
             
             # Chi-squared with Poisson weighting
             # Only use regions where there's signal
-            mask = measured_counts > 10  # Only fit where we have signal
+            mask = measured_ds > 10  # Only fit where we have signal
             
             if np.sum(mask) == 0:
                 print("Warning: No signal points found!")
@@ -658,19 +711,14 @@ class InstrumentCalibrator:
             
             # Weighted residuals (Poisson statistics: weight = 1/sqrt(counts))
             # No additional scaling - intensity_scale parameter handles this
-            residuals = measured_counts[mask] - calculated[mask]
-            weights = 1.0 / np.sqrt(measured_counts[mask])  # Poisson weighting
+            residuals = measured_ds[mask] - calculated[mask]
+            weights = 1.0 / np.sqrt(measured_ds[mask])  # Poisson weighting
             weighted_residuals = residuals * weights
             chi_squared = np.sum(weighted_residuals**2) / np.sum(mask)
             
-            # Add LIGHT penalty for unrealistic parameters (regularization)
-            # This guides the optimizer but doesn't dominate
-            fwhm_0, epsilon, intensity_scale, rh_scatter_scale, bg_a, bg_b, bg_c = params
-            fwhm_penalty = ((fwhm_0 - 0.120)**2) / 0.01  # Weak preference for ~120 eV
-            epsilon_penalty = ((epsilon - 0.0025)**2) / 0.001  # Weak preference for ~2.5 eV
-            # No penalty on other parameters - let them find best values
-            
-            total_cost = chi_squared + 0.001 * (fwhm_penalty + epsilon_penalty)  # Very weak regularization
+            # No regularization - let the data drive the fit
+            # The optimizer will find the best FWHM based on the measured peaks
+            total_cost = chi_squared
             
             # Check for invalid values
             if not np.isfinite(total_cost):
