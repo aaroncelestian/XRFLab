@@ -3,7 +3,7 @@ Results panel for displaying quantification results and fit statistics
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QGroupBox, QTableWidget, QTableWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QLabel, QTextEdit
 )
 from PySide6.QtCore import Qt
@@ -20,23 +20,29 @@ class ResultsPanel(QWidget):
         self._setup_ui()
     
     def _setup_ui(self):
-        """Setup the panel layout"""
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        """Setup the panel layout with three columns"""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
         
-        # Fit statistics group
+        # Create horizontal layout for three columns
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(5)
+        
+        # Column 1: Fit statistics
         stats_group = self._create_statistics_group()
-        layout.addWidget(stats_group)
+        columns_layout.addWidget(stats_group, stretch=1)
         
-        # Results table group
+        # Column 2: Quantification results
         results_group = self._create_results_table_group()
-        layout.addWidget(results_group, stretch=1)
+        columns_layout.addWidget(results_group, stretch=2)
         
-        # Peak identification group
+        # Column 3: Peak identification
         peaks_group = self._create_peaks_group()
-        layout.addWidget(peaks_group)
+        columns_layout.addWidget(peaks_group, stretch=1)
         
-        # Export button
+        main_layout.addLayout(columns_layout)
+        
+        # Export button at the bottom (full width)
         self.export_button = QPushButton("Export Results")
         self.export_button.setStyleSheet("""
             QPushButton {
@@ -53,7 +59,7 @@ class ResultsPanel(QWidget):
                 background-color: #0D47A1;
             }
         """)
-        layout.addWidget(self.export_button)
+        main_layout.addWidget(self.export_button)
     
     def _create_statistics_group(self):
         """Create fit statistics display group"""

@@ -112,11 +112,16 @@ def generate_sample_spectrum(
     spectrum = Spectrum(
         energy=energy,
         counts=counts.astype(float),
-        live_time=100.0,
-        real_time=105.0,
+        live_time=30.0,  # seconds
+        real_time=31.5,  # seconds (with ~5% dead time)
         metadata={
-            'description': 'Synthetic XRF spectrum',
-            'elements': elements
+            'description': 'NIST SRM 2586 Trace Elements in Soil',
+            'elements': elements,
+            'excitation_energy': 50.0,  # keV (tube voltage)
+            'tube_current': 0.669,  # mA (669 µA converted to mA)
+            'incident_angle': 45.0,  # degrees
+            'takeoff_angle': 45.0,  # degrees
+            'tube_element': 'Rh'  # Rhodium tube
         }
     )
     

@@ -62,27 +62,31 @@ class InstrumentCalibrator:
             }
         
         # Convert to parameter array for optimization
-        # Use Gaussian peaks (no Voigt gamma) for sharper, more realistic XRF peaks
+        # Parameters: FWHM_0, epsilon, intensity_scale
         p0 = [
-            initial_params['fwhm_0'],
-            initial_params['epsilon']
+            initial_params['fwhm_0'],     # Detector resolution at 0 keV
+            initial_params['epsilon'],    # Energy-dependent broadening
+            1.0                           # Overall intensity scaling factor
         ]
         
         # Parameter bounds - must be a list of (min, max) tuples for each parameter
         bounds = [
-            (0.020, 0.200),   # FWHM_0: 20-200 eV
-            (0.0005, 0.0100)  # EPSILON: 0.5-10 eV  
+            (0.050, 0.250),    # FWHM_0: 50-250 eV (typical for XRF detectors)
+            (0.0005, 0.0050),  # EPSILON: 0.5-5 eV (energy-dependent broadening)
+            (0.01, 100.0)      # Intensity scale: allow wide range for detector efficiency
         ]
         
         # Prepare element data
         try:
             if use_measured_intensities:
                 # Extract intensities from measured spectrum
+                # This is faster and works well for calibration
                 element_data = self._prepare_element_data_from_spectrum(
                     energy, counts, reference_concentrations, excitation_energy, initial_params
                 )
             else:
-                # Use concentrations as proxy (less accurate)
+                # Use fisx fundamental parameters to calculate intensities
+                # This is slower but more physically accurate
                 element_data = self._prepare_element_data(
                     reference_concentrations, 
                     excitation_energy,
@@ -107,6 +111,14 @@ class InstrumentCalibrator:
             test_chi2 = self._objective_function(p0, energy, counts, element_data)
             print(f"  Initial χ²: {test_chi2:.2f}")
             
+            # Callback to show progress
+            self.iteration_count = 0
+            def callback(xk):
+                self.iteration_count += 1
+                chi2 = self._objective_function(xk, energy, counts, element_data)
+                if self.iteration_count % 5 == 0:  # Print every 5 iterations
+                    print(f"  Iteration {self.iteration_count}: FWHM={xk[0]:.4f} keV, ε={xk[1]:.6f} keV, scale={xk[2]:.4f}, χ²={chi2:.4f}")
+            
             print("Starting optimization...")
             try:
                 result = optimize.minimize(
@@ -115,7 +127,8 @@ class InstrumentCalibrator:
                     args=(energy, counts, element_data),
                     method='L-BFGS-B',
                     bounds=bounds,
-                    options={'maxiter': 100, 'disp': True}
+                    callback=callback,
+                    options={'maxiter': 100, 'disp': False, 'ftol': 1e-9, 'gtol': 1e-7}
                 )
             except Exception as opt_error:
                 print(f"Optimization error: {opt_error}")
@@ -129,11 +142,12 @@ class InstrumentCalibrator:
             print(f"Result.x values: {result.x}")
             
             # Extract optimized parameters
-            if len(result.x) != 2:
-                raise ValueError(f"Expected 2 optimized parameters, got {len(result.x)}: {result.x}")
+            if len(result.x) != 3:
+                raise ValueError(f"Expected 3 optimized parameters, got {len(result.x)}: {result.x}")
             
             fwhm_0_opt = result.x[0]
             epsilon_opt = result.x[1]
+            intensity_scale_opt = result.x[2]
             gamma_ratio_opt = 0.0  # Not used for Gaussian peaks
             
             # Calculate final fit quality
@@ -154,6 +168,7 @@ class InstrumentCalibrator:
             print(f"\nCalibration complete!")
             print(f"  Optimized FWHM_0: {fwhm_0_opt:.4f} keV")
             print(f"  Optimized EPSILON: {epsilon_opt:.6f} keV")
+            print(f"  Optimized intensity scale: {intensity_scale_opt:.4f}")
             print(f"  Optimized gamma/sigma: {gamma_ratio_opt:.3f}")
             print(f"  R²: {r_squared:.4f}")
             print(f"  χ²: {chi_squared:.2f}")
@@ -162,7 +177,7 @@ class InstrumentCalibrator:
                 fwhm_0=fwhm_0_opt,
                 epsilon=epsilon_opt,
                 voigt_gamma_ratio=gamma_ratio_opt,
-                efficiency_params={},  # TODO: implement efficiency calibration
+                efficiency_params={'intensity_scale': intensity_scale_opt},
                 chi_squared=chi_squared,
                 r_squared=r_squared,
                 success=result.success,
@@ -275,6 +290,67 @@ class InstrumentCalibrator:
         print(f"  Extracted {len(element_data)} lines with measured intensities")
         return element_data
     
+    def _add_tube_scatter_lines(self, tube_element: str, excitation_energy: float) -> List[Dict]:
+        """
+        Add tube scatter lines (Rh K, L lines from X-ray tube)
+        
+        These are scattered tube photons that reach the detector.
+        They should be included in calculated spectrum but marked as tube lines.
+        
+        Args:
+            tube_element: Tube anode element (e.g., 'Rh', 'W', 'Mo')
+            excitation_energy: Tube voltage (keV)
+            
+        Returns:
+            List of tube scatter line dicts
+        """
+        from core.xray_data import get_element_lines
+        
+        tube_z_map = {'Rh': 45, 'W': 74, 'Mo': 42, 'Ag': 47, 'Cu': 29, 'Cr': 24}
+        z = tube_z_map.get(tube_element, 45)
+        
+        tube_lines = []
+        try:
+            lines_data = get_element_lines(tube_element, z)
+            
+            # Estimate scatter intensity as ~0.1-0.5% of fluorescence signal
+            # This is a rough approximation - actual scatter depends on:
+            # - Tube-sample-detector geometry
+            # - Sample matrix (more scatter from light elements)
+            # - Tube filters
+            # Typical range: 0.001-0.005 (0.1-0.5%)
+            scatter_fraction = 0.002  # 0.2% is more realistic for filtered tubes
+            
+            # Add K lines if below excitation energy
+            for line in lines_data.get('K', []):
+                if line['energy'] < excitation_energy:
+                    tube_lines.append({
+                        'element': f'{tube_element}_tube',  # Mark as tube line
+                        'line': line['name'],
+                        'energy': line['energy'],
+                        'relative_intensity': scatter_fraction * line.get('relative_intensity', 1.0),
+                        'is_tube_scatter': True
+                    })
+            
+            # Add L lines
+            for line in lines_data.get('L', []):
+                if line['energy'] < excitation_energy:
+                    tube_lines.append({
+                        'element': f'{tube_element}_tube',
+                        'line': line['name'],
+                        'energy': line['energy'],
+                        'relative_intensity': scatter_fraction * line.get('relative_intensity', 1.0),
+                        'is_tube_scatter': True
+                    })
+            
+            if tube_lines:
+                print(f"  Added {len(tube_lines)} {tube_element} tube scatter lines")
+                
+        except Exception as e:
+            print(f"  Warning: Could not add tube scatter lines: {e}")
+        
+        return tube_lines
+    
     def _prepare_element_data(self, 
                               concentrations: Dict[str, float],
                               excitation_energy: float,
@@ -308,12 +384,15 @@ class InstrumentCalibrator:
             # Use experimental parameters if provided
             incident_angle = 45.0
             takeoff_angle = 45.0
+            tube_element = 'Rh'  # Default Rhodium tube
             if experimental_params:
                 incident_angle = experimental_params.get('incident_angle', 45.0)
                 takeoff_angle = experimental_params.get('takeoff_angle', 45.0)
+                tube_element = experimental_params.get('tube_element', 'Rh')
             
             fisx_calc = FisxCalculator(
                 excitation_energy=excitation_energy,
+                tube_element=tube_element,
                 incident_angle=incident_angle,
                 takeoff_angle=takeoff_angle
             )
@@ -321,6 +400,12 @@ class InstrumentCalibrator:
             
             # Convert fisx results to element_data format
             element_data = convert_fisx_to_element_data(intensities, excitation_energy)
+            
+            # Add tube scatter lines (Rh K and L lines from tube)
+            # These are scattered tube photons that reach the detector
+            # They should be included in the calculated spectrum but not used for quantification
+            tube_scatter_lines = self._add_tube_scatter_lines(tube_element, excitation_energy)
+            element_data.extend(tube_scatter_lines)
             
             print(f"  Calculated {len(element_data)} lines using fisx (PyMca FP)")
             return element_data
@@ -430,16 +515,16 @@ class InstrumentCalibrator:
         Args:
             energy: Energy array
             element_data: List of element line data
-            params: [fwhm_0, epsilon, gamma_ratio]
+            params: [fwhm_0, epsilon, intensity_scale]
             
         Returns:
             Calculated spectrum
         """
         try:
-            fwhm_0, epsilon = params
+            fwhm_0, epsilon, intensity_scale = params
         except ValueError as e:
             print(f"Error unpacking params: {params}")
-            print(f"  Expected 2 values, got {len(params)}")
+            print(f"  Expected 3 values, got {len(params)}")
             raise
         
         spectrum = np.zeros_like(energy)
@@ -447,7 +532,7 @@ class InstrumentCalibrator:
         for line_data in element_data:
             try:
                 line_energy = line_data['energy']
-                intensity = line_data['relative_intensity']
+                intensity = line_data['relative_intensity'] * intensity_scale
                 
                 # Calculate FWHM at this energy
                 fwhm = np.sqrt(fwhm_0**2 + 2.35 * epsilon * line_energy)
@@ -483,37 +568,36 @@ class InstrumentCalibrator:
         try:
             calculated = self._calculate_spectrum(energy, element_data, params)
             
-            # Normalize both to same total intensity for comparison
-            # This removes absolute intensity differences and focuses on peak shapes
-            measured_norm = measured_counts / np.sum(measured_counts)
-            calculated_norm = calculated / np.sum(calculated)
-            
-            # For plotting, scale calculated to match measured peak height
+            # Scale calculated to match measured using least squares
+            # This finds the best intensity scaling factor
             if np.max(calculated) > 0:
-                scale_factor = np.max(measured_counts) / np.max(calculated)
+                # Optimal scaling: minimize ||measured - scale*calculated||^2
+                scale_factor = np.sum(measured_counts * calculated) / np.sum(calculated * calculated)
                 calculated_scaled = calculated * scale_factor
             else:
-                calculated_scaled = calculated
+                return 1e10  # No calculated signal
             
-            # Chi-squared (weighted by counts for Poisson statistics)
-            # Only use regions where there's signal (avoid dividing by zero in background)
+            # Chi-squared with Poisson weighting
+            # Only use regions where there's signal
             mask = measured_counts > 10  # Only fit where we have signal
             
             if np.sum(mask) == 0:
                 print("Warning: No signal points found!")
                 return 1e10  # Return large penalty
             
-            # Use normalized spectra for comparison (focuses on shapes, not absolute intensities)
-            error = measured_norm[mask] - calculated_norm[mask]
-            chi_squared = np.sum(error**2)
+            # Weighted residuals (Poisson statistics: weight = 1/sqrt(counts))
+            residuals = measured_counts[mask] - calculated_scaled[mask]
+            weights = 1.0 / np.sqrt(measured_counts[mask])  # Poisson weighting
+            weighted_residuals = residuals * weights
+            chi_squared = np.sum(weighted_residuals**2) / np.sum(mask)
             
-            # Add penalty for unrealistic parameters (regularization)
-            # Prefer FWHM around 50-150 eV and epsilon around 1-3 eV
+            # Add LIGHT penalty for unrealistic parameters (regularization)
+            # This guides the optimizer but doesn't dominate
             fwhm_0, epsilon = params
-            fwhm_penalty = ((fwhm_0 - 0.080)**2) / 0.01  # Prefer ~80 eV
-            epsilon_penalty = ((epsilon - 0.002)**2) / 0.0001  # Prefer ~2 eV
+            fwhm_penalty = ((fwhm_0 - 0.080)**2) / 0.1  # Weak preference for ~80 eV
+            epsilon_penalty = ((epsilon - 0.002)**2) / 0.001  # Weak preference for ~2 eV
             
-            total_cost = chi_squared + 0.1 * (fwhm_penalty + epsilon_penalty)
+            total_cost = chi_squared + 0.01 * (fwhm_penalty + epsilon_penalty)  # Much weaker regularization
             
             # Check for invalid values
             if not np.isfinite(total_cost):

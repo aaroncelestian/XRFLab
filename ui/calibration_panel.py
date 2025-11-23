@@ -17,7 +17,7 @@ class CalibrationWorker(QThread):
     finished = Signal(object)  # CalibrationResult
     progress = Signal(str)  # Progress message
     
-    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, experimental_params=None):
+    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, experimental_params=None, use_measured_intensities=True):
         super().__init__()
         self.calibrator = calibrator
         self.energy = energy
@@ -25,6 +25,7 @@ class CalibrationWorker(QThread):
         self.concentrations = concentrations
         self.excitation_energy = excitation_energy
         self.experimental_params = experimental_params
+        self.use_measured_intensities = use_measured_intensities
     
     def run(self):
         """Run calibration in background thread"""
@@ -35,6 +36,7 @@ class CalibrationWorker(QThread):
                 self.counts,
                 self.concentrations,
                 self.excitation_energy,
+                use_measured_intensities=self.use_measured_intensities,
                 experimental_params=self.experimental_params
             )
             self.finished.emit(result)
@@ -72,15 +74,6 @@ class CalibrationPanel(QWidget):
         """Initialize the user interface"""
         layout = QVBoxLayout(self)
         
-        # Compact instructions
-        instructions = QLabel(
-            "<b>Instrument Calibration:</b> "
-            "Load spectrum from main window → Load concentrations CSV → Run calibration → Apply/Save"
-        )
-        instructions.setWordWrap(True)
-        instructions.setStyleSheet("padding: 5px; background-color: #f0f0f0; border-radius: 3px;")
-        layout.addWidget(instructions)
-        
         # Create splitter for controls and plot
         splitter = QSplitter(Qt.Horizontal)
         
@@ -117,7 +110,7 @@ class CalibrationPanel(QWidget):
         
         splitter.addWidget(controls_widget)
         splitter.addWidget(plot_widget)
-        splitter.setSizes([400, 600])
+        splitter.setSizes([350, 850])  # Give more space to plot
         
         layout.addWidget(splitter)
     
@@ -170,6 +163,18 @@ class CalibrationPanel(QWidget):
         group = QGroupBox("Calibration")
         layout = QHBoxLayout(group)
         
+        # Calibration method checkbox
+        self.use_fisx_checkbox = QCheckBox("Use fisx FP for calibration (recommended)")
+        self.use_fisx_checkbox.setChecked(True)  # Default to fisx (physically correct)
+        self.use_fisx_checkbox.setToolTip(
+            "Checked: Optimize FWHM using fisx-calculated intensities (recommended)\n"
+            "  - Uses known concentrations + physics to calculate expected intensities\n"
+            "  - No circular dependency\n\n"
+            "Unchecked: Optimize FWHM using measured peak intensities (faster but less accurate)\n"
+            "  - Requires peak fitting first (circular dependency)"
+        )
+        layout.addWidget(self.use_fisx_checkbox)
+        
         self.calibrate_btn = QPushButton("Run Calibration")
         self.calibrate_btn.clicked.connect(self._run_calibration)
         self.calibrate_btn.setEnabled(False)
@@ -200,7 +205,8 @@ class CalibrationPanel(QWidget):
         
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setMaximumHeight(150)
+        self.results_text.setMaximumHeight(100)  # Reduced from 150
+        self.results_text.setMinimumHeight(80)
         self.results_text.setPlainText("No calibration results yet")
         layout.addWidget(self.results_text)
         
@@ -244,6 +250,11 @@ class CalibrationPanel(QWidget):
         
         # Link x-axes
         self.residual_plot.setXLink(self.spectrum_plot)
+        
+        # Set row heights: spectrum plot gets 2x height of residuals plot
+        # This makes residuals 50% less tall (1/3 vs 2/3 of total height)
+        self.plot_widget.ci.layout.setRowStretchFactor(0, 2)  # Spectrum plot
+        self.plot_widget.ci.layout.setRowStretchFactor(1, 1)  # Residuals plot
         
         layout.addWidget(self.plot_widget)
         
@@ -332,16 +343,26 @@ class CalibrationPanel(QWidget):
                 'incident_angle': self.current_spectrum.metadata.get('incident_angle', 45.0),
                 'takeoff_angle': self.current_spectrum.metadata.get('takeoff_angle', 45.0),
                 'tube_current': self.current_spectrum.metadata.get('tube_current', 1.0),
+                'tube_element': self.current_spectrum.metadata.get('tube_element', 'Rh'),
             }
         
+        # Print experimental parameters for verification
+        print("Updated experimental parameters from spectrum metadata:")
+        print(f"  Excitation: {excitation_energy} keV")
+        print(f"  Current: {experimental_params.get('tube_current', 'N/A')} mA")
+        print(f"  Live time: {self.current_spectrum.live_time} s")
+        print(f"  Incident angle: {experimental_params.get('incident_angle', 'N/A')}°")
+        
         # Run calibration in background thread
+        use_measured = not self.use_fisx_checkbox.isChecked()  # Inverted: checked = use fisx
         self.worker = CalibrationWorker(
             self.calibrator,
             self.current_spectrum.energy,
             self.current_spectrum.counts,
             self.reference_concentrations,
             excitation_energy,
-            experimental_params
+            experimental_params,
+            use_measured_intensities=use_measured
         )
         self.worker.finished.connect(self._on_calibration_finished)
         self.worker.progress.connect(self._on_calibration_progress)
@@ -491,16 +512,33 @@ class CalibrationPanel(QWidget):
             return
         
         try:
+            print("Updating calibration plot...")
+            # Get experimental parameters from spectrum metadata
+            excitation_energy = float(self.current_spectrum.metadata.get('excitation_energy', 50.0))
+            experimental_params = {}
+            if hasattr(self.current_spectrum, 'metadata') and self.current_spectrum.metadata:
+                experimental_params = {
+                    'incident_angle': self.current_spectrum.metadata.get('incident_angle', 45.0),
+                    'takeoff_angle': self.current_spectrum.metadata.get('takeoff_angle', 45.0),
+                    'tube_element': self.current_spectrum.metadata.get('tube_element', 'Rh'),
+                }
+            
+            print(f"Calculating element data with fisx...")
             # Calculate spectrum with optimized parameters
             element_data = self.calibrator._prepare_element_data(
                 self.reference_concentrations,
-                float(self.current_spectrum.metadata.get('excitation_energy', 50.0))
+                excitation_energy,
+                experimental_params
             )
+            print(f"Got {len(element_data)} element lines")
             
-            # Only use FWHM_0 and epsilon (Gaussian peaks, no gamma)
+            # Use FWHM_0, epsilon, and intensity scale
+            # Note: intensity_scale is stored in efficiency_params for now
+            intensity_scale = result.efficiency_params.get('intensity_scale', 1.0) if result.efficiency_params else 1.0
             params = np.array([
                 result.fwhm_0,
-                result.epsilon
+                result.epsilon,
+                intensity_scale
             ])
             
             calculated_spectrum = self.calibrator._calculate_spectrum(
@@ -519,6 +557,16 @@ class CalibrationPanel(QWidget):
             # Calculate residuals
             residuals = self.current_spectrum.counts - calculated_spectrum_scaled
             
+            # Calculate fit quality with fisx-calculated spectrum
+            ss_res = np.sum(residuals**2)
+            ss_tot = np.sum((self.current_spectrum.counts - np.mean(self.current_spectrum.counts))**2)
+            r_squared_fisx = 1 - (ss_res / ss_tot)
+            chi_squared_fisx = ss_res / len(self.current_spectrum.counts)
+            
+            print(f"Fit quality with fisx-calculated spectrum:")
+            print(f"  R² = {r_squared_fisx:.4f}")
+            print(f"  χ² = {chi_squared_fisx:.2f}")
+            
             # Update plots
             self.measured_curve.setData(
                 self.current_spectrum.energy,
@@ -536,6 +584,20 @@ class CalibrationPanel(QWidget):
             # Auto-range
             self.spectrum_plot.autoRange()
             self.residual_plot.autoRange()
+            
+            # Update results text with fisx fit quality
+            if hasattr(self, 'calibration_result') and self.calibration_result:
+                result = self.calibration_result
+                results_text = (
+                    f"<b>Calibration Successful!</b><br><br>"
+                    f"<b>Optimized Parameters:</b><br>"
+                    f"FWHM₀: {result.fwhm_0:.4f} keV ({result.fwhm_0*1000:.1f} eV)<br>"
+                    f"ε (epsilon): {result.epsilon:.6f} keV<br><br>"
+                    f"<b>Fit Quality (with fisx FP):</b><br>"
+                    f"R²: {r_squared_fisx:.4f}<br>"
+                    f"χ²: {chi_squared_fisx:.2f}<br>"
+                )
+                self.results_text.setHtml(results_text)
             
         except Exception as e:
             print(f"Error updating calibration plot: {e}")
