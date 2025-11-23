@@ -330,15 +330,13 @@ class ElementPanel(QWidget):
         
         # Update tube current
         if 'tube_current' in metadata:
-            # Convert from nA to mA if needed
+            # Convert from nA to mA
+            # PROBECUR in EMSA files is in nanoamps (nA)
             current = float(metadata['tube_current'])
-            print(f"  DEBUG: Raw tube_current from metadata: {current}")
-            if current > 1000:  # Likely in nA
-                current = current / 1000.0  # Convert to µA
-                print(f"  DEBUG: After nA→µA conversion: {current}")
-            if current > 1000:  # Still large, likely in µA
-                current = current / 1000.0  # Convert to mA
-                print(f"  DEBUG: After µA→mA conversion: {current}")
+            print(f"  DEBUG: Raw tube_current from metadata: {current} nA")
+            # Convert nA → mA (divide by 1,000,000)
+            current = current / 1000000.0
+            print(f"  DEBUG: Converted to mA: {current}")
             self.current_spin.setValue(current)
             print(f"  DEBUG: Set current spin to: {current} mA")
         

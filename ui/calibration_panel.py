@@ -4,7 +4,8 @@ Instrument calibration panel UI
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QLineEdit, QTextEdit,
-                               QFileDialog, QProgressBar, QMessageBox, QSplitter)
+                               QFileDialog, QProgressBar, QMessageBox, QSplitter,
+                               QCheckBox)
 from PySide6.QtCore import Qt, Signal, QThread
 from pathlib import Path
 import pyqtgraph as pg
@@ -163,18 +164,6 @@ class CalibrationPanel(QWidget):
         group = QGroupBox("Calibration")
         layout = QHBoxLayout(group)
         
-        # Calibration method checkbox
-        self.use_fisx_checkbox = QCheckBox("Use fisx FP for calibration (recommended)")
-        self.use_fisx_checkbox.setChecked(True)  # Default to fisx (physically correct)
-        self.use_fisx_checkbox.setToolTip(
-            "Checked: Optimize FWHM using fisx-calculated intensities (recommended)\n"
-            "  - Uses known concentrations + physics to calculate expected intensities\n"
-            "  - No circular dependency\n\n"
-            "Unchecked: Optimize FWHM using measured peak intensities (faster but less accurate)\n"
-            "  - Requires peak fitting first (circular dependency)"
-        )
-        layout.addWidget(self.use_fisx_checkbox)
-        
         self.calibrate_btn = QPushButton("Run Calibration")
         self.calibrate_btn.clicked.connect(self._run_calibration)
         self.calibrate_btn.setEnabled(False)
@@ -200,14 +189,28 @@ class CalibrationPanel(QWidget):
     
     def _create_results_group(self):
         """Create results display group"""
-        group = QGroupBox("Calibration Results")
+        group = QGroupBox("Calibration Output")
         layout = QVBoxLayout(group)
         
+        # Terminal-like output box for optimization progress
+        self.terminal_output = QTextEdit()
+        self.terminal_output.setReadOnly(True)
+        self.terminal_output.setMaximumHeight(80)
+        self.terminal_output.setStyleSheet(
+            "QTextEdit { background-color: #1e1e1e; color: #d4d4d4; "
+            "font-family: 'Courier New', monospace; font-size: 10pt; }"
+        )
+        self.terminal_output.setPlainText("Ready to calibrate...")
+        layout.addWidget(QLabel("Optimization Progress:"))
+        layout.addWidget(self.terminal_output)
+        
+        # Results summary box
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setMaximumHeight(100)  # Reduced from 150
+        self.results_text.setMaximumHeight(100)
         self.results_text.setMinimumHeight(80)
         self.results_text.setPlainText("No calibration results yet")
+        layout.addWidget(QLabel("Calibration Results:"))
         layout.addWidget(self.results_text)
         
         return group
@@ -354,7 +357,7 @@ class CalibrationPanel(QWidget):
         print(f"  Incident angle: {experimental_params.get('incident_angle', 'N/A')}°")
         
         # Run calibration in background thread
-        use_measured = not self.use_fisx_checkbox.isChecked()  # Inverted: checked = use fisx
+        # Always use fisx FP (use_measured_intensities=False)
         self.worker = CalibrationWorker(
             self.calibrator,
             self.current_spectrum.energy,
@@ -362,7 +365,7 @@ class CalibrationPanel(QWidget):
             self.reference_concentrations,
             excitation_energy,
             experimental_params,
-            use_measured_intensities=use_measured
+            use_measured_intensities=False  # Use fisx FP
         )
         self.worker.finished.connect(self._on_calibration_finished)
         self.worker.progress.connect(self._on_calibration_progress)
@@ -371,6 +374,8 @@ class CalibrationPanel(QWidget):
     def _on_calibration_progress(self, message):
         """Handle calibration progress updates"""
         print(message)
+        # Also update terminal output box
+        self.terminal_output.append(message)
     
     def _on_calibration_finished(self, result: CalibrationResult):
         """Handle calibration completion"""
@@ -532,19 +537,28 @@ class CalibrationPanel(QWidget):
             )
             print(f"Got {len(element_data)} element lines")
             
-            # Use FWHM_0, epsilon, and intensity scale
-            # Note: intensity_scale is stored in efficiency_params for now
+            # Use FWHM_0, epsilon, intensity scale, Rh scatter scale, and background
+            # Note: these are stored in efficiency_params
             intensity_scale = result.efficiency_params.get('intensity_scale', 1.0) if result.efficiency_params else 1.0
+            rh_scatter_scale = result.efficiency_params.get('rh_scatter_scale', 0.0) if result.efficiency_params else 0.0
+            bg_a = result.efficiency_params.get('bg_a', 0.0) if result.efficiency_params else 0.0
+            bg_b = result.efficiency_params.get('bg_b', 0.0) if result.efficiency_params else 0.0
+            bg_c = result.efficiency_params.get('bg_c', 0.0) if result.efficiency_params else 0.0
             params = np.array([
                 result.fwhm_0,
                 result.epsilon,
-                intensity_scale
+                intensity_scale,
+                rh_scatter_scale,
+                bg_a,
+                bg_b,
+                bg_c
             ])
             
             calculated_spectrum = self.calibrator._calculate_spectrum(
                 self.current_spectrum.energy,
                 element_data,
-                params
+                params,
+                experimental_params
             )
             
             # Scale calculated to match measured peak height for visualization
