@@ -1,6 +1,6 @@
 # Why Are Zr L-Lines Wider Than K-Lines?
 
-## Your Observation
+## Observation
 
 In the cubic zirconia calibration data, you noticed that **Zr L-lines (~2 keV) appear much wider** than K-lines from lighter elements like Mg Kα (1.25 keV) or Al Kα (1.49 keV), even though they're at similar energies.
 
@@ -61,7 +61,7 @@ For **Mg Kα** (Z=12) or **Al Kα** (Z=13):
 
 ## What You Measure: Observed FWHM
 
-The **observed FWHM** in your detector is a convolution of:
+The **observed FWHM** in detector is a convolution of:
 
 ```
 FWHM_observed² = FWHM_detector² + FWHM_natural²
@@ -73,14 +73,14 @@ Where:
 
 ### For Mg Kα (1.25 keV):
 ```
-FWHM_detector ≈ 130 eV  (from your calibration)
+FWHM_detector ≈ 130 eV  (from calibration)
 FWHM_natural ≈ 0.4 eV   (negligible!)
 FWHM_observed ≈ 130 eV  (detector-limited)
 ```
 
 ### For Zr Lα (2.04 keV):
 ```
-FWHM_detector ≈ 135 eV  (from your calibration)
+FWHM_detector ≈ 135 eV  (from calibration)
 FWHM_natural ≈ 1.5 eV   (still small but noticeable)
 FWHM_observed ≈ 135 eV  (mostly detector-limited)
 ```
@@ -128,7 +128,7 @@ For Zr L-shell:
 
 ### 4. **Overlap with Other Lines**
 
-In your cubic zirconia spectrum:
+In cubic zirconia spectrum:
 - Zr Lα (2.04 keV) may overlap with:
   - Zr Lη (1.876 keV)
   - Zr Lℓ (1.792 keV)

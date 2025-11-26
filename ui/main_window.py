@@ -13,7 +13,8 @@ from PySide6.QtGui import QAction, QKeySequence, QIcon
 from ui.spectrum_widget import SpectrumWidget
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
-from ui.calibration_panel import CalibrationPanel
+from ui.standards_panel import StandardsPanel
+from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from utils.io_handler import IOHandler
 from core.fitting import SpectrumFitter
 
@@ -178,10 +179,15 @@ class MainWindow(QMainWindow):
         analysis_tab = self._create_analysis_tab()
         self.tab_widget.addTab(analysis_tab, "Analysis")
         
-        # Calibration tab
-        self.calibration_panel = CalibrationPanel()
-        self.calibration_panel.calibration_complete.connect(self.on_calibration_applied)
-        self.tab_widget.addTab(self.calibration_panel, "Instrument Calibration")
+        # Standards tab (intensity calibration using known concentrations)
+        self.standards_panel = StandardsPanel()
+        self.standards_panel.calibration_complete.connect(self.on_calibration_applied)
+        self.tab_widget.addTab(self.standards_panel, "Standards")
+        
+        # FWHM Calibration tab (detector resolution calibration)
+        self.fwhm_calibration_panel = FWHMCalibrationPanel()
+        self.fwhm_calibration_panel.calibration_complete.connect(self.on_fwhm_calibration_applied)
+        self.tab_widget.addTab(self.fwhm_calibration_panel, "FWHM Calibration")
         
         layout.addWidget(self.tab_widget)
     
@@ -469,6 +475,27 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.show_element_lines(symbol, z)
         
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
+    
+    def on_fwhm_calibration_applied(self, fwhm_calibration):
+        """Handle FWHM calibration being applied"""
+        # Update the Standards panel with the FWHM calibration
+        self.standards_panel.update_fwhm_status(fwhm_calibration)
+        
+        # Show status message
+        if fwhm_calibration.model_type == 'detector':
+            fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
+            epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
+            self.status_bar.showMessage(
+                f"FWHM calibration applied to Standards: FWHM₀={fwhm_0_ev:.1f} eV, "
+                f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f})",
+                5000
+            )
+        else:
+            self.status_bar.showMessage(
+                f"FWHM calibration applied to Standards: {fwhm_calibration.model_type} model "
+                f"(R²={fwhm_calibration.r_squared:.4f})",
+                5000
+            )
     
     def on_calibration_applied(self, calibration_result):
         """Handle calibration being applied"""

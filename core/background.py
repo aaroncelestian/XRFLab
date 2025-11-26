@@ -5,6 +5,8 @@ Background modeling for XRF spectra
 import numpy as np
 from scipy import signal, ndimage
 from scipy.interpolate import UnivariateSpline
+from scipy.sparse import csc_matrix, diags
+from scipy.sparse.linalg import spsolve
 
 
 class BackgroundModeler:
@@ -148,6 +150,66 @@ class BackgroundModeler:
         return background
     
     @staticmethod
+    def als_background(counts, lam=1e5, p=0.01, niter=10):
+        """
+        Asymmetric Least Squares (AsLS) baseline correction
+        
+        This algorithm fits a baseline by iteratively solving a weighted least squares 
+        problem that penalizes asymmetry. It follows the lower envelope of the spectrum 
+        (baseline) while avoiding peaks.
+        
+        The key insight is asymmetric weighting: points above the current baseline (peaks) 
+        get low weight p, while points below get high weight (1-p). This forces the 
+        baseline to hug the bottom of the spectrum.
+        
+        Reference:
+        Eilers, P.H.C., Boelens, H.F.M. (2005). Baseline Correction with Asymmetric 
+        Least Squares Smoothing. Leiden University Medical Centre Report.
+        
+        Args:
+            counts: Counts array (spectrum intensities)
+            lam: Smoothness parameter (10³ to 10⁷, default 10⁵)
+                 Higher values = smoother baseline
+            p: Asymmetry parameter (0.001 to 0.05, default 0.01)
+               Lower values = baseline follows minimum more closely
+               Points above baseline get weight p, below get (1-p)
+            niter: Number of iterations (default 10, usually sufficient)
+            
+        Returns:
+            Array of background values
+            
+        Example:
+            >>> background = BackgroundModeler.als_background(counts, lam=1e6, p=0.001)
+            >>> corrected = counts - background
+        """
+        y = np.asarray(counts, dtype=float)
+        L = len(y)
+        
+        # Second-order difference matrix (penalizes roughness)
+        D = diags([1, -2, 1], [0, -1, -2], shape=(L, L-2))
+        D = csc_matrix(D)
+        
+        # Initialize weights
+        w = np.ones(L)
+        
+        # Iterative refinement
+        for i in range(niter):
+            # Weighted matrix
+            W = diags(w, 0, shape=(L, L))
+            W = csc_matrix(W)
+            
+            # Solve: (W + λ * D * D^T) * z = W * y
+            Z = W + lam * D.dot(D.transpose())
+            z = spsolve(Z, w * y)
+            
+            # Update weights asymmetrically
+            # Points above baseline (peaks) get low weight p
+            # Points below baseline get high weight (1-p)
+            w = p * (y > z) + (1 - p) * (y <= z)
+        
+        return z
+    
+    @staticmethod
     def estimate_background(energy, counts, method='snip', **kwargs):
         """
         Estimate background using specified method
@@ -155,7 +217,7 @@ class BackgroundModeler:
         Args:
             energy: Energy array
             counts: Counts array
-            method: 'snip', 'polynomial', 'linear', 'adaptive', or 'none'
+            method: 'snip', 'polynomial', 'linear', 'adaptive', 'als', or 'none'
             **kwargs: Method-specific parameters
             
         Returns:
@@ -184,6 +246,14 @@ class BackgroundModeler:
             percentile = kwargs.get('percentile', 5)
             return BackgroundModeler.adaptive_background(
                 counts, window_size=window_size, percentile=percentile
+            )
+        
+        elif method.lower() == 'als' or method.lower() == 'asls':
+            lam = kwargs.get('lam', 1e5)
+            p = kwargs.get('p', 0.01)
+            niter = kwargs.get('niter', 10)
+            return BackgroundModeler.als_background(
+                counts, lam=lam, p=p, niter=niter
             )
         
         elif method.lower() == 'none':
