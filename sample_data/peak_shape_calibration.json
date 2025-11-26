@@ -1,0 +1,120 @@
+{
+  "calibration_date": "2025-11-25T20:18:31.236420",
+  "detector_model": "XGT7200 SDD",
+  "fwhm_0_keV": 0.06153486704852285,
+  "fwhm_0_eV": 61.534867048522855,
+  "fwhm_0_error_eV": 6.6193348891549535,
+  "epsilon_keV": 0.0005163451721852541,
+  "epsilon_eV_per_keV": 0.5163451721852541,
+  "epsilon_error_eV_per_keV": 0.020300967147068152,
+  "r_squared": 0.9800507289517877,
+  "rmse_eV": 5.058843855247784,
+  "n_peaks": 15,
+  "measurements": [
+    {
+      "element": "Fe",
+      "line": "Fe K\u03b11",
+      "energy_keV": 6.400316813436486,
+      "fwhm_eV": 145.51425087619245,
+      "fit_quality": 0.9997992520537957
+    },
+    {
+      "element": "Fe",
+      "line": "Fe K\u03b12",
+      "energy_keV": 6.400316812044767,
+      "fwhm_eV": 145.51425072516025,
+      "fit_quality": 0.9997992322025907
+    },
+    {
+      "element": "Fe",
+      "line": "Fe K\u03b21",
+      "energy_keV": 7.052549219368688,
+      "fwhm_eV": 155.97730681188463,
+      "fit_quality": 0.9976720094922833
+    },
+    {
+      "element": "Cu",
+      "line": "Cu K\u03b11",
+      "energy_keV": 8.039311336847728,
+      "fwhm_eV": 158.76532006730577,
+      "fit_quality": 0.9998620410190179
+    },
+    {
+      "element": "Cu",
+      "line": "Cu K\u03b12",
+      "energy_keV": 8.039311312937507,
+      "fwhm_eV": 158.76542874112724,
+      "fit_quality": 0.9998573523885558
+    },
+    {
+      "element": "Cu",
+      "line": "Cu K\u03b21",
+      "energy_keV": 8.898973109216168,
+      "fwhm_eV": 169.29986935158354,
+      "fit_quality": 0.9979804577019624
+    },
+    {
+      "element": "Ti",
+      "line": "Ti K\u03b11",
+      "energy_keV": 4.513015196332387,
+      "fwhm_eV": 128.00092331978726,
+      "fit_quality": 0.999711031672843
+    },
+    {
+      "element": "Ti",
+      "line": "Ti K\u03b12",
+      "energy_keV": 4.513015195965055,
+      "fwhm_eV": 128.00091863271325,
+      "fit_quality": 0.999764022449227
+    },
+    {
+      "element": "Ti",
+      "line": "Ti K\u03b21",
+      "energy_keV": 4.9321571030773015,
+      "fwhm_eV": 136.89175600704215,
+      "fit_quality": 0.9297282629441327
+    },
+    {
+      "element": "Zn",
+      "line": "Zn K\u03b11",
+      "energy_keV": 8.627959600712153,
+      "fwhm_eV": 163.38139558069636,
+      "fit_quality": 0.9998834663817935
+    },
+    {
+      "element": "Zn",
+      "line": "Zn K\u03b12",
+      "energy_keV": 8.627959577161247,
+      "fwhm_eV": 163.38146939579238,
+      "fit_quality": 0.9998823585117192
+    },
+    {
+      "element": "Zn",
+      "line": "Zn K\u03b21",
+      "energy_keV": 9.565155432782802,
+      "fwhm_eV": 174.60165489100032,
+      "fit_quality": 0.9985234944026874
+    },
+    {
+      "element": "Mg",
+      "line": "Mg K\u03b1",
+      "energy_keV": 1.2582758399394123,
+      "fwhm_eV": 94.57395481107362,
+      "fit_quality": 0.9990701373705431
+    },
+    {
+      "element": "cubic zirconia",
+      "line": "Zr K\u03b11",
+      "energy_keV": 15.729087882614953,
+      "fwhm_eV": 229.7576570443527,
+      "fit_quality": 0.9996769235104055
+    },
+    {
+      "element": "cubic zirconia",
+      "line": "Zr K\u03b21",
+      "energy_keV": 17.646747530811464,
+      "fwhm_eV": 242.18655097656813,
+      "fit_quality": 0.965767934282419
+    }
+  ]
+}

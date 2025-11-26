@@ -11,6 +11,7 @@ from core.peak_fitting import PeakFitter, Peak
 from core.xray_data import get_element_lines, get_tube_lines
 from core.fundamental_parameters import FundamentalParameters
 from core.fisx_integration import FisxCalculator, convert_fisx_to_element_data
+from core.fwhm_calibration import FWHMCalibration, load_fwhm_calibration, get_fwhm_initial_params
 
 
 @dataclass
@@ -24,13 +25,23 @@ class CalibrationResult:
     r_squared: float
     success: bool
     message: str
+    fwhm_model_type: str = 'detector'  # FWHM model type
+    fwhm_calibration: Dict = None  # Full FWHM calibration data
 
 
 class InstrumentCalibrator:
     """Calibrate instrument parameters using reference standards"""
     
-    def __init__(self):
+    def __init__(self, fwhm_calibration: FWHMCalibration = None):
+        """
+        Initialize calibrator
+        
+        Args:
+            fwhm_calibration: Pre-calibrated FWHM model (optional)
+                             If provided, FWHM_0 and epsilon will be fixed during optimization
+        """
         self.peak_fitter = PeakFitter()
+        self.fwhm_calibration = fwhm_calibration
     
     def calibrate(self, 
                   energy: np.ndarray,
@@ -65,29 +76,59 @@ class InstrumentCalibrator:
         """
         # Set initial parameter guesses
         if initial_params is None:
-            initial_params = {
-                'fwhm_0': 0.050,  # keV
-                'epsilon': 0.0015,  # keV
-                'voigt_gamma_ratio': 0.15,  # gamma/sigma
-            }
+            # Use FWHM calibration if available
+            if self.fwhm_calibration is not None:
+                fwhm_params = get_fwhm_initial_params(self.fwhm_calibration)
+                initial_params = {
+                    'fwhm_0': fwhm_params['fwhm_0'],
+                    'epsilon': fwhm_params['epsilon'],
+                    'voigt_gamma_ratio': 0.15,
+                }
+            else:
+                initial_params = {
+                    'fwhm_0': 0.050,  # keV
+                    'epsilon': 0.0015,  # keV
+                    'voigt_gamma_ratio': 0.15,  # gamma/sigma
+                }
         
         # Convert to parameter array for optimization
         # Parameters: FWHM_0, epsilon, intensity_scale, rh_scatter_scale
         # Background is pre-subtracted, so no background parameters needed
-        p0 = [
-            0.110,      # FWHM_0: Start at 110 eV (middle of range)
-            0.00001,    # epsilon: Start at 0.00001 (Fano factor ~0.12 for Si)
-            1000.0,     # Overall intensity scaling factor
-            0.01        # Rh tube scatter scaling (start small)
-        ]
         
-        # Parameter bounds - must be a list of (min, max) tuples for each parameter
-        bounds = [
-            (0.070, 0.150),     # FWHM_0: 70-150 eV (realistic SDD range)
-            (0.000001, 0.0001), # EPSILON: Fano-like factor (much smaller with 2.355² multiplier)
-            (10.0, 100000.0),   # Intensity scale: much wider range
-            (0.0, 0.5)          # Rh scatter scale: 0-50% (allow stronger Rh lines)
-        ]
+        # If FWHM calibration is provided, use those values and narrow bounds
+        if self.fwhm_calibration is not None:
+            fwhm_0_cal = initial_params['fwhm_0']
+            epsilon_cal = initial_params['epsilon']
+            
+            p0 = [
+                fwhm_0_cal,  # Use calibrated FWHM_0
+                epsilon_cal,  # Use calibrated epsilon
+                1000.0,       # Overall intensity scaling factor
+                0.01          # Rh tube scatter scaling (start small)
+            ]
+            
+            # Narrow bounds around calibrated values (±20%)
+            bounds = [
+                (fwhm_0_cal * 0.8, fwhm_0_cal * 1.2),
+                (epsilon_cal * 0.8, epsilon_cal * 1.2),
+                (10.0, 100000.0),
+                (0.0, 0.5)
+            ]
+        else:
+            # Wide bounds for uncalibrated case
+            p0 = [
+                0.110,      # FWHM_0: Start at 110 eV (middle of range)
+                0.00001,    # epsilon: Start at 0.00001 (Fano factor ~0.12 for Si)
+                1000.0,     # Overall intensity scaling factor
+                0.01        # Rh tube scatter scaling (start small)
+            ]
+            
+            bounds = [
+                (0.070, 0.150),     # FWHM_0: 70-150 eV (realistic SDD range)
+                (0.000001, 0.0001), # EPSILON: Fano-like factor (much smaller with 2.355² multiplier)
+                (10.0, 100000.0),   # Intensity scale: much wider range
+                (0.0, 0.5)          # Rh scatter scale: 0-50% (allow stronger Rh lines)
+            ]
         
         # Prepare element data
         try:
@@ -737,7 +778,9 @@ class InstrumentCalibrator:
             'chi_squared': result.chi_squared,
             'r_squared': result.r_squared,
             'success': result.success,
-            'message': result.message
+            'message': result.message,
+            'fwhm_model_type': result.fwhm_model_type,
+            'fwhm_calibration': result.fwhm_calibration
         }
         
         with open(file_path, 'w') as f:
@@ -760,7 +803,9 @@ class InstrumentCalibrator:
             chi_squared=data['chi_squared'],
             r_squared=data['r_squared'],
             success=data['success'],
-            message=data['message']
+            message=data['message'],
+            fwhm_model_type=data.get('fwhm_model_type', 'detector'),
+            fwhm_calibration=data.get('fwhm_calibration', None)
         )
     
     @staticmethod
