@@ -24,7 +24,7 @@ class ElementButton(QPushButton):
         self.group = group
         
         self.setCheckable(True)
-        self.setFixedSize(35, 35)  # Reduced from 55x55 to 35x35
+        self.setFixedSize(32, 32)  # Optimized for 700px panel (18 cols × 32px + spacing = ~650px)
         
         # Set text - just symbol for compact view
         self.setText(symbol)
@@ -116,13 +116,10 @@ class PeriodicTableWidget(QWidget):
     def _setup_ui(self):
         """Setup the widget layout"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(1, 1, 1, 1)  # Minimal margins
+        layout.setSpacing(2)  # Very tight spacing
         
-        # Title
-        title = QLabel("Periodic Table - Select Elements")
-        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        # No title - save vertical space
         
         # Scroll area for periodic table
         scroll = QScrollArea()
@@ -133,24 +130,27 @@ class PeriodicTableWidget(QWidget):
         # Container for periodic table
         self.table_widget = QWidget()
         self.table_layout = QGridLayout(self.table_widget)
-        self.table_layout.setSpacing(2)
-        self.table_layout.setContentsMargins(5, 5, 5, 5)
+        self.table_layout.setSpacing(1)  # Reduced spacing for tighter fit
+        self.table_layout.setContentsMargins(2, 2, 2, 2)  # Minimal margins
         
         scroll.setWidget(self.table_widget)
         layout.addWidget(scroll, stretch=1)
         
-        # Control buttons
+        # Control buttons - compact layout
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(3)
         
-        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn = QPushButton("All")
+        self.select_all_btn.setToolTip("Select all elements")
         self.select_all_btn.clicked.connect(self._select_all)
         button_layout.addWidget(self.select_all_btn)
         
-        self.clear_all_btn = QPushButton("Clear All")
+        self.clear_all_btn = QPushButton("Clear")
+        self.clear_all_btn.setToolTip("Clear all selections")
         self.clear_all_btn.clicked.connect(self._clear_all)
         button_layout.addWidget(self.clear_all_btn)
         
-        self.select_common_btn = QPushButton("Common XRF")
+        self.select_common_btn = QPushButton("Common")
         self.select_common_btn.setToolTip("Select commonly analyzed elements in XRF")
         self.select_common_btn.clicked.connect(self._select_common_xrf)
         button_layout.addWidget(self.select_common_btn)
@@ -325,17 +325,17 @@ class PeriodicTableWidget(QWidget):
         
         for name, color in legend_items:
             frame = QFrame()
-            frame.setFixedSize(12, 12)
+            frame.setFixedSize(10, 10)  # Smaller color boxes
             frame.setStyleSheet(f"background-color: {color}; border: 1px solid #999;")
             
             label = QLabel(name)
-            label.setFont(QFont("Arial", 8))
+            label.setFont(QFont("Arial", 7))  # Smaller font
             
             item_layout = QHBoxLayout()
             item_layout.addWidget(frame)
             item_layout.addWidget(label)
-            item_layout.setSpacing(3)
-            item_layout.setContentsMargins(0, 0, 5, 0)
+            item_layout.setSpacing(2)  # Tighter spacing
+            item_layout.setContentsMargins(0, 0, 3, 0)  # Less margin
             
             layout.addLayout(item_layout)
         

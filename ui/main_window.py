@@ -13,6 +13,7 @@ from PySide6.QtGui import QAction, QKeySequence, QIcon
 from ui.spectrum_widget import SpectrumWidget
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
+from ui.batch_analysis_panel import BatchAnalysisPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from utils.io_handler import IOHandler
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("XRFLab - Fundamental Parameters Analysis")
         self.setGeometry(100, 100, 1400, 900)
+        self.setMinimumSize(1200, 700)  # Minimum size for laptop screens
         
         # Initialize components
         self.io_handler = IOHandler()
@@ -179,6 +181,12 @@ class MainWindow(QMainWindow):
         analysis_tab = self._create_analysis_tab()
         self.tab_widget.addTab(analysis_tab, "Analysis")
         
+        # Batch Analysis tab (bulk spectral fitting)
+        self.batch_analysis_panel = BatchAnalysisPanel()
+        self.tab_widget.addTab(self.batch_analysis_panel, "Batch Analysis")
+        # Connect to Analysis tab's element panel for settings
+        self.batch_analysis_panel.set_element_panel(self.element_panel)
+        
         # Standards tab (intensity calibration using known concentrations)
         self.standards_panel = StandardsPanel()
         self.standards_panel.calibration_complete.connect(self.on_calibration_applied)
@@ -192,7 +200,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tab_widget)
     
     def _create_analysis_tab(self):
-        """Create the analysis tab with improved layout"""
+        """Create the analysis tab with sub-tabs on left panel for laptop screens"""
         analysis_widget = QWidget()
         layout = QHBoxLayout(analysis_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -200,36 +208,35 @@ class MainWindow(QMainWindow):
         # Create main horizontal splitter (left panel | right side)
         main_splitter = QSplitter(Qt.Horizontal)
         
-        # Left panel - Element selection and parameters
+        # Left panel - Tabbed interface for compact layout
+        left_tab_widget = QTabWidget()
+        left_tab_widget.setMaximumWidth(700)  # Doubled width for better usability
+        
+        # Tab 1: Sample Info & Experimental Parameters
         self.element_panel = ElementPanel()
-        main_splitter.addWidget(self.element_panel)
+        sample_exp_tab = self._create_sample_exp_tab()
+        left_tab_widget.addTab(sample_exp_tab, "Sample/Exp")
         
-        # Right side - Vertical splitter (spectrum on top | results below)
-        right_splitter = QSplitter(Qt.Vertical)
+        # Tab 2: Element Selection
+        element_tab = self._create_element_selection_tab()
+        left_tab_widget.addTab(element_tab, "Elements")
         
-        # Top: Spectrum display with residuals
+        # Tab 3: Fitting Controls
+        fitting_tab = self._create_fitting_controls_tab()
+        left_tab_widget.addTab(fitting_tab, "Fitting")
+        
+        # Tab 4: Results & Quantification
+        results_tab = self._create_results_tab()
+        left_tab_widget.addTab(results_tab, "Results")
+        
+        main_splitter.addWidget(left_tab_widget)
+        
+        # Right side - Spectrum display (keep as is)
         self.spectrum_widget = SpectrumWidget()
-        right_splitter.addWidget(self.spectrum_widget)
+        main_splitter.addWidget(self.spectrum_widget)
         
-        # Bottom: Results panels in horizontal layout
-        results_widget = QWidget()
-        results_layout = QHBoxLayout(results_widget)
-        results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(5)
-        
-        # Create results panel (will be split into three sections)
-        self.results_panel = ResultsPanel()
-        results_layout.addWidget(self.results_panel)
-        
-        right_splitter.addWidget(results_widget)
-        
-        # Set sizes for vertical splitter (70% spectrum, 30% results)
-        right_splitter.setSizes([700, 300])
-        
-        main_splitter.addWidget(right_splitter)
-        
-        # Set initial sizes for horizontal splitter (30% left, 70% right)
-        main_splitter.setSizes([400, 1000])
+        # Set initial sizes for horizontal splitter (50% left, 50% right)
+        main_splitter.setSizes([600, 600])
         
         layout.addWidget(main_splitter)
         
@@ -239,6 +246,60 @@ class MainWindow(QMainWindow):
         self.element_panel.element_clicked.connect(self.on_element_clicked)
         
         return analysis_widget
+    
+    def _create_sample_exp_tab(self):
+        """Create Sample Info & Experimental Parameters tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Sample information group
+        sample_group = self.element_panel._create_sample_info_group()
+        layout.addWidget(sample_group)
+        
+        # Experimental parameters group
+        exp_params_group = self.element_panel._create_exp_params_group()
+        layout.addWidget(exp_params_group)
+        
+        layout.addStretch()
+        return widget
+    
+    def _create_element_selection_tab(self):
+        """Create Element Selection tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Element selection group
+        element_group = self.element_panel._create_element_selection_group()
+        layout.addWidget(element_group, stretch=1)
+        
+        return widget
+    
+    def _create_fitting_controls_tab(self):
+        """Create Fitting Controls tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Fitting controls group
+        fitting_group = self.element_panel._create_fitting_controls_group()
+        layout.addWidget(fitting_group)
+        
+        layout.addStretch()
+        return widget
+    
+    def _create_results_tab(self):
+        """Create Results & Quantification tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Create results panel
+        self.results_panel = ResultsPanel()
+        layout.addWidget(self.results_panel)
+        
+        return widget
     
     def _create_status_bar(self):
         """Create status bar"""
@@ -285,7 +346,7 @@ class MainWindow(QMainWindow):
                 spectrum = self.io_handler.load_spectrum(file_path)
                 self.current_spectrum = spectrum
                 self.spectrum_widget.set_spectrum(spectrum)
-                self.calibration_panel.set_spectrum(spectrum)  # Pass to calibration panel
+                # Note: Standards panel will get spectrum when needed
                 
                 # Auto-populate experimental parameters from spectrum metadata
                 if hasattr(spectrum, 'metadata') and spectrum.metadata:

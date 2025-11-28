@@ -29,7 +29,8 @@ class ElementPanel(QWidget):
     def _setup_ui(self):
         """Setup the panel layout"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(3, 3, 3, 3)  # Reduced margins
+        layout.setSpacing(3)  # Tighter spacing between groups
         
         # Sample information group
         sample_group = self._create_sample_info_group()
@@ -51,6 +52,8 @@ class ElementPanel(QWidget):
         """Create sample information input group"""
         group = QGroupBox("Sample Information")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)  # Reduced top margin
+        layout.setSpacing(3)  # Tighter spacing
         
         # Sample name
         name_layout = QHBoxLayout()
@@ -93,6 +96,8 @@ class ElementPanel(QWidget):
         """Create experimental parameters group"""
         group = QGroupBox("Experimental Parameters")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)  # Reduced top margin
+        layout.setSpacing(3)  # Tighter spacing
         
         # Excitation energy
         energy_layout = QHBoxLayout()
@@ -169,6 +174,8 @@ class ElementPanel(QWidget):
         """Create fitting controls group"""
         group = QGroupBox("Fitting Controls")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)  # Reduced top margin
+        layout.setSpacing(3)  # Tighter spacing
         
         # Background method
         bg_layout = QHBoxLayout()

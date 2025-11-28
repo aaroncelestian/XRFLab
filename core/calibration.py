@@ -4,8 +4,10 @@ Instrument calibration using reference standards
 
 import numpy as np
 from scipy import optimize
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple
+import json
+from datetime import datetime
 from core.background import BackgroundModeler
 from core.peak_fitting import PeakFitter, Peak
 from core.xray_data import get_element_lines, get_tube_lines
@@ -27,6 +29,31 @@ class CalibrationResult:
     message: str
     fwhm_model_type: str = 'detector'  # FWHM model type
     fwhm_calibration: Dict = None  # Full FWHM calibration data
+    calibration_date: str = None  # ISO format timestamp
+    
+    def to_dict(self) -> Dict:
+        """Convert to dictionary for JSON serialization"""
+        data = asdict(self)
+        if self.calibration_date is None:
+            data['calibration_date'] = datetime.now().isoformat()
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'CalibrationResult':
+        """Create from dictionary"""
+        return cls(**data)
+    
+    def save(self, filepath: str):
+        """Save calibration to JSON file"""
+        with open(filepath, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+    
+    @classmethod
+    def load(cls, filepath: str) -> 'CalibrationResult':
+        """Load calibration from JSON file"""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return cls.from_dict(data)
 
 
 class InstrumentCalibrator:

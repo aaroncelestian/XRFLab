@@ -20,27 +20,24 @@ class ResultsPanel(QWidget):
         self._setup_ui()
     
     def _setup_ui(self):
-        """Setup the panel layout with three columns"""
+        """Setup the panel layout with vertical stacking"""
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(5)
         
-        # Create horizontal layout for three columns
-        columns_layout = QHBoxLayout()
-        columns_layout.setSpacing(5)
+        # Stack vertically for better readability
         
-        # Column 1: Fit statistics
+        # Section 1: Fit statistics
         stats_group = self._create_statistics_group()
-        columns_layout.addWidget(stats_group, stretch=1)
+        main_layout.addWidget(stats_group)
         
-        # Column 2: Quantification results
+        # Section 2: Quantification results
         results_group = self._create_results_table_group()
-        columns_layout.addWidget(results_group, stretch=2)
+        main_layout.addWidget(results_group, stretch=2)
         
-        # Column 3: Peak identification
+        # Section 3: Peak identification
         peaks_group = self._create_peaks_group()
-        columns_layout.addWidget(peaks_group, stretch=1)
-        
-        main_layout.addLayout(columns_layout)
+        main_layout.addWidget(peaks_group, stretch=1)
         
         # Export button at the bottom (full width)
         self.export_button = QPushButton("Export Results")
@@ -64,7 +61,8 @@ class ResultsPanel(QWidget):
     def _create_statistics_group(self):
         """Create fit statistics display group"""
         group = QGroupBox("Fit Statistics")
-        layout = QVBoxLayout(group)
+        layout = QHBoxLayout(group)  # Changed to horizontal for compact display
+        layout.setSpacing(15)
         
         # Chi-squared
         self.chi_squared_label = QLabel("χ²: --")
@@ -85,6 +83,8 @@ class ResultsPanel(QWidget):
         self.iterations_label = QLabel("Iterations: --")
         self.iterations_label.setFont(QFont("Arial", 10))
         layout.addWidget(self.iterations_label)
+        
+        layout.addStretch()  # Push stats to the left
         
         return group
     

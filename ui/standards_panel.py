@@ -10,44 +10,22 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QLineEdit, QTextEdit,
                                QFileDialog, QProgressBar, QMessageBox, QSplitter,
                                QCheckBox, QDoubleSpinBox, QListWidget, QListWidgetItem,
-                               QComboBox, QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt, Signal, QThread
+                               QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget)
+from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths
 from pathlib import Path
 import pyqtgraph as pg
 import numpy as np
 import json
+import csv
 from typing import Dict, List
 
 from core.calibration import InstrumentCalibrator, CalibrationResult
+from ui.concentration_entry_dialog import ConcentrationEntryDialog
+from utils.io_handler import IOHandler
 
 
-# Built-in standards library
-STANDARDS_LIBRARY = {
-    "NIST SRM 610": {
-        "description": "Trace Elements in Glass",
-        "file": "standards/NIST_SRM_610.csv",
-        "matrix": "glass",
-        "use_case": "General trace element analysis"
-    },
-    "NIST SRM 612": {
-        "description": "Trace Elements in Glass",
-        "file": "standards/NIST_SRM_612.csv",
-        "matrix": "glass",
-        "use_case": "Low-level trace elements"
-    },
-    "NIST SRM 1400": {
-        "description": "Bone Ash",
-        "file": "standards/NIST_SRM_1400.csv",
-        "matrix": "bone",
-        "use_case": "Biological samples"
-    },
-    "Custom Standard": {
-        "description": "User-defined standard",
-        "file": None,
-        "matrix": "custom",
-        "use_case": "Custom applications"
-    }
-}
+# Built-in standards library (empty by default - users load their own)
+STANDARDS_LIBRARY = {}
 
 
 class CalibrationWorker(QThread):
@@ -105,67 +83,114 @@ class StandardsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.calibrator = InstrumentCalibrator()
+        self.io_handler = IOHandler()
         self.current_spectrum = None
         self.reference_concentrations = None
         self.calibration_result = None
         self.worker = None
         self.selected_standards = []  # List of standards to use
-        self.standards_data = {}  # Dict of {standard_name: {spectrum, concentrations}}
+        self.standards_data = {}  # Dict of {standard_name: {spectrum, concentrations, loaded}}
         
         self._init_ui()
+        
+        # Try to load saved calibration on startup
+        self._auto_load_calibration()
+    
+    @staticmethod
+    def get_default_calibration_path():
+        """Get the default path for saving/loading Standards calibration"""
+        # Use application data directory
+        app_data = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+        if not app_data:
+            # Fallback to home directory
+            app_data = str(Path.home() / ".xrflab")
+        
+        # Create directory if it doesn't exist
+        cal_dir = Path(app_data) / "calibrations"
+        cal_dir.mkdir(parents=True, exist_ok=True)
+        
+        return cal_dir / "standards_calibration.json"
     
     def _init_ui(self):
-        """Initialize the user interface"""
+        """Initialize the user interface with sub-tabs"""
         layout = QVBoxLayout(self)
         
         # Create splitter for controls and plot
         splitter = QSplitter(Qt.Horizontal)
         
-        # Left side: Controls
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
+        # Left panel - Tabbed interface for compact layout
+        left_tab_widget = QTabWidget()
+        left_tab_widget.setMaximumWidth(700)  # Same as Analysis tab
+        
+        # Tab 1: Standards Selection
+        standards_tab = self._create_standards_selection_tab()
+        left_tab_widget.addTab(standards_tab, "Standards")
+        
+        # Tab 2: Calibration & Output
+        calibration_tab = self._create_calibration_tab()
+        left_tab_widget.addTab(calibration_tab, "Calibration")
+        
+        splitter.addWidget(left_tab_widget)
+        
+        # Right side: Spectrum comparison plot (keep as is)
+        plot_widget = self._create_plot_widget()
+        splitter.addWidget(plot_widget)
+        
+        # Set initial sizes for horizontal splitter (50% left, 50% right)
+        splitter.setSizes([600, 600])
+        
+        layout.addWidget(splitter)
+    
+    def _create_standards_selection_tab(self):
+        """Create Standards Selection tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
         
         # FWHM status group
         fwhm_group = self._create_fwhm_status_group()
-        controls_layout.addWidget(fwhm_group)
+        layout.addWidget(fwhm_group)
         
         # Standards library group
         library_group = self._create_standards_library_group()
-        controls_layout.addWidget(library_group)
+        layout.addWidget(library_group)
         
         # Selected standards group
         selected_group = self._create_selected_standards_group()
-        controls_layout.addWidget(selected_group)
+        layout.addWidget(selected_group)
+        
+        layout.addStretch()
+        return widget
+    
+    def _create_calibration_tab(self):
+        """Create Calibration & Output tab"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
         
         # Calibration controls
         controls_group = self._create_controls_group()
-        controls_layout.addWidget(controls_group)
-        
-        # Results display
-        results_group = self._create_results_group()
-        controls_layout.addWidget(results_group)
+        layout.addWidget(controls_group)
         
         # Progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        controls_layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_bar)
         
-        controls_layout.addStretch()
+        # Results display
+        results_group = self._create_results_group()
+        layout.addWidget(results_group, stretch=1)
         
-        # Right side: Spectrum comparison plot
-        plot_widget = self._create_plot_widget()
-        
-        splitter.addWidget(controls_widget)
-        splitter.addWidget(plot_widget)
-        splitter.setSizes([400, 800])
-        
-        layout.addWidget(splitter)
+        return widget
     
     def _create_fwhm_status_group(self):
         """Create FWHM calibration status display"""
         group = QGroupBox("FWHM Calibration Status")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
         
         # Status label
         self.fwhm_status_label = QLabel(
@@ -191,6 +216,8 @@ class StandardsPanel(QWidget):
         """Create standards library selection"""
         group = QGroupBox("Standards Library")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
         
         # Info
         info = QLabel(
@@ -232,6 +259,8 @@ class StandardsPanel(QWidget):
         """Create selected standards display"""
         group = QGroupBox("Selected Standards")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
         
         # Table of selected standards (scrollable)
         self.selected_table = QTableWidget()
@@ -257,6 +286,8 @@ class StandardsPanel(QWidget):
         """Create calibration control buttons"""
         group = QGroupBox("Calibration")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
         
         # Background method selection
         bg_method_layout = QHBoxLayout()
@@ -366,6 +397,8 @@ class StandardsPanel(QWidget):
         """Create results display group"""
         group = QGroupBox("Calibration Output")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
         
         # Progress output
         self.terminal_output = QTextEdit()
@@ -437,6 +470,8 @@ class StandardsPanel(QWidget):
     def update_fwhm_status(self, fwhm_calibration):
         """Update FWHM status when calibration is applied"""
         if fwhm_calibration:
+            # Update the calibrator with the FWHM calibration
+            self.calibrator.fwhm_calibration = fwhm_calibration
             # Get calibration date
             cal_date = fwhm_calibration.calibration_date
             if cal_date:
@@ -512,35 +547,305 @@ class StandardsPanel(QWidget):
         self.standards_data[standard_name] = {"loaded": False}
     
     def _load_custom_standard(self):
-        """Load custom standard"""
+        """Load custom standard and add to library"""
+        from PySide6.QtWidgets import QInputDialog
+        
+        # Ask for standard name
+        standard_name, ok = QInputDialog.getText(
+            self,
+            "New Standard Name",
+            "Enter a name for your new standard:\n"
+            "(This will be added to the standards library)",
+            text="My Standard"
+        )
+        
+        if not ok or not standard_name.strip():
+            return
+        
+        standard_name = standard_name.strip()
+        
+        # Check if already exists in library
+        if standard_name in STANDARDS_LIBRARY:
+            reply = QMessageBox.question(
+                self,
+                "Standard Exists",
+                f"A standard named '{standard_name}' already exists in the library.\n\n"
+                "Do you want to replace it?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        # Load the data first
+        spectrum_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Select XRF SPECTRUM File for {standard_name}",
+            "",
+            "All Supported (*.txt *.csv *.mca);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
+        )
+        
+        if not spectrum_path:
+            return
+        
+        try:
+            spectrum = self.io_handler.load_spectrum(spectrum_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Spectrum",
+                f"Failed to load XRF spectrum file:\n{str(e)}\n\n"
+                f"⚠️ Make sure you selected the SPECTRUM file (XRF data with energy/counts),\n"
+                f"NOT the concentration CSV file.\n\n"
+                f"You'll be asked for the concentration file in the next step."
+            )
+            return
+        
+        # Load or enter concentrations
+        concentrations = self._load_or_enter_concentrations(standard_name)
+        
+        if not concentrations:
+            return
+        
+        # Add to library
+        STANDARDS_LIBRARY[standard_name] = {
+            "description": "User-defined standard",
+            "matrix": "custom",
+            "use_case": "Custom calibration"
+        }
+        
+        # Add to library list widget
+        item = QListWidgetItem(f"{standard_name} - User-defined standard")
+        item.setData(Qt.UserRole, standard_name)
+        self.standards_list.addItem(item)
+        
+        # Store the data
+        self.standards_data[standard_name] = {
+            'spectrum': spectrum,
+            'concentrations': concentrations,
+            'loaded': True
+        }
+        
+        # Add to selected standards table
+        row = self.selected_table.rowCount()
+        self.selected_table.insertRow(row)
+        
+        # Standard name
+        name_item = QTableWidgetItem(standard_name)
+        self.selected_table.setItem(row, 0, name_item)
+        
+        # Status
+        status_item = QTableWidgetItem("✓ Loaded")
+        status_item.setForeground(Qt.green)
+        self.selected_table.setItem(row, 1, status_item)
+        
+        # Add load button
+        load_btn = QPushButton("Load Data")
+        load_btn.clicked.connect(lambda: self._load_standard_data(standard_name, row))
+        self.selected_table.setCellWidget(row, 2, load_btn)
+        
+        # Enable calibration if we have standards
+        self._check_ready_for_calibration()
+        
         QMessageBox.information(
             self,
-            "Custom Standard",
-            "Custom standard loading will be implemented.\n\n"
-            "You'll be able to:\n"
-            "1. Load spectrum file\n"
-            "2. Load or enter concentrations\n"
-            "3. Save as a new standard in the library"
+            "Standard Added to Library",
+            f"Successfully added '{standard_name}' to the standards library!\n\n"
+            f"Spectrum: {Path(spectrum_path).name}\n"
+            f"Elements: {len(concentrations)}\n"
+            f"Total concentration: {sum(concentrations.values()):.2f} wt%\n\n"
+            f"This standard is now available in the library for future use."
         )
     
     def _load_standard_data(self, standard_name, row):
         """Load spectrum and concentration data for a standard"""
-        # For now, just show a dialog
-        QMessageBox.information(
+        # Step 1: Load spectrum file
+        spectrum_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Standard Data",
-            f"Loading data for {standard_name}:\n\n"
-            f"1. Select spectrum file (.txt, .mca, etc.)\n"
-            f"2. Select concentration file (.csv)\n\n"
-            f"This will be implemented to load actual data."
+            f"Select Spectrum File for {standard_name}",
+            "",
+            "All Supported (*.txt *.csv *.mca);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
         )
         
-        # Update status
-        self.selected_table.setItem(row, 1, QTableWidgetItem("✓ Loaded"))
-        self.standards_data[standard_name]["loaded"] = True
+        if not spectrum_path:
+            return
+        
+        try:
+            spectrum = self.io_handler.load_spectrum(spectrum_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Spectrum",
+                f"Failed to load spectrum:\n{str(e)}"
+            )
+            return
+        
+        # Step 2: Load or enter concentrations
+        concentrations = self._load_or_enter_concentrations(standard_name)
+        
+        if not concentrations:
+            return
+        
+        # Store the data
+        self.standards_data[standard_name] = {
+            'spectrum': spectrum,
+            'concentrations': concentrations,
+            'loaded': True
+        }
+        
+        # Update table status
+        status_item = QTableWidgetItem("✓ Loaded")
+        status_item.setForeground(Qt.green)
+        self.selected_table.setItem(row, 1, status_item)
         
         # Enable calibration if we have standards
         self._check_ready_for_calibration()
+        
+        QMessageBox.information(
+            self,
+            "Standard Loaded",
+            f"Successfully loaded {standard_name}:\n\n"
+            f"Spectrum: {Path(spectrum_path).name}\n"
+            f"Elements: {len(concentrations)}\n"
+            f"Total concentration: {sum(concentrations.values()):.2f} wt%"
+        )
+    
+    def _load_or_enter_concentrations(self, standard_name):
+        """Load concentrations from CSV or enter manually"""
+        # Ask user if they have a CSV file
+        reply = QMessageBox.question(
+            self,
+            "Concentration Data",
+            f"Do you have a CSV file with element concentrations for {standard_name}?\n\n"
+            "CSV format should have columns: Element, Concentration\n"
+            "Example:\n"
+            "  Si, 32.5\n"
+            "  Al, 10.2\n"
+            "  Fe, 5.8",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
+        
+        if reply == QMessageBox.Cancel:
+            return None
+        elif reply == QMessageBox.Yes:
+            return self._load_concentrations_from_csv()
+        else:
+            return self._enter_concentrations_manually(standard_name)
+    
+    def _load_concentrations_from_csv(self):
+        """Load concentrations from CSV file"""
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Concentration CSV File",
+            "",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if not csv_path:
+            return None
+        
+        try:
+            concentrations = {}
+            with open(csv_path, 'r') as f:
+                reader = csv.reader(f)
+                
+                # Read first row to detect format
+                first_row = next(reader, None)
+                if not first_row:
+                    return None
+                
+                # Detect column indices
+                element_col = None
+                conc_col = None
+                
+                # Check if first row is header
+                header = [col.lower().strip() for col in first_row]
+                
+                # Look for element/symbol column
+                for i, col in enumerate(header):
+                    if 'symbol' in col or col == 'element':
+                        element_col = i
+                        break
+                
+                # Look for concentration column
+                for i, col in enumerate(header):
+                    if 'concentration' in col or 'conc' in col:
+                        conc_col = i
+                        break
+                
+                # If we found headers, use them
+                if element_col is not None and conc_col is not None:
+                    # Process data rows
+                    for row in reader:
+                        if len(row) > max(element_col, conc_col):
+                            element = row[element_col].strip()
+                            try:
+                                conc_str = row[conc_col].strip()
+                                if conc_str:
+                                    conc = float(conc_str)
+                                    # Convert mg/kg to wt% if needed (mg/kg / 10000 = wt%)
+                                    if conc > 100:  # Likely mg/kg
+                                        conc = conc / 10000.0
+                                    if conc > 0:
+                                        concentrations[element] = conc
+                            except (ValueError, IndexError):
+                                continue
+                else:
+                    # No header found, assume simple format: Element, Concentration
+                    # Try to parse first row as data
+                    try:
+                        element = first_row[0].strip()
+                        conc = float(first_row[1])
+                        if conc > 100:  # Likely mg/kg
+                            conc = conc / 10000.0
+                        if conc > 0:
+                            concentrations[element] = conc
+                    except (ValueError, IndexError):
+                        pass  # First row was header, skip it
+                    
+                    # Process remaining rows
+                    for row in reader:
+                        if len(row) >= 2:
+                            element = row[0].strip()
+                            try:
+                                conc = float(row[1])
+                                if conc > 100:  # Likely mg/kg
+                                    conc = conc / 10000.0
+                                if conc > 0:
+                                    concentrations[element] = conc
+                            except ValueError:
+                                continue
+            
+            if not concentrations:
+                QMessageBox.warning(
+                    self,
+                    "No Data",
+                    "No valid concentration data found in CSV file.\n\n"
+                    "Expected format:\n"
+                    "- With headers: Symbol, Concentration (or similar)\n"
+                    "- Without headers: Element, Concentration\n"
+                    "- Concentrations in wt% or mg/kg"
+                )
+                return None
+            
+            return concentrations
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading CSV",
+                f"Failed to load CSV file:\n{str(e)}"
+            )
+            return None
+    
+    def _enter_concentrations_manually(self, standard_name):
+        """Enter concentrations manually via dialog"""
+        from PySide6.QtWidgets import QDialog
+        dialog = ConcentrationEntryDialog(standard_name, self)
+        
+        if dialog.exec() == QDialog.Accepted:
+            return dialog.get_concentrations()
+        
+        return None
     
     def _on_bg_method_changed(self, index):
         """Handle background method selection change"""
@@ -565,27 +870,211 @@ class StandardsPanel(QWidget):
         
         self.calibrate_btn.setEnabled(has_loaded_standards and has_fwhm)
     
+    def _auto_load_calibration(self):
+        """Automatically load saved calibration on startup"""
+        cal_path = self.get_default_calibration_path()
+        
+        if cal_path.exists():
+            try:
+                self.calibration_result = CalibrationResult.load(str(cal_path))
+                
+                # Enable buttons
+                self.apply_btn.setEnabled(True)
+                self.save_btn.setEnabled(True)
+                
+                # Display results
+                self._display_calibration_results(self.calibration_result)
+                
+                # Update terminal output
+                self.terminal_output.append(f"✓ Loaded saved Standards calibration from {cal_path}")
+                
+                # Auto-apply
+                self.calibration_complete.emit(self.calibration_result)
+                
+            except Exception as e:
+                # Silently fail - no calibration available
+                self.terminal_output.append("No saved Standards calibration found (this is normal on first run)")
+    
+    def _auto_save_calibration(self):
+        """Automatically save calibration to default location"""
+        if self.calibration_result is None:
+            return
+        
+        try:
+            cal_path = self.get_default_calibration_path()
+            self.calibration_result.save(str(cal_path))
+            self.terminal_output.append(f"✓ Auto-saved Standards calibration to {cal_path}")
+        except Exception as e:
+            self.terminal_output.append(f"⚠ Auto-save failed: {str(e)}")
+    
+    def _display_calibration_results(self, result):
+        """Display calibration results in the results text box"""
+        if result and result.success:
+            # Get calibration date
+            cal_date = result.calibration_date
+            if cal_date:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(cal_date)
+                    date_str = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    date_str = "Unknown"
+            else:
+                date_str = "Unknown"
+            
+            results_html = f"""
+            <b>Standards Calibration Loaded</b><br><br>
+            <b>Intensity Parameters:</b><br>
+            Intensity Scale: {result.efficiency_params.get('intensity_scale', 'N/A'):.2f}<br>
+            Rh Scatter Scale: {result.efficiency_params.get('rh_scatter_scale', 'N/A'):.4f}<br><br>
+            <b>Fit Quality:</b><br>
+            R² = {result.r_squared:.4f}<br>
+            χ² = {result.chi_squared:.2f}<br><br>
+            <small>Calibrated: {date_str}</small><br>
+            <small>Auto-saved and will persist between sessions</small>
+            """
+            self.results_text.setHtml(results_html)
+    
     def _run_calibration(self):
-        """Run intensity calibration"""
+        """Run intensity calibration using multiple standards"""
+        # Check if we have loaded standards
+        loaded_standards = [name for name, data in self.standards_data.items() 
+                          if data.get('loaded', False)]
+        
+        if not loaded_standards:
+            QMessageBox.warning(
+                self,
+                "No Standards Loaded",
+                "Please load at least one standard before running calibration.\n\n"
+                "Click 'Load Data' for each standard you want to use."
+            )
+            return
+        
+        # Check if FWHM calibration is available
+        if self.calibrator.fwhm_calibration is None:
+            reply = QMessageBox.question(
+                self,
+                "No FWHM Calibration",
+                "No FWHM calibration is loaded. This may affect calibration quality.\n\n"
+                "Do you want to continue anyway?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        # Show progress
+        self.terminal_output.append(f"\n{'='*50}")
+        self.terminal_output.append(f"Starting calibration with {len(loaded_standards)} standard(s):")
+        for name in loaded_standards:
+            n_elements = len(self.standards_data[name]['concentrations'])
+            self.terminal_output.append(f"  • {name}: {n_elements} elements")
+        self.terminal_output.append(f"{'='*50}\n")
+        
+        # For now, show a detailed message about what will be implemented
         QMessageBox.information(
             self,
-            "Run Calibration",
-            "Intensity calibration will optimize:\n\n"
-            "• Intensity scaling factors\n"
-            "• Detector efficiency curve\n"
-            "• Scatter peak intensities\n\n"
-            "FWHM parameters are held fixed from FWHM Calibration.\n\n"
-            "Implementation in progress..."
+            "Multi-Standard Calibration",
+            f"Calibration will be performed using {len(loaded_standards)} standard(s):\n\n"
+            + "\n".join([f"• {name}" for name in loaded_standards]) + "\n\n"
+            "The calibration will:\n"
+            "1. Fit each standard spectrum with fixed FWHM\n"
+            "2. Extract peak intensities for all elements\n"
+            "3. Optimize intensity scaling factors\n"
+            "4. Calculate detector efficiency curve\n"
+            "5. Determine scatter peak parameters\n\n"
+            "Full implementation coming soon..."
         )
+        
+        self.terminal_output.append("Calibration ready to run with loaded standards.")
+        self.terminal_output.append("Full implementation in progress...\n")
+        
+        # TODO: Implement actual calibration
+        # This will involve:
+        # 1. For each standard:
+        #    - Fit spectrum with fixed FWHM from FWHM calibration
+        #    - Extract peak intensities
+        # 2. Combine all standards data
+        # 3. Optimize global parameters (intensity scale, efficiency, etc.)
+        # 4. Create CalibrationResult with all parameters
+        
+        # When calibration completes, auto-save it
+        # self._auto_save_calibration()
     
     def _apply_calibration(self):
         """Apply calibration"""
-        pass
+        if self.calibration_result is None:
+            QMessageBox.warning(self, "No Calibration", "Please run calibration first.")
+            return
+        
+        # Auto-save when applying
+        self._auto_save_calibration()
+        
+        # Emit signal
+        self.calibration_complete.emit(self.calibration_result)
+        
+        QMessageBox.information(
+            self,
+            "Calibration Applied",
+            "Standards calibration has been applied and saved.\n\n"
+            "This calibration will be automatically loaded next time you open the app."
+        )
     
     def _save_calibration(self):
         """Save calibration to file"""
-        pass
+        if self.calibration_result is None:
+            QMessageBox.warning(self, "No Calibration", "Please run calibration first.")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Standards Calibration",
+            str(Path.home() / "standards_calibration.json"),
+            "JSON Files (*.json)"
+        )
+        
+        if file_path:
+            try:
+                self.calibration_result.save(file_path)
+                QMessageBox.information(
+                    self,
+                    "Calibration Saved",
+                    f"Standards calibration saved to:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Save Error",
+                    f"Failed to save calibration:\n{str(e)}"
+                )
     
     def _load_calibration(self):
         """Load calibration from file"""
-        pass
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Standards Calibration",
+            str(Path.home()),
+            "JSON Files (*.json)"
+        )
+        
+        if file_path:
+            try:
+                self.calibration_result = CalibrationResult.load(file_path)
+                
+                # Enable buttons
+                self.apply_btn.setEnabled(True)
+                self.save_btn.setEnabled(True)
+                
+                # Display results
+                self._display_calibration_results(self.calibration_result)
+                
+                QMessageBox.information(
+                    self,
+                    "Calibration Loaded",
+                    f"Standards calibration loaded from:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Load Error",
+                    f"Failed to load calibration:\n{str(e)}"
+                )

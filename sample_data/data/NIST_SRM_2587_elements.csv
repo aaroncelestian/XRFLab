@@ -1,0 +1,34 @@
+Element,Symbol,Concentration_mg_kg,Uncertainty_mg_kg,Value_Type,Notes
+Aluminum,Al,58600,1700,Non-Certified,
+Arsenic,As,13.7,2.3,Certified,
+Barium,Ba,568,12,Non-Certified,
+Beryllium,Be,9.2,,Potential Interest,No uncertainty assigned
+Cadmium,Cd,1.92,0.23,Certified,
+Calcium,Ca,9270,200,Non-Certified,
+Cerium,Ce,57,,Potential Interest,No uncertainty assigned
+Chromium,Cr,92,11,Certified,
+Cobalt,Co,14,,Potential Interest,No uncertainty assigned
+Copper,Cu,160,,Potential Interest,No uncertainty assigned
+Gallium,Ga,13,,Potential Interest,No uncertainty assigned
+Iron,Fe,28130,250,Non-Certified,
+Lanthanum,La,29,,Potential Interest,No uncertainty assigned
+Lead,Pb,3242,57,Certified,
+Lithium,Li,32,,Potential Interest,No uncertainty assigned
+Magnesium,Mg,6690,250,Non-Certified,
+Manganese,Mn,651,23,Non-Certified,
+Mercury,Hg,0.290,0.009,Non-Certified,
+Neodymium,Nd,25,,Potential Interest,No uncertainty assigned
+Nickel,Ni,36,,Potential Interest,No uncertainty assigned
+Niobium,Nb,14,,Potential Interest,No uncertainty assigned
+Phosphorus,P,970,100,Non-Certified,
+Potassium,K,15830,550,Non-Certified,
+Scandium,Sc,11,,Potential Interest,No uncertainty assigned
+Silicon,Si,331300,2600,Non-Certified,
+Sodium,Na,11270,330,Non-Certified,
+Strontium,Sr,126,19,Non-Certified,
+Thorium,Th,7.5,,Potential Interest,No uncertainty assigned
+Titanium,Ti,3920,650,Non-Certified,
+Vanadium,V,78,,Potential Interest,No uncertainty assigned
+Ytterbium,Yb,1.6,,Potential Interest,No uncertainty assigned
+Yttrium,Y,15,,Potential Interest,No uncertainty assigned
+Zinc,Zn,335.8,7.6,Non-Certified,
