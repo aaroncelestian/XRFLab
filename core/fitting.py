@@ -19,6 +19,11 @@ class FitResult:
     residuals: np.ndarray
     peaks: List[Peak]
     statistics: Dict
+    tube_overlap_flags: List[Dict] = None
+
+    def __post_init__(self):
+        if self.tube_overlap_flags is None:
+            self.tube_overlap_flags = []
     
     def __str__(self):
         return (f"Fit Result: {len(self.peaks)} peaks, "
@@ -32,6 +37,11 @@ class SpectrumFitter:
     def __init__(self):
         self.background_modeler = BackgroundModeler()
         self.peak_fitter = PeakFitter()
+        self.tube_profile_library = None  # Optional TubeProfileLibrary
+
+    def set_tube_profile_library(self, library):
+        """Attach per-kV tube profile library for ratio constraints / flags."""
+        self.tube_profile_library = library
     
     def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
                              auto_find_peaks=True, tube_element='Rh',
@@ -104,6 +114,15 @@ class SpectrumFitter:
 
             # Broad inelastic Compton tube scatter (~19 keV for Rh Kα)
             if include_compton:
+                # Prefer measured profile geometry / width when available
+                if self.tube_profile_library is not None:
+                    profile = self.tube_profile_library.select_for_excitation(
+                        excitation_kv
+                    )
+                    if profile is not None and profile.source == 'measured':
+                        scatter_angle_deg = profile.scatter_angle_deg
+                        compton_fwhm_kev = profile.compton_fwhm_kev
+
                 compton_lines = get_tube_compton_lines(
                     tube_element=tube_element,
                     excitation_kv=excitation_kv,
@@ -120,6 +139,16 @@ class SpectrumFitter:
                         f"Including {n_c} {tube_element} Compton line(s) "
                         f"(θ={scatter_angle_deg:.0f}°, FWHM={compton_fwhm_kev*1000:.0f} eV)"
                     )
+
+        # Attach expected relative intensities from tube profile
+        if self.tube_profile_library is not None and include_tube_lines:
+            from core.tube_profile import attach_profile_to_peak_seeds
+            profile = self.tube_profile_library.select_for_excitation(excitation_kv)
+            peak_positions = attach_profile_to_peak_seeds(peak_positions, profile)
+            print(
+                f"Tube profile @ {profile.tube_kv:g} kV "
+                f"({profile.source}, ref={profile.reference_line})"
+            )
 
         if auto_find_peaks and counts_bg_subtracted is not None:
             print("Auto-detecting peaks...")
@@ -394,29 +423,226 @@ class SpectrumFitter:
                 **kwargs,
             )
         
-        # Step 4: Fit peaks (strongest first; subtract each so overlaps don't stack)
+        # Step 4: Fit peaks with tube-profile priors + known overlap doublets
         print(f"Fitting {len(peak_positions)} peaks using {peak_shape} shape...")
         fitted_peaks = []
         residual_counts = np.asarray(counts_bg_subtracted, dtype=float).copy()
-        
+        tube_constraint_notes = []
+
+        profile = None
+        if self.tube_profile_library is not None:
+            profile = self.tube_profile_library.select_for_excitation(excitation_kv)
+
+        from core.tube_constraints import (
+            find_overlap_pairs,
+            fit_overlap_doublet,
+            fit_peak_with_amplitude_prior,
+            expected_tube_amplitude,
+            subtract_peak_from_residual,
+            pick_tube_reference_peak,
+            DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
+        )
+
+        overlap_pairs, remaining_positions = find_overlap_pairs(peak_positions)
+        if overlap_pairs:
+            print(f"Known tube/sample overlap pairs: {len(overlap_pairs)}")
+            for pair in overlap_pairs:
+                print(
+                    f"  {pair.tube_pos.get('element')} {pair.tube_pos.get('line')} + "
+                    f"{pair.sample_pos.get('element')} {pair.sample_pos.get('line')} "
+                    f"(ΔE={pair.separation_kev*1000:.0f} eV)"
+                )
+
         def _local_height(pos):
             e0 = pos['energy']
             idx = int(np.argmin(np.abs(energy - e0)))
             return float(residual_counts[idx])
-        
-        ordered_positions = sorted(peak_positions, key=_local_height, reverse=True)
-        
-        for pos in ordered_positions:
-            known_line = bool(pos.get('element') and pos.get('line'))
-            is_compton = bool(
-                pos.get('line') and str(pos.get('line')).startswith('Compton')
+
+        def _label_peak(peak, pos, is_tube=None):
+            peak.element = pos.get('element')
+            peak.line = pos.get('line')
+            peak.is_tube_line = (
+                bool(pos.get('is_tube_line', False))
+                if is_tube is None else bool(is_tube)
             )
-            # Very weak residual peaks: lock center so LS cannot chase noise
+            if pos.get('fixed_fwhm') is not None:
+                peak.fixed_fwhm = float(pos['fixed_fwhm'])
+            return peak
+
+        # --- 4a: Fit non-overlap peaks (tube reference early when possible) ---
+        tube_remaining = [
+            p for p in remaining_positions
+            if p.get('is_tube_line') and not str(p.get('line', '')).startswith('Compton')
+        ]
+        compton_remaining = [
+            p for p in remaining_positions
+            if p.get('is_tube_line') and str(p.get('line', '')).startswith('Compton')
+        ]
+        sample_remaining = [
+            p for p in remaining_positions if not p.get('is_tube_line')
+        ]
+
+        # Prefer fitting profile reference tube line first (for amplitude scale)
+        ref_name = getattr(profile, 'reference_line', None) if profile else None
+        tube_ordered = sorted(tube_remaining, key=_local_height, reverse=True)
+        if ref_name:
+            tube_ordered = sorted(
+                tube_ordered,
+                key=lambda p: (0 if p.get('line') == ref_name else 1, -_local_height(p)),
+            )
+
+        tube_ref_peak = None
+
+        for pos in tube_ordered:
+            known_line = bool(pos.get('element') and pos.get('line'))
+            amp_prior = None
+            if tube_ref_peak is not None and profile is not None and pos.get('line'):
+                amp_prior = expected_tube_amplitude(
+                    profile, pos['line'], tube_ref_peak.amplitude,
+                    reference_line=tube_ref_peak.line,
+                )
+
+            if amp_prior is not None:
+                peak = fit_peak_with_amplitude_prior(
+                    energy, residual_counts,
+                    initial_center=pos['energy'],
+                    shape=peak_shape,
+                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fix_center=True,
+                    amplitude_prior=amp_prior,
+                    prior_weight=DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
+                    known_line=known_line,
+                )
+                if peak is not None:
+                    tube_constraint_notes.append(
+                        f"{pos.get('element')} {pos.get('line')}: "
+                        f"soft prior A={amp_prior:.1f} → {peak.amplitude:.1f}"
+                    )
+            else:
+                peak = self.peak_fitter.fit_single_peak(
+                    energy, residual_counts,
+                    initial_center=pos['energy'],
+                    shape=peak_shape,
+                    known_line=known_line,
+                    fix_center=True,
+                    fixed_fwhm=pos.get('fixed_fwhm'),
+                )
+
+            if peak is not None:
+                _label_peak(peak, pos, is_tube=True)
+                fitted_peaks.append(peak)
+                residual_counts = subtract_peak_from_residual(
+                    self.peak_fitter, energy, residual_counts, peak
+                )
+                if tube_ref_peak is None:
+                    tube_ref_peak = peak
+                elif profile and peak.line == getattr(profile, 'reference_line', None):
+                    tube_ref_peak = peak
+
+        # If reference wasn't first, re-pick from fitted tube peaks
+        if profile is not None:
+            tube_so_far = [p for p in fitted_peaks if p.is_tube_line]
+            picked = pick_tube_reference_peak(tube_so_far, profile)
+            if picked is not None:
+                tube_ref_peak = picked
+
+        # --- 4b: Overlap doublets (tube amp from profile × reference) ---
+        for pair in overlap_pairs:
+            amp_prior = None
+            if tube_ref_peak is not None and profile is not None:
+                amp_prior = expected_tube_amplitude(
+                    profile,
+                    pair.tube_pos.get('line'),
+                    tube_ref_peak.amplitude,
+                    reference_line=tube_ref_peak.line,
+                )
+            tube_peak, sample_peak = fit_overlap_doublet(
+                energy, residual_counts,
+                tube_energy=pair.tube_pos['energy'],
+                sample_energy=pair.sample_pos['energy'],
+                tube_amplitude_prior=amp_prior,
+                shape=peak_shape,
+                prior_weight=DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
+            )
+            if tube_peak is None or sample_peak is None:
+                # Fallback: sequential independent fits
+                for pos, is_tube in (
+                    (pair.tube_pos, True),
+                    (pair.sample_pos, False),
+                ):
+                    peak = self.peak_fitter.fit_single_peak(
+                        energy, residual_counts,
+                        initial_center=pos['energy'],
+                        shape=peak_shape,
+                        known_line=True,
+                        fix_center=True,
+                        fixed_fwhm=pos.get('fixed_fwhm'),
+                    )
+                    if peak is not None:
+                        _label_peak(peak, pos, is_tube=is_tube)
+                        fitted_peaks.append(peak)
+                        residual_counts = subtract_peak_from_residual(
+                            self.peak_fitter, energy, residual_counts, peak
+                        )
+                continue
+
+            _label_peak(tube_peak, pair.tube_pos, is_tube=True)
+            _label_peak(sample_peak, pair.sample_pos, is_tube=False)
+            fitted_peaks.extend([tube_peak, sample_peak])
+            residual_counts = subtract_peak_from_residual(
+                self.peak_fitter, energy, residual_counts, tube_peak
+            )
+            residual_counts = subtract_peak_from_residual(
+                self.peak_fitter, energy, residual_counts, sample_peak
+            )
+            note = (
+                f"Doublet {pair.tube_pos.get('element')} {pair.tube_pos.get('line')} + "
+                f"{pair.sample_pos.get('element')} {pair.sample_pos.get('line')}: "
+                f"A_tube={tube_peak.amplitude:.1f}, A_sample={sample_peak.amplitude:.1f}"
+            )
+            if amp_prior is not None:
+                note += f" (tube prior {amp_prior:.1f})"
+            tube_constraint_notes.append(note)
+            print(f"  {note}")
+
+        # --- 4c: Compton (wide, fixed) then remaining sample / unknown ---
+        for pos in sorted(compton_remaining, key=_local_height, reverse=True):
+            amp_prior = None
+            if tube_ref_peak is not None and profile is not None and pos.get('line'):
+                amp_prior = expected_tube_amplitude(
+                    profile, pos['line'], tube_ref_peak.amplitude,
+                    reference_line=tube_ref_peak.line,
+                )
+            peak = fit_peak_with_amplitude_prior(
+                energy, residual_counts,
+                initial_center=pos['energy'],
+                shape=peak_shape,
+                fixed_fwhm=pos.get('fixed_fwhm'),
+                fix_center=True,
+                amplitude_prior=amp_prior,
+                prior_weight=DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
+                known_line=True,
+            ) if amp_prior is not None else self.peak_fitter.fit_single_peak(
+                energy, residual_counts,
+                initial_center=pos['energy'],
+                shape=peak_shape,
+                known_line=True,
+                fix_center=True,
+                fixed_fwhm=pos.get('fixed_fwhm'),
+            )
+            if peak is not None:
+                _label_peak(peak, pos, is_tube=True)
+                fitted_peaks.append(peak)
+                residual_counts = subtract_peak_from_residual(
+                    self.peak_fitter, energy, residual_counts, peak
+                )
+
+        for pos in sorted(sample_remaining, key=_local_height, reverse=True):
+            known_line = bool(pos.get('element') and pos.get('line'))
             local_h = _local_height(pos)
             residual_max = float(np.nanmax(residual_counts)) if residual_counts.size else 0.0
-            fix_center = is_compton or (
-                residual_max > 0
-                and local_h < 0.05 * residual_max
+            fix_center = known_line or (
+                residual_max > 0 and local_h < 0.05 * residual_max
             )
             peak = self.peak_fitter.fit_single_peak(
                 energy, residual_counts,
@@ -426,55 +652,16 @@ class SpectrumFitter:
                 fix_center=fix_center,
                 fixed_fwhm=pos.get('fixed_fwhm'),
             )
-            
             if peak is not None:
-                # Add element information
-                peak.element = pos.get('element')
-                peak.line = pos.get('line')
-                peak.is_tube_line = pos.get('is_tube_line', False)
-                if pos.get('fixed_fwhm') is not None:
-                    peak.fixed_fwhm = float(pos['fixed_fwhm'])
+                _label_peak(peak, pos)
                 fitted_peaks.append(peak)
-                
-                # Remove this peak from the residual spectrum before fitting others
-                if peak.shape == 'gaussian':
-                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                    residual_counts -= self.peak_fitter.gaussian(
-                        energy, peak.amplitude, peak.energy, sigma
-                    )
-                elif peak.shape == 'voigt':
-                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                    gamma = peak.shape_params.get('gamma', 0.05)
-                    residual_counts -= self.peak_fitter.voigt(
-                        energy, peak.amplitude, peak.energy, sigma, gamma
-                    )
-                elif peak.shape == 'pseudo_voigt':
-                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                    eta = peak.shape_params.get('eta', 0.5)
-                    residual_counts -= self.peak_fitter.pseudo_voigt(
-                        energy, peak.amplitude, peak.energy, sigma, eta
-                    )
-                elif peak.shape == 'hypermet':
-                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                    tail_amp = peak.shape_params.get('tail_amplitude', 0.1)
-                    tail_slope = peak.shape_params.get('tail_slope', 2.0)
-                    residual_counts -= self.peak_fitter.hypermet(
-                        energy, peak.amplitude, peak.energy, sigma, tail_amp, tail_slope
-                    )
-                elif peak.shape == 'tail_gaussian':
-                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                    tail_frac = peak.shape_params.get('tail_fraction', 0.15)
-                    tail_sigma = peak.shape_params.get('tail_sigma', sigma * 3)
-                    residual_counts -= self.peak_fitter.tail_gaussian(
-                        energy, peak.amplitude, peak.energy, sigma, tail_frac, tail_sigma
-                    )
-                else:
-                    sigma = peak.fwhm / 2.355
-                    residual_counts -= self.peak_fitter.gaussian(
-                        energy, peak.amplitude, peak.energy, sigma
-                    )
+                residual_counts = subtract_peak_from_residual(
+                    self.peak_fitter, energy, residual_counts, peak
+                )
         
         print(f"Successfully fitted {len(fitted_peaks)} peaks")
+        if tube_constraint_notes:
+            print(f"Tube constraints applied: {len(tube_constraint_notes)}")
         
         # Step 5: Reconstruct fitted spectrum
         fitted_spectrum = np.copy(background)
@@ -530,13 +717,30 @@ class SpectrumFitter:
         
         # Add iteration count (placeholder for now)
         statistics['iterations'] = 1
+        if tube_constraint_notes:
+            statistics['tube_constraint_notes'] = list(tube_constraint_notes)
+
+        # Compare fitted tube line ratios to the instrument tube profile
+        tube_overlap_flags = []
+        if self.tube_profile_library is not None:
+            from core.tube_profile import compare_fitted_tube_ratios
+            profile = self.tube_profile_library.select_for_excitation(excitation_kv)
+            tube_overlap_flags = compare_fitted_tube_ratios(fitted_peaks, profile)
+            if tube_overlap_flags:
+                statistics['tube_overlap_warnings'] = [
+                    f['message'] for f in tube_overlap_flags
+                ]
+                print(f"Tube profile overlap flags: {len(tube_overlap_flags)}")
+                for flag in tube_overlap_flags:
+                    print(f"  ⚠ {flag['message']}")
         
         return FitResult(
             background=background,
             fitted_spectrum=fitted_spectrum,
             residuals=residuals,
             peaks=fitted_peaks,
-            statistics=statistics
+            statistics=statistics,
+            tube_overlap_flags=tube_overlap_flags,
         )
     
     def identify_peaks(self, peaks, tolerance=0.05):

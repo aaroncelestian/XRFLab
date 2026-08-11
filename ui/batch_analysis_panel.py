@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QFileDialog, QProgressBar,
                                QMessageBox, QSplitter, QTabWidget, QListWidget,
                                QListWidgetItem, QTextEdit, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QCheckBox, QComboBox, QScrollArea)
+                               QHeaderView, QCheckBox, QComboBox, QScrollArea, QFormLayout)
 from PySide6.QtCore import Qt, Signal, QThread
 from pathlib import Path
 import pyqtgraph as pg
@@ -60,176 +60,129 @@ class BatchAnalysisPanel(QWidget):
     def set_element_panel(self, element_panel):
         """Set reference to Analysis tab's element panel"""
         self.element_panel = element_panel
+        self._update_settings_summary()
     
     def _init_ui(self):
         """Initialize the user interface with sub-tabs"""
         layout = QVBoxLayout(self)
-        
-        # Create splitter for controls and plot
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
         splitter = QSplitter(Qt.Horizontal)
-        
-        # Left panel - Tabbed interface
+
         left_tab_widget = QTabWidget()
-        left_tab_widget.setMaximumWidth(700)
-        
-        # Tab 1: Setup (Files + Settings Summary)
-        setup_tab = self._create_setup_tab()
-        left_tab_widget.addTab(setup_tab, "Setup")
-        
-        # Tab 2: Results
-        results_tab = self._create_results_tab()
-        left_tab_widget.addTab(results_tab, "Results")
-        
+        left_tab_widget.setMinimumWidth(280)
+        left_tab_widget.setMaximumWidth(380)
+
+        left_tab_widget.addTab(self._create_setup_tab(), "Setup")
+        left_tab_widget.addTab(self._create_results_tab(), "Results")
+
         splitter.addWidget(left_tab_widget)
-        
-        # Right side: Spectrum visualization
-        plot_widget = self._create_plot_widget()
-        splitter.addWidget(plot_widget)
-        
-        # Set initial sizes
-        splitter.setSizes([600, 600])
-        
+        splitter.addWidget(self._create_plot_widget())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([320, 900])
+
         layout.addWidget(splitter)
-    
+
     def _create_setup_tab(self):
         """Create Setup tab with files and settings summary"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(3)
-        
-        # Info banner
-        info_group = self._create_info_banner()
-        layout.addWidget(info_group)
-        
-        # Settings summary from Analysis tab
-        settings_group = self._create_settings_summary_group()
-        layout.addWidget(settings_group)
-        
-        # File selection group
-        files_group = self._create_file_selection_group()
-        layout.addWidget(files_group, stretch=1)
-        
-        # Processing controls
-        controls_group = self._create_processing_controls_group()
-        layout.addWidget(controls_group)
-        
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+
+        layout.addWidget(self._create_settings_summary_group())
+        layout.addWidget(self._create_file_selection_group(), stretch=1)
+        layout.addWidget(self._create_processing_controls_group())
+
         return widget
-    
+
     def _create_results_tab(self):
         """Create Results tab with sub-tabs"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create sub-tab widget
+
         results_subtabs = QTabWidget()
-        
-        # Sub-tab 1: Summary & List
-        summary_tab = self._create_summary_subtab()
-        results_subtabs.addTab(summary_tab, "Summary")
-        
-        # Sub-tab 2: Concentration Trends
-        trends_tab = self._create_trends_subtab()
-        results_subtabs.addTab(trends_tab, "Trends")
-        
+        results_subtabs.addTab(self._create_summary_subtab(), "Summary")
+        results_subtabs.addTab(self._create_trends_subtab(), "Trends")
         layout.addWidget(results_subtabs)
-        
+
         return widget
-    
+
     def _create_summary_subtab(self):
         """Create summary sub-tab with statistics and spectrum list"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(3)
-        
-        # Summary statistics
-        summary_group = self._create_summary_group()
-        layout.addWidget(summary_group)
-        
-        # Spectrum list
-        list_group = self._create_spectrum_list_group()
-        layout.addWidget(list_group, stretch=2)
-        
-        # Export controls
-        export_group = self._create_export_group()
-        layout.addWidget(export_group)
-        
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        layout.addWidget(self._create_summary_group())
+        layout.addWidget(self._create_spectrum_list_group(), stretch=2)
+        layout.addWidget(self._create_export_group())
+
         return widget
-    
+
     def _create_trends_subtab(self):
         """Create concentration trends sub-tab"""
         widget = QWidget()
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(5)
-        
-        # Left: Element selection
-        selection_group = self._create_element_trends_selection()
-        layout.addWidget(selection_group)
-        
-        # Right: Plots
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        layout.addWidget(self._create_element_trends_selection())
         self.trends_plot_widget = self._create_trends_plot_widget()
         layout.addWidget(self.trends_plot_widget, stretch=1)
-        
+
         return widget
-    
-    def _create_info_banner(self):
-        """Create info banner explaining workflow"""
-        group = QGroupBox("Batch Processing Workflow")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        
-        info = QLabel(
-            "<b>📋 How to use Batch Analysis:</b><br>"
-            "1. Go to <b>Analysis</b> tab and configure your fitting parameters<br>"
-            "2. Select elements, experimental parameters, and fitting options<br>"
-            "3. Return here and add your spectrum files<br>"
-            "4. Click <b>Process All Spectra</b> - settings from Analysis tab will be used<br><br>"
-            "<i>All spectra will be fit with the same parameters for consistency</i>"
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("QLabel { background-color: #e3f2fd; padding: 10px; border-radius: 5px; }")
-        layout.addWidget(info)
-        
-        return group
-    
+
     def _create_settings_summary_group(self):
-        """Create settings summary showing what will be used from Analysis tab"""
-        group = QGroupBox("Current Settings (from Analysis Tab)")
+        """Compact settings snapshot from Analysis tab"""
+        group = QGroupBox("Settings (from Analysis)")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        
-        self.settings_summary = QTextEdit()
-        self.settings_summary.setReadOnly(True)
-        self.settings_summary.setMaximumHeight(120)
-        self.settings_summary.setStyleSheet(
-            "QTextEdit { background-color: #f5f5f5; font-family: 'Courier New', monospace; font-size: 9pt; }"
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(3)
+        form.setLabelAlignment(Qt.AlignRight)
+
+        self.settings_elements = QLabel("—")
+        self.settings_elements.setWordWrap(True)
+        self.settings_excitation = QLabel("—")
+        self.settings_fit = QLabel("—")
+        self.settings_tube = QLabel("—")
+
+        form.addRow("Elements", self.settings_elements)
+        form.addRow("Beam", self.settings_excitation)
+        form.addRow("Fit", self.settings_fit)
+        form.addRow("Tube", self.settings_tube)
+        layout.addLayout(form)
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.setToolTip(
+            "Pull current elements / exp params / fit options from the Analysis tab.\n"
+            "Configure those there first, then refresh here before processing."
         )
-        layout.addWidget(self.settings_summary)
-        
-        # Refresh button
-        refresh_btn = QPushButton("🔄 Refresh Settings")
         refresh_btn.clicked.connect(self._update_settings_summary)
-        refresh_btn.setToolTip("Update settings from Analysis tab")
         layout.addWidget(refresh_btn)
-        
-        # Initial update
+
         self._update_settings_summary()
-        
         return group
-    
+
     def _update_settings_summary(self):
         """Update settings summary from Analysis tab"""
         if not self.element_panel:
-            self.settings_summary.setPlainText(
-                "⚠️  Analysis tab not initialized yet.\n"
-                "Configure settings in Analysis tab first."
-            )
+            self.settings_elements.setText("not ready")
+            self.settings_excitation.setText("—")
+            self.settings_fit.setText("—")
+            self.settings_tube.setText("—")
+            self.settings_elements.setStyleSheet("color: #888;")
             return
-        
-        # Get settings from element panel
+
         try:
             elements = [e['symbol'] for e in self.element_panel.selected_elements]
             excitation = self.element_panel.excitation_spin.value()
@@ -238,22 +191,34 @@ class BatchAnalysisPanel(QWidget):
             background = self.element_panel.background_combo.currentText()
             peak_shape = self.element_panel.peak_shape_combo.currentText()
             escape_peaks = self.element_panel.escape_peaks_check.isChecked()
-            tube_element = self.element_panel.tube_element_combo.currentText() if self.element_panel.tube_lines_check.isChecked() else "None"
-            
-            summary = f"""
-Elements:     {', '.join(elements) if elements else 'None selected'}
-Excitation:   {excitation} keV
-Tube Current: {current} mA
-Live Time:    {live_time} s
-Background:   {background}
-Peak Shape:   {peak_shape}
-Escape Peaks: {'Yes' if escape_peaks else 'No'}
-Tube Lines:   {tube_element}
-            """
-            
-            self.settings_summary.setPlainText(summary.strip())
-            
-            # Update config
+            tube_on = self.element_panel.tube_lines_check.isChecked()
+            tube_element = (
+                self.element_panel.tube_element_combo.currentText() if tube_on else "off"
+            )
+
+            self.settings_elements.setStyleSheet("")
+            if elements:
+                shown = ", ".join(elements[:12])
+                if len(elements) > 12:
+                    shown += f" (+{len(elements) - 12})"
+                self.settings_elements.setText(shown)
+                self.settings_elements.setToolTip(", ".join(elements))
+            else:
+                self.settings_elements.setText("none selected")
+                self.settings_elements.setStyleSheet("color: #b00020;")
+                self.settings_elements.setToolTip(
+                    "Select elements on the Analysis → Elements tab"
+                )
+
+            self.settings_excitation.setText(
+                f"{excitation:g} keV · {current:g} mA · {live_time:g} s"
+            )
+            self.settings_fit.setText(
+                f"{peak_shape} · {background}"
+                + (" · escape" if escape_peaks else "")
+            )
+            self.settings_tube.setText(tube_element)
+
             self.config.elements = elements
             self.config.excitation_energy = excitation
             self.config.tube_current = current
@@ -261,212 +226,198 @@ Tube Lines:   {tube_element}
             self.config.background_method = background.lower()
             self.config.peak_shape = peak_shape.lower()
             self.config.include_escape_peaks = escape_peaks
-            self.config.tube_element = tube_element if tube_element != "None" else None
-            
+            self.config.tube_element = tube_element if tube_on else None
+
         except Exception as e:
-            self.settings_summary.setPlainText(
-                f"⚠️  Error reading settings:\n{str(e)}\n\n"
-                "Make sure Analysis tab is properly configured."
-            )
-    
+            self.settings_elements.setText("error")
+            self.settings_elements.setStyleSheet("color: #b00020;")
+            self.settings_elements.setToolTip(str(e))
+
     def _create_file_selection_group(self):
         """Create file selection group"""
-        group = QGroupBox("Spectrum Files")
+        group = QGroupBox("Files")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(5)
-        
-        # Info
-        info = QLabel(
-            "<b>Select multiple spectrum files for batch processing</b><br>"
-            "All spectra will be fit with the same parameters"
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        
-        # File list (more space now)
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+
         self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(200)
+        self.file_list.setMinimumHeight(140)
+        self.file_list.setToolTip(
+            "Spectra to process with the Analysis-tab settings"
+        )
         layout.addWidget(self.file_list, stretch=1)
-        
-        # Buttons
+
         btn_layout = QHBoxLayout()
-        
-        add_files_btn = QPushButton("Add Files...")
+        btn_layout.setSpacing(6)
+
+        add_files_btn = QPushButton("Add…")
+        add_files_btn.setToolTip("Add individual spectrum files")
         add_files_btn.clicked.connect(self._add_files)
         btn_layout.addWidget(add_files_btn)
-        
-        add_dir_btn = QPushButton("Add Directory...")
+
+        add_dir_btn = QPushButton("Folder…")
+        add_dir_btn.setToolTip("Add all supported spectra from a directory")
         add_dir_btn.clicked.connect(self._add_directory)
         btn_layout.addWidget(add_dir_btn)
-        
+
         clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self.file_list.clear)
+        clear_btn.clicked.connect(self._clear_files)
         btn_layout.addWidget(clear_btn)
-        
-        btn_layout.addStretch()
+
         layout.addLayout(btn_layout)
-        
-        # File count
-        self.file_count_label = QLabel("0 files selected")
+
+        self.file_count_label = QLabel("0 files")
+        self.file_count_label.setStyleSheet("color: #666;")
         layout.addWidget(self.file_count_label)
-        
+
         return group
-    
+
+    def _clear_files(self):
+        self.file_list.clear()
+        self._update_file_count()
+
     def _create_processing_controls_group(self):
         """Create processing controls"""
-        group = QGroupBox("Processing")
+        group = QGroupBox("Process")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
-        # Options
-        self.use_calibration_check = QCheckBox("Use Calibration (if available)")
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+
+        self.use_calibration_check = QCheckBox("Use calibration")
+        self.use_calibration_check.setToolTip(
+            "Apply intensity calibration if available"
+        )
         layout.addWidget(self.use_calibration_check)
-        
-        self.save_fits_check = QCheckBox("Save Individual Fits")
+
+        self.save_fits_check = QCheckBox("Save individual fits")
         self.save_fits_check.setChecked(True)
         layout.addWidget(self.save_fits_check)
-        
-        # Progress bar
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setMaximumHeight(4)
         layout.addWidget(self.progress_bar)
-        
+
         self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet("color: #666; font-size: 11px;")
         layout.addWidget(self.progress_label)
-        
-        # Process button
-        self.process_btn = QPushButton("Process All Spectra")
+
+        self.process_btn = QPushButton("Process All")
         self.process_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
                 color: white;
-                padding: 10px;
+                padding: 8px;
                 font-weight: bold;
-                font-size: 12pt;
             }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:disabled { background-color: #cccccc; color: #666; }
         """)
+        self.process_btn.setToolTip(
+            "Fit every listed spectrum with the current Analysis-tab settings"
+        )
         self.process_btn.clicked.connect(self._process_batch)
         self.process_btn.setEnabled(False)
         layout.addWidget(self.process_btn)
-        
+
         return group
-    
+
     def _create_summary_group(self):
         """Create summary statistics group"""
-        group = QGroupBox("Summary Statistics")
+        group = QGroupBox("Summary")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
+        layout.setContentsMargins(8, 10, 8, 8)
+
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setMaximumHeight(100)
-        self.summary_text.setPlainText("No results yet")
+        self.summary_text.setMaximumHeight(88)
+        self.summary_text.setPlaceholderText("No results yet")
+        self.summary_text.setStyleSheet(
+            "QTextEdit { background-color: #f5f5f5; font-size: 11px; "
+            "border: 1px solid #ddd; }"
+        )
         layout.addWidget(self.summary_text)
-        
+
         return group
-    
+
     def _create_spectrum_list_group(self):
         """Create spectrum list group"""
-        group = QGroupBox("Processed Spectra")
+        group = QGroupBox("Spectra")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
-        # Info
-        info = QLabel("<b>Click a spectrum to view fit details</b>")
-        layout.addWidget(info)
-        
-        # Results table
+        layout.setContentsMargins(8, 10, 8, 8)
+
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(5)
         self.results_table.setHorizontalHeaderLabels([
-            "Spectrum", "Success", "R²", "χ²", "Time (s)"
+            "Spectrum", "OK", "R²", "χ²", "s"
         ])
         self.results_table.horizontalHeader().setStretchLastSection(True)
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.results_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.results_table.setToolTip("Select a row to show its fit on the right")
         self.results_table.itemSelectionChanged.connect(self._on_spectrum_selected)
         layout.addWidget(self.results_table)
-        
+
         return group
-    
+
     def _create_export_group(self):
         """Create export controls"""
-        group = QGroupBox("Export Results")
+        group = QGroupBox("Export")
         layout = QHBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        
-        export_csv_btn = QPushButton("Export CSV")
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+
+        export_csv_btn = QPushButton("CSV")
         export_csv_btn.clicked.connect(lambda: self._export_results("csv"))
         layout.addWidget(export_csv_btn)
-        
-        export_excel_btn = QPushButton("Export Excel")
+
+        export_excel_btn = QPushButton("Excel")
         export_excel_btn.clicked.connect(lambda: self._export_results("excel"))
         layout.addWidget(export_excel_btn)
-        
+
         layout.addStretch()
-        
         return group
-    
+
     def _create_element_trends_selection(self):
         """Create element selection for trends plotting"""
-        group = QGroupBox("Elements to Plot")
+        group = QGroupBox("Elements")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(5)
-        
-        # Info
-        info = QLabel("<b>Select elements to plot concentration trends</b>")
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        
-        # Checkboxes for each element (will be populated after processing)
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
+
         self.element_trend_checks = {}
         self.element_checks_layout = QVBoxLayout()
         layout.addLayout(self.element_checks_layout)
-        
-        # Select/Deselect all buttons
+
         btn_layout = QHBoxLayout()
-        
-        select_all_btn = QPushButton("Select All")
+        btn_layout.setSpacing(6)
+
+        select_all_btn = QPushButton("All")
         select_all_btn.clicked.connect(self._select_all_trends)
         btn_layout.addWidget(select_all_btn)
-        
-        deselect_all_btn = QPushButton("Deselect All")
+
+        deselect_all_btn = QPushButton("None")
         deselect_all_btn.clicked.connect(self._deselect_all_trends)
         btn_layout.addWidget(deselect_all_btn)
-        
         layout.addLayout(btn_layout)
-        
-        # Update button
-        update_btn = QPushButton("Update Plots")
+
+        update_btn = QPushButton("Update")
         update_btn.clicked.connect(self._update_trends_plots)
         update_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
                 color: white;
-                padding: 8px;
+                padding: 6px;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
+            QPushButton:hover { background-color: #1976D2; }
         """)
         layout.addWidget(update_btn)
-        
+
         layout.addStretch()
-        
         return group
-    
+
     def _create_trends_plot_widget(self):
         """Create widget for concentration trends plots"""
         widget = QWidget()
@@ -506,9 +457,9 @@ Tube Lines:   {tube_element}
         self.spectrum_plot = self.plot_widget.addPlot(row=0, col=0)
         self.spectrum_plot.setLabel('left', 'Counts', color='k')
         self.spectrum_plot.setLabel('bottom', 'Energy (keV)', color='k')
-        self.spectrum_plot.setTitle('Spectrum Fit', color='k')
-        self.spectrum_plot.addLegend()
-        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.spectrum_plot.setTitle('Spectrum fit', color='k', size='11pt')
+        self.spectrum_plot.addLegend(offset=(10, 10))
+        self.spectrum_plot.showGrid(x=True, y=True, alpha=0.25)
         
         # Measured spectrum
         self.measured_curve = self.spectrum_plot.plot(
@@ -570,7 +521,7 @@ Tube Lines:   {tube_element}
     def _update_file_count(self):
         """Update file count label"""
         count = self.file_list.count()
-        self.file_count_label.setText(f"{count} file{'s' if count != 1 else ''} selected")
+        self.file_count_label.setText(f"{count} file{'s' if count != 1 else ''}")
         # Update settings to check if elements are selected
         self._update_settings_summary()
         self.process_btn.setEnabled(count > 0 and len(self.config.elements) > 0)
@@ -629,9 +580,8 @@ Tube Lines:   {tube_element}
         QMessageBox.information(
             self,
             "Processing Complete",
-            f"Successfully processed {len(results)} spectra.\n\n"
-            f"Click on a spectrum in the Results tab to view fit details.\n"
-            f"Check the Trends sub-tab to plot concentration trends."
+            f"Processed {len(results)} spectra.\n"
+            "Open Results to review fits and Trends.",
         )
     
     def _on_processing_error(self, error_message):
@@ -677,23 +627,16 @@ Tube Lines:   {tube_element}
         
         stats = self.processor.get_summary_statistics()
         
-        summary = f"""
-Batch Processing Summary
-{'='*50}
-
-Total Spectra:      {stats['total_spectra']}
-Successful Fits:    {stats['successful_fits']}
-Failed Fits:        {stats['failed_fits']}
-Success Rate:       {stats['success_rate']:.1f}%
-
-Average R²:         {stats['average_r_squared']:.4f}
-Average χ²:         {stats['average_chi_squared']:.4f}
-
-Average Fit Time:   {stats['average_fit_time']:.2f} s
-Total Time:         {stats['total_processing_time']:.2f} s
-        """
+        summary = (
+            f"{stats['successful_fits']}/{stats['total_spectra']} ok  "
+            f"({stats['success_rate']:.0f}%)\n"
+            f"R² avg {stats['average_r_squared']:.4f}   "
+            f"χ² avg {stats['average_chi_squared']:.4f}\n"
+            f"Time {stats['total_processing_time']:.1f}s "
+            f"({stats['average_fit_time']:.2f}s/spectrum)"
+        )
         
-        self.summary_text.setPlainText(summary.strip())
+        self.summary_text.setPlainText(summary)
     
     def _on_spectrum_selected(self):
         """Handle spectrum selection from results table"""

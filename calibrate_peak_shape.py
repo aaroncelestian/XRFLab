@@ -42,13 +42,15 @@ class PeakMeasurement:
     fwhm: float    # keV
     intensity: float
     fit_quality: float  # R²
+    tube_kv: float = None  # Instrument mode used when spectrum was collected
 
 
 class PeakShapeCalibrator:
     """Calibrate detector resolution vs energy"""
     
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, tube_kv: float = None):
         self.data_dir = Path(data_dir)
+        self.tube_kv = tube_kv
         self.bg_modeler = BackgroundModeler()
         self.peak_fitter = PeakFitter()
         self.measurements: List[PeakMeasurement] = []
@@ -183,7 +185,8 @@ class PeakShapeCalibrator:
                 energy=mu_fit,
                 fwhm=fwhm_fit,
                 intensity=amp_fit,
-                fit_quality=r_squared
+                fit_quality=r_squared,
+                tube_kv=self.tube_kv,
             )
             
         except Exception as e:

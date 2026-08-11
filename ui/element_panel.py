@@ -232,6 +232,21 @@ class ElementPanel(QWidget):
             "Without calibration, width is free to refine within bounds."
         )
         layout.addWidget(self.fwhm_status_label)
+
+        self.tube_profile_status_label = QLabel(
+            "Tube profile: defaults (measure blanks at 15/30/50 kV)"
+        )
+        self.tube_profile_status_label.setWordWrap(True)
+        self.tube_profile_status_label.setStyleSheet(
+            "color: #994400; font-weight: bold; padding: 4px;"
+        )
+        self.tube_profile_status_label.setToolTip(
+            "Per-voltage Rh scatter line ratios from Calibration → Tube Profiles.\n"
+            "Analysis soft-priors tube amplitudes to those ratios and joint-fits\n"
+            "known overlaps (Mo L/S, Rh L/Cl). Elevated ratios after fit still flag\n"
+            "possible extra sample intensity under a tube line."
+        )
+        layout.addWidget(self.tube_profile_status_label)
         
         # Escape peaks checkbox
         self.escape_peaks_check = QCheckBox("Include Escape Peaks")
@@ -738,6 +753,40 @@ class ElementPanel(QWidget):
         self.fwhm_status_label.setText(text)
         self.fwhm_status_label.setStyleSheet(
             "color: #1b7a1b; font-weight: bold; padding: 4px;"
+        )
+
+    def update_tube_profile_status(self, library=None):
+        """Show which per-kV tube profiles are available for Analysis."""
+        if library is None or not getattr(library, 'profiles', None):
+            self.tube_profile_status_label.setText(
+                "Tube profile: defaults (measure blanks at 15/30/50 kV)"
+            )
+            self.tube_profile_status_label.setStyleSheet(
+                "color: #994400; font-weight: bold; padding: 4px;"
+            )
+            return
+
+        parts = []
+        n_meas = 0
+        for kv in library.available_kvs:
+            p = library.profiles.get(library._key(kv))
+            if p is None:
+                parts.append(f"{kv:g}=—")
+            elif p.source == 'measured':
+                parts.append(f"{kv:g}=✓")
+                n_meas += 1
+            else:
+                parts.append(f"{kv:g}=def")
+
+        text = (
+            f"Tube profile ({library.tube_element}): "
+            + "  ".join(parts)
+            + f"  — {n_meas} measured"
+        )
+        color = "#1b7a1b" if n_meas else "#994400"
+        self.tube_profile_status_label.setText(text)
+        self.tube_profile_status_label.setStyleSheet(
+            f"color: {color}; font-weight: bold; padding: 4px;"
         )
 
     def get_experimental_params(self):

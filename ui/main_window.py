@@ -16,8 +16,11 @@ from ui.results_panel import ResultsPanel
 from ui.batch_analysis_panel import BatchAnalysisPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
+from ui.tube_profile_panel import TubeProfilePanel
 from utils.io_handler import IOHandler
 from utils.updater import check_for_updates
+from utils.desktop_shortcut import install_desktop_shortcut
+from utils.paths import icon_path, resource_path
 from core.fitting import SpectrumFitter
 from core.smart_peak_id import (
     SmartIDConfig,
@@ -50,6 +53,7 @@ class MainWindow(QMainWindow):
         self._create_status_bar()
         self._create_central_widget()
         self._load_stylesheet()
+        self._apply_window_icon()
         
         # Restore window state
         self._restore_settings()
@@ -123,6 +127,12 @@ class MainWindow(QMainWindow):
             "Calibrate detector resolution (FWHM vs energy)"
         )
         self.fwhm_calibration_action.triggered.connect(self.show_fwhm_calibration)
+
+        self.tube_profile_action = QAction("&Tube Profiles...", self)
+        self.tube_profile_action.setStatusTip(
+            "Measure per-voltage Rh tube scatter line ratios (15/30/50 kV)"
+        )
+        self.tube_profile_action.triggered.connect(self.show_tube_profiles)
         
         self.standards_calibration_action = QAction("&Standards Calibration...", self)
         self.standards_calibration_action.setStatusTip(
@@ -140,6 +150,12 @@ class MainWindow(QMainWindow):
             "Pull the latest changes from the XRFLab repository"
         )
         self.check_updates_action.triggered.connect(self.check_for_updates)
+
+        self.install_shortcut_action = QAction("Install &Desktop Shortcut...", self)
+        self.install_shortcut_action.setStatusTip(
+            "Create a Desktop shortcut (Mac app / Windows .lnk) to launch XRFLab"
+        )
+        self.install_shortcut_action.triggered.connect(self.install_desktop_shortcut)
         
         self.about_action = QAction("&About", self)
         self.about_action.setStatusTip("About this application")
@@ -178,6 +194,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.calibration_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self.fwhm_calibration_action)
+        tools_menu.addAction(self.tube_profile_action)
         tools_menu.addAction(self.standards_calibration_action)
         tools_menu.addSeparator()
         tools_menu.addAction(self.element_db_action)
@@ -185,6 +202,7 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("&Help")
         help_menu.addAction(self.check_updates_action)
+        help_menu.addAction(self.install_shortcut_action)
         help_menu.addSeparator()
         help_menu.addAction(self.about_action)
     
@@ -227,11 +245,15 @@ class MainWindow(QMainWindow):
         # connect runs — re-apply any calibration already loaded from disk.
         if self.fwhm_calibration_panel.fwhm_calibration is not None:
             self.on_fwhm_calibration_applied(self.fwhm_calibration_panel.fwhm_calibration)
+
+        # Tube profiles (may already be loaded in panel __init__)
+        if self.tube_profile_panel.get_library() is not None:
+            self.on_tube_profiles_changed(self.tube_profile_panel.get_library())
         
         layout.addWidget(self.tab_widget)
     
     def _create_calibration_tab(self):
-        """Nest FWHM and Standards under one Calibration tab (setup workflow order)."""
+        """Nest FWHM, Tube Profiles, and Standards under Calibration."""
         calibration_widget = QWidget()
         layout = QVBoxLayout(calibration_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -244,6 +266,11 @@ class MainWindow(QMainWindow):
             self.on_fwhm_calibration_applied
         )
         self.calibration_tabs.addTab(self.fwhm_calibration_panel, "FWHM")
+
+        # Step 1b: per-kV tube scatter profiles (15/30/50)
+        self.tube_profile_panel = TubeProfilePanel()
+        self.tube_profile_panel.library_changed.connect(self.on_tube_profiles_changed)
+        self.calibration_tabs.addTab(self.tube_profile_panel, "Tube Profiles")
         
         # Step 2: intensity/response using known concentrations
         self.standards_panel = StandardsPanel()
@@ -257,6 +284,11 @@ class MainWindow(QMainWindow):
         """Open Calibration → FWHM from the Tools menu"""
         self.tab_widget.setCurrentWidget(self.calibration_tab)
         self.calibration_tabs.setCurrentWidget(self.fwhm_calibration_panel)
+
+    def show_tube_profiles(self):
+        """Open Calibration → Tube Profiles"""
+        self.tab_widget.setCurrentWidget(self.calibration_tab)
+        self.calibration_tabs.setCurrentWidget(self.tube_profile_panel)
     
     def show_standards_calibration(self):
         """Open Calibration → Standards from the Tools menu"""
@@ -385,11 +417,17 @@ class MainWindow(QMainWindow):
     def _load_stylesheet(self):
         """Load and apply Qt stylesheet"""
         try:
-            with open("resources/styles.qss", "r") as f:
+            with open(resource_path("styles.qss"), "r") as f:
                 self.setStyleSheet(f.read())
         except FileNotFoundError:
             # Use default styling if stylesheet not found
             pass
+
+    def _apply_window_icon(self):
+        """Set the application window / Dock / taskbar icon."""
+        png = icon_path("xrflab.png")
+        if png.is_file():
+            self.setWindowIcon(QIcon(str(png)))
     
     def _restore_settings(self):
         """Restore window settings from previous session"""
@@ -629,6 +667,12 @@ class MainWindow(QMainWindow):
             # Update results panel
             self.results_panel.set_fit_statistics(self.fit_result.statistics)
             self.results_panel.set_peaks(self.fit_result.peaks)
+            flags = getattr(self.fit_result, 'tube_overlap_flags', None) or []
+            if flags:
+                self.results_panel.set_tube_overlap_flags(flags)
+            notes = (self.fit_result.statistics or {}).get('tube_constraint_notes') or []
+            if notes:
+                self.results_panel.set_tube_constraint_notes(notes)
             if smart_report is not None:
                 extra = "\n\n--- Smart ID ---\n" + "\n".join(smart_report.summary_lines)
                 current = self.results_panel.peaks_text.toPlainText()
@@ -937,6 +981,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Check for Updates", result.message)
             self.status_bar.showMessage("Already up to date", 5000)
     
+    def install_desktop_shortcut(self):
+        """Create a Desktop launcher with the XRFLab icon (Mac / Windows / Linux)."""
+        result = install_desktop_shortcut()
+        if result.success:
+            QMessageBox.information(self, "Desktop Shortcut", result.message)
+            self.status_bar.showMessage(
+                f"Desktop shortcut installed: {result.path}",
+                8000,
+            )
+        else:
+            QMessageBox.warning(self, "Desktop Shortcut", result.message)
+            self.status_bar.showMessage("Desktop shortcut install failed", 5000)
+
     def show_about(self):
         """Show about dialog"""
         QMessageBox.about(
@@ -947,6 +1004,7 @@ class MainWindow(QMainWindow):
             "<p>A professional application for X-ray fluorescence spectroscopy analysis "
             "using fundamental parameters method.</p>"
             "<p>Built with PySide6, PyQtGraph, and xraylib.</p>"
+            "<p>Use <b>Help → Install Desktop Shortcut</b> to add a Desktop launcher.</p>"
         )
     
     def on_elements_changed(self, elements):
@@ -1007,6 +1065,18 @@ class MainWindow(QMainWindow):
                 f"(R²={fwhm_calibration.r_squared:.4f})",
                 5000
             )
+
+    def on_tube_profiles_changed(self, library):
+        """Apply per-kV tube profile library to Analysis fitting."""
+        self.fitter.set_tube_profile_library(library)
+        self.element_panel.update_tube_profile_status(library)
+        n_meas = sum(1 for p in library.profiles.values() if p.source == 'measured')
+        self.status_bar.showMessage(
+            f"Tube profiles active: {n_meas} measured / "
+            f"{len(library.available_kvs)} modes "
+            f"({library.tube_element})",
+            5000
+        )
     
     def on_calibration_applied(self, calibration_result):
         """Handle calibration being applied"""

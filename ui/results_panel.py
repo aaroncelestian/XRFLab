@@ -189,6 +189,15 @@ class ResultsPanel(QWidget):
         self.r_squared_label.setText(f"R²: {r_squared:.4f}")
         self.reduced_chi_label.setText(f"χ²ᵣ: {reduced_chi:.4f}")
         self.iterations_label.setText(f"Iterations: {iterations}")
+
+        warnings = statistics.get('tube_overlap_warnings') or []
+        if warnings:
+            warn_txt = "Tube ratio flags:\n" + "\n".join(f"• {w}" for w in warnings)
+            self.chi_squared_label.setToolTip(warn_txt)
+            self.reduced_chi_label.setStyleSheet("color: #cc6600; font-weight: bold;")
+        else:
+            self.chi_squared_label.setToolTip("")
+            self.reduced_chi_label.setStyleSheet("")
     
     def set_results(self, results):
         """
@@ -249,20 +258,43 @@ class ResultsPanel(QWidget):
         text_lines = []
         for peak in peaks:
             if peak.element and peak.line:
+                tube = ""
+                if getattr(peak, 'is_tube_line', False):
+                    tube = " [TUBE]"
+                    if getattr(peak, 'fixed_fwhm', None) is not None:
+                        tube = " [TUBE, wide]"
                 text_lines.append(
                     f"{peak.element}-{peak.line}: {peak.energy:.3f} keV "
-                    f"(Area={peak.area:.0f}, FWHM={peak.fwhm:.3f} keV)"
+                    f"(Area={peak.area:.0f}, FWHM={peak.fwhm:.3f} keV){tube}"
                 )
             else:
                 text_lines.append(
-                    f"Unknown: {peak.energy:.3f} keV "
+                    f"Peak at {peak.energy:.3f} keV "
                     f"(Area={peak.area:.0f}, FWHM={peak.fwhm:.3f} keV)"
                 )
-        
-        if text_lines:
-            self.peaks_text.setPlainText("\n".join(text_lines))
-        else:
-            self.peaks_text.setPlainText("No peaks identified")
+
+        # Append tube-profile overlap diagnostics if present on peaks' parent result
+        # (caller may also pass via set_fit_statistics warnings)
+
+        self.peaks_text.setPlainText("\n".join(text_lines) if text_lines else "No peaks")
+    
+    def set_tube_overlap_flags(self, flags):
+        """Append tube-profile overlap warnings under the peaks list."""
+        if not flags:
+            return
+        current = self.peaks_text.toPlainText()
+        block = "\n\n--- Tube profile ratio checks ---\n" + "\n".join(
+            f"⚠ {f.get('message', f)}" for f in flags
+        )
+        self.peaks_text.setPlainText(current + block)
+
+    def set_tube_constraint_notes(self, notes):
+        """Append soft-prior / doublet notes under the peaks list."""
+        if not notes:
+            return
+        current = self.peaks_text.toPlainText()
+        block = "\n\n--- Tube constraints ---\n" + "\n".join(f"• {n}" for n in notes)
+        self.peaks_text.setPlainText(current + block)
     
     def set_quantification(self, concentrations):
         """

@@ -4,11 +4,35 @@ XRF Fundamental Parameters Analysis Application
 Main entry point for the application
 """
 
+import os
 import sys
+from pathlib import Path
+
+
+def _ensure_qt_plugin_path() -> None:
+    """
+    Finder / .app launches strip the shell environment, so Qt cannot find
+    libqcocoa.dylib unless QT_PLUGIN_PATH is set. Set it before QApplication.
+    """
+    if os.environ.get("QT_PLUGIN_PATH"):
+        return
+    try:
+        import PySide6
+
+        plugins = Path(PySide6.__file__).resolve().parent / "Qt" / "plugins"
+        if plugins.is_dir():
+            os.environ["QT_PLUGIN_PATH"] = str(plugins)
+    except Exception:
+        pass
+
+
+_ensure_qt_plugin_path()
+
 from PySide6.QtWidgets import QApplication, QStyleFactory
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QIcon
 from ui.main_window import MainWindow
+from utils.paths import icon_path
 
 
 def _force_light_mode(app: QApplication) -> None:
@@ -70,6 +94,10 @@ def main():
     app.setOrganizationName("XRFLab")
     app.setApplicationVersion("1.0.0")
     _force_light_mode(app)
+
+    icon_file = icon_path("xrflab.png")
+    if icon_file.is_file():
+        app.setWindowIcon(QIcon(str(icon_file)))
     
     # Create and show main window
     window = MainWindow()
