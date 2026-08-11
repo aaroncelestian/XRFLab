@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from core.background import BackgroundModeler
 from core.peak_fitting import PeakFitter, Peak
-from core.xray_data import get_element_lines, get_tube_lines
+from core.xray_data import get_element_lines, get_tube_lines, get_tube_compton_lines
 
 
 @dataclass
@@ -35,12 +35,15 @@ class SpectrumFitter:
     
     def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
                              auto_find_peaks=True, tube_element='Rh',
-                             excitation_kv=50.0, include_tube_lines=True, **kwargs):
+                             excitation_kv=50.0, include_tube_lines=True,
+                             include_compton=True, scatter_angle_deg=90.0,
+                             compton_fwhm_kev=0.250, **kwargs):
         """
         Build the list of peak seed positions (element lines, tube lines, auto-find).
 
         Returns:
             List of dicts with keys: energy, element, line, is_tube_line
+            (optional fixed_fwhm / exclusion_half_width_kev for Compton)
         """
         peak_positions = []
 
@@ -99,6 +102,25 @@ class SpectrumFitter:
                                 'is_tube_line': True
                             })
 
+            # Broad inelastic Compton tube scatter (~19 keV for Rh Kα)
+            if include_compton:
+                compton_lines = get_tube_compton_lines(
+                    tube_element=tube_element,
+                    excitation_kv=excitation_kv,
+                    scatter_angle_deg=scatter_angle_deg,
+                    fwhm_kev=compton_fwhm_kev,
+                )
+                n_c = 0
+                for c in compton_lines:
+                    if energy[0] <= c['energy'] <= energy[-1]:
+                        peak_positions.append(c)
+                        n_c += 1
+                if n_c:
+                    print(
+                        f"Including {n_c} {tube_element} Compton line(s) "
+                        f"(θ={scatter_angle_deg:.0f}°, FWHM={compton_fwhm_kev*1000:.0f} eV)"
+                    )
+
         if auto_find_peaks and counts_bg_subtracted is not None:
             print("Auto-detecting peaks...")
             auto_peaks = self.peak_fitter.find_peaks(
@@ -114,14 +136,25 @@ class SpectrumFitter:
             if kwargs.get('min_separation_ev') is not None:
                 match_tol = max(0.05, float(kwargs['min_separation_ev']) / 1000.0)
 
+            n_skipped_compton = 0
             for peak_energy, peak_height in auto_peaks:
-                near_element_line = False
+                near_existing = False
                 for pos in peak_positions:
-                    if abs(peak_energy - pos['energy']) < match_tol:
-                        near_element_line = True
+                    # Wide exclusion under Compton / other fixed-width tube features
+                    excl = pos.get('exclusion_half_width_kev')
+                    if excl is not None:
+                        tol = max(match_tol, float(excl))
+                    elif pos.get('fixed_fwhm') is not None:
+                        tol = max(match_tol, 1.5 * float(pos['fixed_fwhm']))
+                    else:
+                        tol = match_tol
+                    if abs(peak_energy - pos['energy']) < tol:
+                        near_existing = True
+                        if pos.get('line') and str(pos['line']).startswith('Compton'):
+                            n_skipped_compton += 1
                         break
 
-                if not near_element_line:
+                if not near_existing:
                     peak_positions.append({
                         'energy': peak_energy,
                         'element': None,
@@ -129,10 +162,160 @@ class SpectrumFitter:
                         'is_tube_line': False,
                     })
 
-            print(f"Auto-detected {len(auto_peaks)} peaks "
-                  f"({sum(1 for p in peak_positions if p.get('element') is None)} unknown added)")
+            n_unknown = sum(1 for p in peak_positions if p.get('element') is None)
+            msg = (
+                f"Auto-detected {len(auto_peaks)} peaks "
+                f"({n_unknown} unknown added)"
+            )
+            if n_skipped_compton:
+                msg += f"; skipped {n_skipped_compton} under Compton"
+            print(msg)
 
         return peak_positions
+
+    def apply_selected_elements_to_positions(
+        self, peak_positions, energy, elements, match_tol_kev=0.1
+    ):
+        """
+        Re-label peaks from the current Elements-tab selection.
+
+        Clears previous sample labels (tube lines kept), then:
+        - labels unknowns near selected-element lines
+        - adds missing theoretical line seeds
+
+        This lets the user uncheck false IDs / check missing ones and refit.
+        """
+        positions = [
+            {
+                'energy': float(p['energy']),
+                'element': p.get('element'),
+                'line': p.get('line'),
+                'is_tube_line': bool(p.get('is_tube_line', False)),
+                **({'fixed_fwhm': float(p['fixed_fwhm'])}
+                   if p.get('fixed_fwhm') is not None else {}),
+                **({'exclusion_half_width_kev': float(p['exclusion_half_width_kev'])}
+                   if p.get('exclusion_half_width_kev') is not None else {}),
+            }
+            for p in (peak_positions or [])
+        ]
+
+        # Drop prior sample labels so unchecked elements cannot stick around
+        n_cleared = 0
+        for pos in positions:
+            if pos.get('is_tube_line'):
+                continue
+            if pos.get('element') or pos.get('line'):
+                n_cleared += 1
+            pos['element'] = None
+            pos['line'] = None
+
+        if not elements:
+            if n_cleared:
+                print(f"Cleared {n_cleared} sample peak label(s) (no elements selected)")
+            return positions
+
+        major_lines = {
+            'K': {'Kα1', 'Kα2', 'Kα', 'Kβ1', 'Kβ3', 'Kβ'},
+            'L': {'Lα1', 'Lα2', 'Lα', 'Lβ1', 'Lβ2', 'Lβ'},
+            'M': {'Mα1', 'Mα2', 'Mα'},
+        }
+
+        n_labeled = 0
+        n_added = 0
+        e_min = float(energy[0])
+        e_max = float(energy[-1])
+
+        for elem in elements:
+            symbol = elem.get('symbol', '')
+            z = elem.get('z', 0)
+            if not symbol or not z:
+                continue
+
+            lines = get_element_lines(symbol, z)
+            for series in ['K', 'L', 'M']:
+                for line in lines.get(series, []):
+                    line_name = line['name']
+                    line_energy = float(line['energy'])
+                    if line_name not in major_lines.get(series, set()):
+                        continue
+                    if not (e_min <= line_energy <= e_max):
+                        continue
+
+                    # Closest existing peak within tolerance
+                    best_idx = None
+                    best_dist = match_tol_kev
+                    for i, pos in enumerate(positions):
+                        if pos.get('is_tube_line'):
+                            continue
+                        dist = abs(pos['energy'] - line_energy)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_idx = i
+
+                    if best_idx is not None:
+                        pos = positions[best_idx]
+                        # Prefer leaving an already-assigned closer match alone
+                        if not pos.get('element'):
+                            pos['element'] = symbol
+                            pos['line'] = line_name
+                            n_labeled += 1
+                        continue
+
+                    already = any(
+                        p.get('element') == symbol
+                        and p.get('line') == line_name
+                        for p in positions
+                    )
+                    if not already:
+                        positions.append({
+                            'energy': line_energy,
+                            'element': symbol,
+                            'line': line_name,
+                            'is_tube_line': False,
+                        })
+                        n_added += 1
+
+        print(
+            f"Applied {len(elements)} selected element(s) to peak list: "
+            f"cleared {n_cleared}, labeled {n_labeled}, added {n_added} seed(s)"
+        )
+        return positions
+
+    def _ensure_compton_positions(
+        self,
+        peak_positions,
+        energy,
+        tube_element='Rh',
+        excitation_kv=50.0,
+        scatter_angle_deg=90.0,
+        compton_fwhm_kev=0.250,
+    ):
+        """Add missing Compton tube seeds to an existing peak list."""
+        positions = list(peak_positions or [])
+        compton_lines = get_tube_compton_lines(
+            tube_element=tube_element,
+            excitation_kv=excitation_kv,
+            scatter_angle_deg=scatter_angle_deg,
+            fwhm_kev=compton_fwhm_kev,
+        )
+        e_min = float(energy[0])
+        e_max = float(energy[-1])
+        n_added = 0
+        for c in compton_lines:
+            if not (e_min <= c['energy'] <= e_max):
+                continue
+            already = any(
+                p.get('is_tube_line')
+                and p.get('line') == c['line']
+                and abs(float(p['energy']) - float(c['energy'])) < 0.15
+                for p in positions
+            )
+            if not already:
+                positions.append(dict(c))
+                n_added += 1
+        if n_added:
+            print(f"Added {n_added} Compton seed(s) to peak list")
+        return positions
 
     def fit_spectrum(self, energy, counts, elements=None, 
                     background_method='snip', peak_shape='gaussian',
@@ -174,10 +357,31 @@ class SpectrumFitter:
                     'element': p.get('element'),
                     'line': p.get('line'),
                     'is_tube_line': p.get('is_tube_line', False),
+                    **({'fixed_fwhm': float(p['fixed_fwhm'])}
+                       if p.get('fixed_fwhm') is not None else {}),
+                    **({'exclusion_half_width_kev': float(p['exclusion_half_width_kev'])}
+                       if p.get('exclusion_half_width_kev') is not None else {}),
                 }
                 for p in peak_positions
             ]
             print(f"Using {len(peak_positions)} caller-provided peak positions...")
+            # Peak-find lists are mostly unlabeled; fold in Elements-tab selection
+            match_tol = 0.1
+            if kwargs.get('min_separation_ev') is not None:
+                match_tol = max(0.05, float(kwargs['min_separation_ev']) / 1000.0)
+            peak_positions = self.apply_selected_elements_to_positions(
+                peak_positions, energy, elements, match_tol_kev=match_tol
+            )
+            # Keep Compton in the editable list path when enabled
+            if include_tube_lines and kwargs.get('include_compton', True):
+                peak_positions = self._ensure_compton_positions(
+                    peak_positions,
+                    energy,
+                    tube_element=tube_element,
+                    excitation_kv=excitation_kv,
+                    scatter_angle_deg=kwargs.get('scatter_angle_deg', 90.0),
+                    compton_fwhm_kev=kwargs.get('compton_fwhm_kev', 0.250),
+                )
         else:
             peak_positions = self.build_peak_positions(
                 energy,
@@ -204,10 +408,13 @@ class SpectrumFitter:
         
         for pos in ordered_positions:
             known_line = bool(pos.get('element') and pos.get('line'))
+            is_compton = bool(
+                pos.get('line') and str(pos.get('line')).startswith('Compton')
+            )
             # Very weak residual peaks: lock center so LS cannot chase noise
             local_h = _local_height(pos)
             residual_max = float(np.nanmax(residual_counts)) if residual_counts.size else 0.0
-            fix_center = (
+            fix_center = is_compton or (
                 residual_max > 0
                 and local_h < 0.05 * residual_max
             )
@@ -217,6 +424,7 @@ class SpectrumFitter:
                 shape=peak_shape,
                 known_line=known_line,
                 fix_center=fix_center,
+                fixed_fwhm=pos.get('fixed_fwhm'),
             )
             
             if peak is not None:
@@ -224,6 +432,8 @@ class SpectrumFitter:
                 peak.element = pos.get('element')
                 peak.line = pos.get('line')
                 peak.is_tube_line = pos.get('is_tube_line', False)
+                if pos.get('fixed_fwhm') is not None:
+                    peak.fixed_fwhm = float(pos['fixed_fwhm'])
                 fitted_peaks.append(peak)
                 
                 # Remove this peak from the residual spectrum before fitting others

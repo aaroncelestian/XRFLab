@@ -21,6 +21,7 @@ class Peak:
     shape: str = 'gaussian'  # Peak shape used for fitting
     shape_params: dict = None  # Parameters specific to the shape (sigma, gamma, etc.)
     is_tube_line: bool = False  # True if this is from X-ray tube, not sample
+    fixed_fwhm: float = None  # If set, width was locked (e.g. Compton)
     
     def __post_init__(self):
         if self.shape_params is None:
@@ -28,6 +29,8 @@ class Peak:
     
     def __str__(self):
         tube_marker = " [TUBE]" if self.is_tube_line else ""
+        if self.fixed_fwhm is not None:
+            tube_marker = (tube_marker + " [wide]").replace(" [TUBE] [wide]", " [TUBE, wide]")
         if self.element and self.line:
             return f"{self.element}-{self.line}: {self.energy:.3f} keV (Area: {self.area:.1f}){tube_marker}"
         return f"Peak at {self.energy:.3f} keV (Area: {self.area:.1f}){tube_marker}"
@@ -230,7 +233,7 @@ class PeakFitter:
     @staticmethod
     def fit_single_peak(energy, counts, initial_center, shape='gaussian', 
                        bounds=None, known_line=False, fix_center=False,
-                       center_tolerance=None):
+                       center_tolerance=None, fixed_fwhm=None):
         """
         Fit a single peak
         
@@ -243,16 +246,23 @@ class PeakFitter:
             known_line: If True, use tighter center bounds (tabulated line)
             fix_center: If True, hold center at initial_center (amp/width only)
             center_tolerance: Optional explicit ±center shift in keV
+            fixed_fwhm: If set (keV), lock width to this value (e.g. Compton)
             
         Returns:
             Peak object with fitted parameters
         """
         # Define fitting window around peak
         # Use appropriate window for peak width (±3 FWHM is standard)
-        fwhm_estimate = PeakFitter.calculate_fwhm(initial_center)
+        if fixed_fwhm is not None:
+            fwhm_estimate = float(fixed_fwhm)
+        else:
+            fwhm_estimate = PeakFitter.calculate_fwhm(initial_center)
         
         # Use wider window for low-energy peaks due to more overlap
-        if initial_center < 3.0:  # Low energy (Si, Al, Mg, Na)
+        # Compton / fixed-wide peaks need a window matching their breadth
+        if fixed_fwhm is not None:
+            window_width = 3.0 * fwhm_estimate
+        elif initial_center < 3.0:  # Low energy (Si, Al, Mg, Na)
             window_width = 5.0 * fwhm_estimate  # Wider window
         else:
             window_width = 3.0 * fwhm_estimate  # Standard window
@@ -269,9 +279,11 @@ class PeakFitter:
         # Initial parameter guesses
         amplitude_guess = np.max(y_fit)
         center_guess = float(initial_center)
-        # Use energy-dependent FWHM for better initial guess
-        fwhm_guess = PeakFitter.calculate_fwhm(initial_center)
+        # Use energy-dependent FWHM for better initial guess (or locked Compton width)
+        fwhm_guess = fwhm_estimate
         sigma_guess = fwhm_guess / 2.355  # Convert FWHM to sigma
+        # Lock width when calibrated shapes are on OR a per-peak fixed_fwhm is given
+        lock_width = PeakFitter.USE_CALIBRATED_SHAPES or (fixed_fwhm is not None)
         dE = 0.0 if fix_center else PeakFitter.center_shift_limit(
             center_guess, known_line=known_line, center_tolerance=center_tolerance
         )
@@ -281,7 +293,7 @@ class PeakFitter:
             shape_params = {}
             
             if shape == 'gaussian':
-                if PeakFitter.USE_CALIBRATED_SHAPES:
+                if lock_width:
                     sigma_fixed = sigma_guess
                     if fix_center:
                         def gaussian_amp_only(x, amplitude):
@@ -348,7 +360,7 @@ class PeakFitter:
                 # Use calibrated gamma ratio if available
                 gamma_guess = sigma_guess * PeakFitter.VOIGT_GAMMA_RATIO
                 
-                if PeakFitter.USE_CALIBRATED_SHAPES:
+                if lock_width:
                     # Fix peak shape, only fit amplitude and center
                     sigma_fixed = sigma_guess
                     gamma_fixed = gamma_guess
@@ -421,7 +433,38 @@ class PeakFitter:
             
             elif shape == 'pseudo_voigt':
                 # Start with more Gaussian character (eta=0.3)
-                if fix_center:
+                if lock_width:
+                    sigma_fixed = sigma_guess
+                    eta_fixed = 0.3
+                    if fix_center:
+                        def pv_amp_only(x, amplitude):
+                            return PeakFitter.pseudo_voigt(
+                                x, amplitude, center_guess, sigma_fixed, eta_fixed
+                            )
+                        popt, _ = optimize.curve_fit(
+                            pv_amp_only, x_fit, y_fit,
+                            p0=[amplitude_guess],
+                            bounds=([0], [np.inf]),
+                            maxfev=5000,
+                        )
+                        amplitude = popt[0]
+                        center = center_guess
+                    else:
+                        def pv_fixed_shape(x, amplitude, center):
+                            return PeakFitter.pseudo_voigt(
+                                x, amplitude, center, sigma_fixed, eta_fixed
+                            )
+                        p0 = [amplitude_guess, center_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo], [np.inf, c_hi])
+                        popt, _ = optimize.curve_fit(
+                            pv_fixed_shape, x_fit, y_fit, p0=p0,
+                            bounds=bounds, maxfev=5000,
+                        )
+                        amplitude, center = popt
+                    sigma = sigma_fixed
+                    eta = eta_fixed
+                elif fix_center:
                     def pv_fixed_center(x, amplitude, sigma, eta):
                         return PeakFitter.pseudo_voigt(
                             x, amplitude, center_guess, sigma, eta
@@ -454,7 +497,42 @@ class PeakFitter:
                 shape_params = {'sigma': sigma, 'eta': eta}
             
             elif shape == 'hypermet':
-                if fix_center:
+                if lock_width:
+                    sigma_fixed = sigma_guess
+                    tail_amp_fixed = 0.1
+                    tail_slope_fixed = 2.0
+                    if fix_center:
+                        def hypermet_amp_only(x, amplitude):
+                            return PeakFitter.hypermet(
+                                x, amplitude, center_guess, sigma_fixed,
+                                tail_amp_fixed, tail_slope_fixed
+                            )
+                        popt, _ = optimize.curve_fit(
+                            hypermet_amp_only, x_fit, y_fit,
+                            p0=[amplitude_guess],
+                            bounds=([0], [np.inf]),
+                            maxfev=5000,
+                        )
+                        amplitude = popt[0]
+                        center = center_guess
+                    else:
+                        def hypermet_fixed_shape(x, amplitude, center):
+                            return PeakFitter.hypermet(
+                                x, amplitude, center, sigma_fixed,
+                                tail_amp_fixed, tail_slope_fixed
+                            )
+                        p0 = [amplitude_guess, center_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo], [np.inf, c_hi])
+                        popt, _ = optimize.curve_fit(
+                            hypermet_fixed_shape, x_fit, y_fit, p0=p0,
+                            bounds=bounds, maxfev=5000,
+                        )
+                        amplitude, center = popt
+                    sigma = sigma_fixed
+                    tail_amp = tail_amp_fixed
+                    tail_slope = tail_slope_fixed
+                elif fix_center:
                     def hypermet_fixed_center(x, amplitude, sigma, tail_amp, tail_slope):
                         return PeakFitter.hypermet(
                             x, amplitude, center_guess, sigma, tail_amp, tail_slope
@@ -487,7 +565,42 @@ class PeakFitter:
                 shape_params = {'sigma': sigma, 'tail_amplitude': tail_amp, 'tail_slope': tail_slope}
             
             elif shape == 'tail_gaussian':
-                if fix_center:
+                if lock_width:
+                    sigma_fixed = sigma_guess
+                    tail_frac_fixed = 0.15
+                    tail_sigma_fixed = sigma_guess * 3
+                    if fix_center:
+                        def tg_amp_only(x, amplitude):
+                            return PeakFitter.tail_gaussian(
+                                x, amplitude, center_guess, sigma_fixed,
+                                tail_frac_fixed, tail_sigma_fixed
+                            )
+                        popt, _ = optimize.curve_fit(
+                            tg_amp_only, x_fit, y_fit,
+                            p0=[amplitude_guess],
+                            bounds=([0], [np.inf]),
+                            maxfev=5000,
+                        )
+                        amplitude = popt[0]
+                        center = center_guess
+                    else:
+                        def tg_fixed_shape(x, amplitude, center):
+                            return PeakFitter.tail_gaussian(
+                                x, amplitude, center, sigma_fixed,
+                                tail_frac_fixed, tail_sigma_fixed
+                            )
+                        p0 = [amplitude_guess, center_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo], [np.inf, c_hi])
+                        popt, _ = optimize.curve_fit(
+                            tg_fixed_shape, x_fit, y_fit, p0=p0,
+                            bounds=bounds, maxfev=5000,
+                        )
+                        amplitude, center = popt
+                    sigma = sigma_fixed
+                    tail_frac = tail_frac_fixed
+                    tail_sigma = tail_sigma_fixed
+                elif fix_center:
                     def tg_fixed_center(x, amplitude, sigma, tail_frac, tail_sigma):
                         return PeakFitter.tail_gaussian(
                             x, amplitude, center_guess, sigma, tail_frac, tail_sigma
@@ -528,7 +641,8 @@ class PeakFitter:
                 fwhm=fwhm,
                 area=area,
                 shape=shape,
-                shape_params=shape_params
+                shape_params=shape_params,
+                fixed_fwhm=float(fixed_fwhm) if fixed_fwhm is not None else None,
             )
         
         except Exception as e:

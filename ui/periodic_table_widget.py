@@ -422,7 +422,16 @@ class PeriodicTableWidget(QWidget):
         Args:
             symbols: List of element symbols to select
         """
-        self._clear_all()
-        for symbol in symbols:
-            if symbol in self.element_buttons:
-                self.element_buttons[symbol].setChecked(True)
+        # Block per-button signals so we emit once at the end
+        for btn in self.element_buttons.values():
+            btn.blockSignals(True)
+        try:
+            for btn in self.element_buttons.values():
+                btn.setChecked(False)
+            for symbol in symbols:
+                if symbol in self.element_buttons:
+                    self.element_buttons[symbol].setChecked(True)
+        finally:
+            for btn in self.element_buttons.values():
+                btn.blockSignals(False)
+        self._update_selected_elements()

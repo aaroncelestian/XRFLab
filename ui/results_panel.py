@@ -65,7 +65,10 @@ class ResultsPanel(QWidget):
                 background-color: #3d8b40;
             }
         """)
-        self.quantify_button.clicked.connect(self.quantify_requested.emit)
+        # clicked(bool) must not be forwarded into a 0-arg Signal.emit
+        self.quantify_button.clicked.connect(
+            lambda _checked=False: self.quantify_requested.emit()
+        )
         button_row.addWidget(self.quantify_button)
         
         self.export_button = QPushButton("Export Results")
@@ -271,14 +274,12 @@ class ResultsPanel(QWidget):
         """
         results = []
         for element, data in concentrations.items():
-            # Format lines list as comma-separated string
-            lines_str = ', '.join(data.get('lines', []))
-            
+            lines = [str(line) for line in data.get('lines', []) if line]
             results.append({
                 'element': element,
                 'concentration': data['concentration'],
                 'error': data['error'],
-                'line': lines_str  # All contributing lines
+                'line': ', '.join(lines) if lines else '--'
             })
         
         self.set_results(results)

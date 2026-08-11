@@ -19,6 +19,11 @@ from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from utils.io_handler import IOHandler
 from utils.updater import check_for_updates
 from core.fitting import SpectrumFitter
+from core.smart_peak_id import (
+    SmartIDConfig,
+    analyze_fitted_peaks,
+    apply_smart_id_suggestions,
+)
 
 
 class MainWindow(QMainWindow):
@@ -268,27 +273,27 @@ class MainWindow(QMainWindow):
         main_splitter = QSplitter(Qt.Horizontal)
         
         # Left panel - Tabbed interface for compact layout
-        left_tab_widget = QTabWidget()
-        left_tab_widget.setMaximumWidth(700)  # Doubled width for better usability
+        self.analysis_left_tabs = QTabWidget()
+        self.analysis_left_tabs.setMaximumWidth(700)  # Doubled width for better usability
         
         # Tab 1: Sample Info & Experimental Parameters
         self.element_panel = ElementPanel()
         sample_exp_tab = self._create_sample_exp_tab()
-        left_tab_widget.addTab(sample_exp_tab, "Sample/Exp")
+        self.analysis_left_tabs.addTab(sample_exp_tab, "Sample/Exp")
         
         # Tab 2: Element Selection
         element_tab = self._create_element_selection_tab()
-        left_tab_widget.addTab(element_tab, "Elements")
+        self.analysis_left_tabs.addTab(element_tab, "Elements")
         
         # Tab 3: Fitting Controls
         fitting_tab = self._create_fitting_controls_tab()
-        left_tab_widget.addTab(fitting_tab, "Fitting")
+        self.analysis_left_tabs.addTab(fitting_tab, "Fitting")
         
         # Tab 4: Results & Quantification
         results_tab = self._create_results_tab()
-        left_tab_widget.addTab(results_tab, "Results")
+        self.analysis_left_tabs.addTab(results_tab, "Results")
         
-        main_splitter.addWidget(left_tab_widget)
+        main_splitter.addWidget(self.analysis_left_tabs)
         
         # Right side - Spectrum display (keep as is)
         self.spectrum_widget = SpectrumWidget()
@@ -506,6 +511,21 @@ class MainWindow(QMainWindow):
         try:
             # Get selected elements
             elements = self.element_panel.get_selected_elements()
+            if not elements:
+                reply = QMessageBox.warning(
+                    self,
+                    "No Elements Selected",
+                    "No elements are selected on the Elements tab.\n\n"
+                    "Without labeled sample peaks, Fit will still run, but "
+                    "quantification will be empty.\n\n"
+                    "Select elements (e.g. Fe, Ca, Si), then Fit again.\n\n"
+                    "Continue fitting anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    self.status_bar.showMessage("Fit cancelled — select elements first", 5000)
+                    return
             
             # Get fitting parameters
             fit_params = self.element_panel.get_fitting_params()
@@ -531,12 +551,53 @@ class MainWindow(QMainWindow):
                 tube_element=fit_params.get('tube_element', 'Rh'),
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
+                include_compton=fit_params.get('include_compton', True),
+                scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
+                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.250),
                 experimental_params=exp_params,
                 prominence_percent=fit_params.get('prominence_percent'),
                 min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
                 peak_positions=peak_positions,
             )
+            
+            # Optional post-fit smart ID (FWHM excess + Kβ / multi-line checks)
+            smart_report = None
+            overlap_seeds = []
+            if fit_params.get('smart_id_after_fit'):
+                smart_cfg = SmartIDConfig(
+                    fwhm_excess_kev=float(fit_params.get('fwhm_excess_ev', 30.0)) / 1000.0,
+                    apply_suggestions=bool(fit_params.get('smart_id_apply')),
+                )
+                cand_map = {
+                    e['symbol']: e
+                    for e in (elements or self.element_panel.get_selected_elements() or [])
+                    if e.get('symbol')
+                }
+                buttons = getattr(
+                    self.element_panel.periodic_table, 'element_buttons', {}
+                )
+                for p in self.fit_result.peaks:
+                    if p.element and not p.is_tube_line and p.element not in cand_map:
+                        btn = buttons.get(p.element)
+                        if btn is not None:
+                            cand_map[p.element] = {
+                                'symbol': p.element,
+                                'z': btn.atomic_number,
+                                'name': getattr(btn, 'name', p.element),
+                            }
+                smart_report = analyze_fitted_peaks(
+                    self.fit_result.peaks,
+                    list(cand_map.values()),
+                    smart_cfg,
+                )
+                if smart_cfg.apply_suggestions:
+                    self.fit_result.peaks, overlap_seeds, _n = (
+                        apply_smart_id_suggestions(
+                            self.fit_result.peaks, smart_report
+                        )
+                    )
+                print('\n'.join(smart_report.summary_lines))
             
             # Update spectrum display
             self.spectrum_widget.set_fitted_spectrum(self.fit_result.fitted_spectrum)
@@ -547,29 +608,90 @@ class MainWindow(QMainWindow):
             )
             self._displayed_element_lines = None
 
-            # Refresh found-peaks list from fitted result (keep use-list state)
-            keep_use_list = fit_params.get('use_peak_list', False)
+            # Refresh peak list (include any overlap seeds for a follow-up fit)
+            keep_use_list = fit_params.get('use_peak_list', False) or bool(overlap_seeds)
+            peak_entries = []
+            for p in self.fit_result.peaks:
+                peak_entries.append({
+                    'energy': float(p.energy),
+                    'element': p.element,
+                    'line': p.line,
+                    'is_tube_line': bool(p.is_tube_line),
+                })
+            for seed in overlap_seeds:
+                e_seed = float(seed['energy'])
+                if all(abs(e_seed - e['energy']) > 0.04 for e in peak_entries):
+                    peak_entries.append(seed)
             self.element_panel.set_peak_list(
-                self.fit_result.peaks,
-                enable_use_list=keep_use_list,
+                peak_entries, enable_use_list=keep_use_list
             )
             
             # Update results panel
             self.results_panel.set_fit_statistics(self.fit_result.statistics)
             self.results_panel.set_peaks(self.fit_result.peaks)
+            if smart_report is not None:
+                extra = "\n\n--- Smart ID ---\n" + "\n".join(smart_report.summary_lines)
+                current = self.results_panel.peaks_text.toPlainText()
+                self.results_panel.peaks_text.setPlainText(current + extra)
             
-            # Perform quantification
+            # Perform quantification (area-normalized; needs labeled sample peaks)
             exp_params = self.element_panel.get_experimental_params()
             concentrations = self.fitter.quantify_elements(
                 self.fit_result.peaks, exp_params
             )
             self.results_panel.set_quantification(concentrations)
+
+            # Sync identified sample elements onto Elements tab for review.
+            # User can uncheck false IDs / check missing ones, then Fit again.
+            identified = []
+            seen = set()
+            for peak in self.fit_result.peaks:
+                if peak.is_tube_line or not peak.element:
+                    continue
+                if peak.element in seen:
+                    continue
+                seen.add(peak.element)
+                identified.append(peak.element)
+            if identified:
+                self.element_panel.set_selected_elements(identified)
             
-            self.status_bar.showMessage(
+            n_quant = len(concentrations)
+            fit_msg = (
                 f"Fitting complete: {len(self.fit_result.peaks)} peaks fitted, "
-                f"χ²ᵣ = {self.fit_result.statistics['reduced_chi_squared']:.2f}",
-                5000
+                f"χ²ᵣ = {self.fit_result.statistics['reduced_chi_squared']:.2f}"
             )
+            if smart_report is not None:
+                fit_msg += (
+                    f"; smart ID: {smart_report.n_overlap_suspects} overlap suspect(s), "
+                    f"{smart_report.n_relabel_suggestions} suggestion(s)"
+                )
+                if fit_params.get('smart_id_apply') and smart_report.n_applied:
+                    fit_msg += f", applied {smart_report.n_applied}"
+            if identified:
+                fit_msg += (
+                    f"; {len(identified)} element(s) on Elements tab — review, "
+                    f"then Fit again / Run Quant"
+                )
+                if hasattr(self, 'analysis_left_tabs'):
+                    self.analysis_left_tabs.setCurrentIndex(1)
+            elif n_quant:
+                fit_msg += f"; quantified {n_quant} element{'s' if n_quant != 1 else ''}"
+                if hasattr(self, 'analysis_left_tabs'):
+                    self.analysis_left_tabs.setCurrentIndex(3)
+            else:
+                fit_msg += "; no labeled sample peaks to quantify"
+                if hasattr(self, 'analysis_left_tabs'):
+                    self.analysis_left_tabs.setCurrentIndex(3)
+            self.status_bar.showMessage(fit_msg, 12000)
+
+            if smart_report is not None and (
+                smart_report.n_overlap_suspects or smart_report.n_relabel_suggestions
+            ):
+                QMessageBox.information(
+                    self,
+                    "Smart ID Results",
+                    "\n".join(smart_report.summary_lines[:40]),
+                )
             
         except Exception as e:
             QMessageBox.critical(
@@ -686,6 +808,10 @@ class MainWindow(QMainWindow):
             )
             return
         
+        # Show Results tab so the table update is visible
+        if hasattr(self, 'analysis_left_tabs'):
+            self.analysis_left_tabs.setCurrentIndex(3)
+        
         self.status_bar.showMessage("Performing quantification...", 0)
         try:
             exp_params = self.element_panel.get_experimental_params()
@@ -694,6 +820,29 @@ class MainWindow(QMainWindow):
             )
             self.results_panel.set_quantification(concentrations)
             n = len(concentrations)
+            
+            if n == 0:
+                peaks = self.fit_result.peaks
+                n_unknown = sum(1 for p in peaks if not p.element)
+                n_tube = sum(1 for p in peaks if p.is_tube_line)
+                n_labeled = sum(
+                    1 for p in peaks if p.element and not p.is_tube_line
+                )
+                QMessageBox.warning(
+                    self,
+                    "Nothing to Quantify",
+                    f"Fitted {len(peaks)} peaks, but none are labeled sample elements.\n\n"
+                    f"  Unknown (no element): {n_unknown}\n"
+                    f"  Tube lines (excluded): {n_tube}\n"
+                    f"  Labeled sample peaks: {n_labeled}\n\n"
+                    "Select elements on the Elements tab, then Fit Spectrum again "
+                    "(peak-find unknowns are skipped until they are labeled)."
+                )
+                self.status_bar.showMessage(
+                    "Quantification: no labeled sample peaks", 5000
+                )
+                return
+            
             self.status_bar.showMessage(
                 f"Quantification complete: {n} element{'s' if n != 1 else ''}",
                 5000
@@ -837,20 +986,24 @@ class MainWindow(QMainWindow):
         self.standards_panel.update_fwhm_status(fwhm_calibration)
         
         # Apply to Analysis / Batch peak fitting (class-level PeakFitter)
+        # This locks widths to FWHM(E) during LS (USE_CALIBRATED_SHAPES=True)
         apply_fwhm_calibration_to_peak_fitter(fwhm_calibration, self.fitter.peak_fitter)
+
+        # Fitting tab status
+        self.element_panel.update_fwhm_status(fwhm_calibration)
         
         # Show status message
         if fwhm_calibration.model_type == 'detector':
             fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
             epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
             self.status_bar.showMessage(
-                f"FWHM calibration applied to fitting: FWHM₀={fwhm_0_ev:.1f} eV, "
+                f"FWHM locked for Analysis: FWHM₀={fwhm_0_ev:.1f} eV, "
                 f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f})",
                 5000
             )
         else:
             self.status_bar.showMessage(
-                f"FWHM calibration applied to fitting: {fwhm_calibration.model_type} model "
+                f"FWHM locked for Analysis: {fwhm_calibration.model_type} model "
                 f"(R²={fwhm_calibration.r_squared:.4f})",
                 5000
             )

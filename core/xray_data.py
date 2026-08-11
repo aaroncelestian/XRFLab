@@ -2,6 +2,8 @@
 X-ray emission line data using xraylib
 """
 
+import math
+
 try:
     import xraylib as xrl
     XRAYLIB_AVAILABLE = True
@@ -129,6 +131,66 @@ def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
                 filtered_lines[series].append(line)
     
     return filtered_lines
+
+
+def compton_energy(incident_energy_kev, scatter_angle_deg=90.0):
+    """
+    Compton-scattered photon energy (keV).
+
+    E' = E / (1 + (E/511) * (1 - cos θ))
+    """
+    e0 = float(incident_energy_kev)
+    cos_theta = math.cos(math.radians(float(scatter_angle_deg)))
+    return e0 / (1.0 + (e0 / 511.0) * (1.0 - cos_theta))
+
+
+def get_tube_compton_lines(
+    tube_element='Rh',
+    excitation_kv=50.0,
+    scatter_angle_deg=90.0,
+    fwhm_kev=0.250,
+):
+    """
+    Inelastic (Compton) tube scatter lines for analysis fitting.
+
+    These are much broader than elastic fluorescence / Rayleigh scatter
+    because of scattering-angle spread and Doppler broadening.
+
+    Returns:
+        List of dicts: energy, element, line, is_tube_line, fixed_fwhm,
+        exclusion_half_width_kev
+    """
+    tube_lines = get_tube_lines(tube_element, excitation_kv)
+    results = []
+    fwhm = float(fwhm_kev)
+    # Exclude auto-find under the broad Compton hump (~±1.5 FWHM)
+    half_width = max(0.30, 1.5 * fwhm)
+
+    # Major K lines dominate the Compton continuum feature (~19 keV for Rh).
+    # Use one Compton Kα (from Kα1) + Compton Kβ — avoid stacking Kα1/Kα2.
+    preferred = {
+        'Kα1': 'Compton Kα',
+        'Kβ1': 'Compton Kβ',
+    }
+    for line in tube_lines.get('K', []):
+        name = line['name']
+        if name not in preferred:
+            continue
+        e_in = float(line['energy'])
+        if e_in >= float(excitation_kv):
+            continue
+        e_c = compton_energy(e_in, scatter_angle_deg)
+        results.append({
+            'energy': e_c,
+            'element': tube_element,
+            'line': preferred[name],
+            'is_tube_line': True,
+            'fixed_fwhm': fwhm,
+            'exclusion_half_width_kev': half_width,
+            'parent_energy': e_in,
+        })
+
+    return results
 
 
 def get_element_info(symbol, z):

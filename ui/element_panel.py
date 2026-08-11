@@ -217,6 +217,21 @@ class ElementPanel(QWidget):
         )
         shape_layout.addWidget(self.peak_shape_combo)
         layout.addLayout(shape_layout)
+
+        # FWHM calibration status (locked widths when active)
+        self.fwhm_status_label = QLabel(
+            "FWHM: no calibration — widths free in LS"
+        )
+        self.fwhm_status_label.setWordWrap(True)
+        self.fwhm_status_label.setStyleSheet(
+            "color: #994400; font-weight: bold; padding: 4px;"
+        )
+        self.fwhm_status_label.setToolTip(
+            "When a FWHM calibration is loaded, Analysis locks peak widths\n"
+            "to FWHM(E) during least-squares (amplitude/center only).\n"
+            "Without calibration, width is free to refine within bounds."
+        )
+        layout.addWidget(self.fwhm_status_label)
         
         # Escape peaks checkbox
         self.escape_peaks_check = QCheckBox("Include Escape Peaks")
@@ -240,6 +255,46 @@ class ElementPanel(QWidget):
         self.tube_element_combo.setToolTip("X-ray tube anode element")
         tube_layout.addWidget(self.tube_element_combo)
         layout.addLayout(tube_layout)
+
+        # Compton (inelastic) tube scatter — broad ~19 keV feature for Rh
+        compton_row = QHBoxLayout()
+        self.compton_check = QCheckBox("Include Compton:")
+        self.compton_check.setChecked(True)
+        self.compton_check.setToolTip(
+            "Model inelastic tube scatter (e.g. Rh Compton ~18.8 keV at 90°).\n"
+            "Uses a wide fixed FWHM (~250 eV), excluded from quantification.\n"
+            "Peak find skips this region so it does not seed false peaks."
+        )
+        compton_row.addWidget(self.compton_check)
+
+        compton_row.addWidget(QLabel("θ:"))
+        self.scatter_angle_spin = QDoubleSpinBox()
+        self.scatter_angle_spin.setRange(30.0, 150.0)
+        self.scatter_angle_spin.setDecimals(0)
+        self.scatter_angle_spin.setSingleStep(5.0)
+        self.scatter_angle_spin.setValue(90.0)
+        self.scatter_angle_spin.setSuffix("°")
+        self.scatter_angle_spin.setToolTip(
+            "Tube–sample–detector scatter angle for Compton energy.\n"
+            "90° is typical for many XRF geometries."
+        )
+        compton_row.addWidget(self.scatter_angle_spin)
+
+        compton_row.addWidget(QLabel("FWHM:"))
+        self.compton_fwhm_spin = QDoubleSpinBox()
+        self.compton_fwhm_spin.setRange(100.0, 800.0)
+        self.compton_fwhm_spin.setDecimals(0)
+        self.compton_fwhm_spin.setSingleStep(25.0)
+        self.compton_fwhm_spin.setValue(250.0)
+        self.compton_fwhm_spin.setSuffix(" eV")
+        self.compton_fwhm_spin.setToolTip(
+            "Fixed width for Compton peaks (much broader than detector FWHM)."
+        )
+        compton_row.addWidget(self.compton_fwhm_spin)
+        layout.addLayout(compton_row)
+
+        self.tube_lines_check.toggled.connect(self._on_tube_lines_toggled)
+        self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
         
         # Peak detection fine-tuning
         detect_group = QGroupBox("Peak Detection")
@@ -251,7 +306,8 @@ class ElementPanel(QWidget):
         self.auto_find_check.setChecked(True)
         self.auto_find_check.setToolTip(
             "Also detect peaks that are not in the selected-element line list.\n"
-            "Turn off to fit only selected element (and tube) lines."
+            "Turn off to fit only selected element (and tube) lines.\n"
+            "Peaks under Compton tube scatter are excluded when Compton is on."
         )
         detect_layout.addRow(self.auto_find_check)
         
@@ -297,8 +353,45 @@ class ElementPanel(QWidget):
             "Draw vertical markers for fitted / previewed peaks on the spectrum plot."
         )
         detect_layout.addRow(self.show_markers_check)
-        
+
+        # Post-fit smart ID / overlap analysis
+        smart_group = QGroupBox("Post-fit Smart ID")
+        smart_layout = QFormLayout(smart_group)
+        smart_layout.setContentsMargins(5, 8, 5, 5)
+        smart_layout.setSpacing(4)
+
+        self.smart_id_check = QCheckBox("Analyze overlaps & multi-line IDs after fit")
+        self.smart_id_check.setChecked(False)
+        self.smart_id_check.setToolTip(
+            "After fitting, flag peaks whose FWHM is broader than the detector\n"
+            "model (possible unresolved overlap), use shape hints (η / tail),\n"
+            "and check Kβ (and other) lines to confirm or challenge labels."
+        )
+        smart_layout.addRow(self.smart_id_check)
+
+        self.fwhm_excess_spin = QDoubleSpinBox()
+        self.fwhm_excess_spin.setRange(5.0, 200.0)
+        self.fwhm_excess_spin.setDecimals(0)
+        self.fwhm_excess_spin.setSingleStep(5.0)
+        self.fwhm_excess_spin.setValue(30.0)
+        self.fwhm_excess_spin.setSuffix(" eV")
+        self.fwhm_excess_spin.setToolTip(
+            "Flag a peak as an overlap suspect when measured FWHM exceeds\n"
+            "the expected detector FWHM by more than this amount."
+        )
+        smart_layout.addRow("FWHM excess:", self.fwhm_excess_spin)
+
+        self.smart_id_apply_check = QCheckBox("Apply suggestions (relabel + overlap seeds)")
+        self.smart_id_apply_check.setChecked(False)
+        self.smart_id_apply_check.setToolTip(
+            "When checked, high-confidence multi-line suggestions update peak\n"
+            "labels, and overlap suspects get an extra peak-list seed so you\n"
+            "can Fit again to resolve the envelope. Review Elements afterward."
+        )
+        smart_layout.addRow(self.smart_id_apply_check)
+
         layout.addWidget(detect_group)
+        layout.addWidget(smart_group)
         
         # Action buttons
         preview_button = QPushButton("Preview Peak Find")
@@ -351,8 +444,10 @@ class ElementPanel(QWidget):
         self.use_peak_list_check.setChecked(False)
         self.use_peak_list_check.setToolTip(
             "When checked, Fit Spectrum uses the peaks listed here\n"
-            "(after any deletions) instead of rebuilding from elements/auto-find.\n"
-            "Automatically enabled when you delete a peak."
+            "(after any deletions) instead of rebuilding from auto-find.\n"
+            "Labels are always rebuilt from the current Elements selection:\n"
+            "uncheck false IDs, check missing ones, then Fit again.\n"
+            "Automatically enabled when you Preview Peak Find or delete a peak."
         )
         peaks_layout.addWidget(self.use_peak_list_check)
 
@@ -391,6 +486,13 @@ class ElementPanel(QWidget):
                     'line': getattr(p, 'line', None),
                     'is_tube_line': bool(getattr(p, 'is_tube_line', False)),
                 }
+                fixed = getattr(p, 'fixed_fwhm', None)
+                if fixed is None and getattr(p, 'line', None):
+                    if str(p.line).startswith('Compton'):
+                        fixed = getattr(p, 'fwhm', None)
+                if fixed is not None:
+                    entry['fixed_fwhm'] = float(fixed)
+                    entry['exclusion_half_width_kev'] = max(0.30, 1.5 * float(fixed))
             else:
                 entry = {
                     'energy': float(p['energy']),
@@ -398,6 +500,12 @@ class ElementPanel(QWidget):
                     'line': p.get('line'),
                     'is_tube_line': bool(p.get('is_tube_line', False)),
                 }
+                if p.get('fixed_fwhm') is not None:
+                    entry['fixed_fwhm'] = float(p['fixed_fwhm'])
+                if p.get('exclusion_half_width_kev') is not None:
+                    entry['exclusion_half_width_kev'] = float(
+                        p['exclusion_half_width_kev']
+                    )
             self._peak_list_data.append(entry)
             self.peak_list_widget.addItem(self._format_peak_item(entry))
 
@@ -420,18 +528,32 @@ class ElementPanel(QWidget):
         element = entry.get('element')
         line = entry.get('line')
         is_tube = entry.get('is_tube_line', False)
+        fixed = entry.get('fixed_fwhm')
+
+        tags = []
+        if is_tube:
+            tags.append("tube")
+        if fixed is not None:
+            tags.append(f"wide {fixed*1000:.0f} eV")
+        tag_txt = f" [{', '.join(tags)}]" if tags else ""
 
         if element and line:
-            label = f"{energy:.3f} keV  {element} {line}"
-            if is_tube:
-                label += " [tube]"
+            label = f"{energy:.3f} keV  {element} {line}{tag_txt}"
         elif element:
-            label = f"{energy:.3f} keV  {element}"
-            if is_tube:
-                label += " [tube]"
+            label = f"{energy:.3f} keV  {element}{tag_txt}"
         else:
             label = f"{energy:.3f} keV  (unknown)"
         return label
+
+    def _on_tube_lines_toggled(self, checked):
+        self.compton_check.setEnabled(checked)
+        self.scatter_angle_spin.setEnabled(checked and self.compton_check.isChecked())
+        self.compton_fwhm_spin.setEnabled(checked and self.compton_check.isChecked())
+        if not hasattr(self, '_compton_angle_linked'):
+            self.compton_check.toggled.connect(
+                lambda c: self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
+            )
+            self._compton_angle_linked = True
 
     def _delete_selected_peaks(self):
         rows = sorted(
@@ -522,6 +644,18 @@ class ElementPanel(QWidget):
     def get_selected_elements(self):
         """Return list of selected elements"""
         return self.selected_elements
+
+    def set_selected_elements(self, symbols):
+        """
+        Select elements on the periodic table by symbol list.
+
+        Used after a fit to populate the Elements tab with identified
+        sample elements so the user can uncheck false IDs and refit.
+        """
+        symbols = [s for s in (symbols or []) if s]
+        self.periodic_table.set_selected_elements(symbols)
+        # Keep local cache in sync (periodic table emits elements_changed)
+        self.selected_elements = self.periodic_table.get_selected_elements()
     
     def update_from_spectrum_metadata(self, metadata: dict):
         """
@@ -562,6 +696,50 @@ class ElementPanel(QWidget):
         print(f"  Live time: {self.live_time_spin.value()} s")
         print(f"  Incident angle: {self.angle_spin.value()}°")
     
+    def update_fwhm_status(self, fwhm_calibration=None):
+        """
+        Update Fitting-tab FWHM status from an applied calibration (or clear it).
+
+        When calibration is active, Analysis locks peak widths to FWHM(E).
+        """
+        if fwhm_calibration is None:
+            self.fwhm_status_label.setText(
+                "FWHM: no calibration — widths free in LS"
+            )
+            self.fwhm_status_label.setStyleSheet(
+                "color: #994400; font-weight: bold; padding: 4px;"
+            )
+            return
+
+        if getattr(fwhm_calibration, 'model_type', None) == 'detector':
+            params = getattr(fwhm_calibration, 'parameters', {}) or {}
+            fwhm_0_ev = float(params.get('fwhm_0', 0.0)) * 1000.0
+            epsilon = float(params.get('epsilon', 0.0))
+            r2 = getattr(fwhm_calibration, 'r_squared', None)
+            r2_txt = f"  R²={r2:.4f}" if r2 is not None else ""
+            text = (
+                f"FWHM locked: detector model  "
+                f"FWHM₀={fwhm_0_ev:.1f} eV  ε={epsilon:.4g}{r2_txt}"
+            )
+        else:
+            model = getattr(fwhm_calibration, 'model_type', 'unknown')
+            r2 = getattr(fwhm_calibration, 'r_squared', None)
+            r2_txt = f"  R²={r2:.4f}" if r2 is not None else ""
+            text = f"FWHM locked: {model} model{r2_txt}"
+
+        # Example width at Fe Kα for intuition
+        try:
+            from core.peak_fitting import PeakFitter
+            fe_fwhm_ev = float(PeakFitter.calculate_fwhm(6.403)) * 1000.0
+            text += f"  (≈{fe_fwhm_ev:.0f} eV @ Fe Kα)"
+        except Exception:
+            pass
+
+        self.fwhm_status_label.setText(text)
+        self.fwhm_status_label.setStyleSheet(
+            "color: #1b7a1b; font-weight: bold; padding: 4px;"
+        )
+
     def get_experimental_params(self):
         """Return dictionary of experimental parameters"""
         return {
@@ -593,10 +771,18 @@ class ElementPanel(QWidget):
             'include_tube_lines': self.tube_lines_check.isChecked(),
             'tube_element': self.tube_element_combo.currentText(),
             'excitation_kv': self.excitation_spin.value(),
+            'include_compton': (
+                self.tube_lines_check.isChecked() and self.compton_check.isChecked()
+            ),
+            'scatter_angle_deg': self.scatter_angle_spin.value(),
+            'compton_fwhm_kev': self.compton_fwhm_spin.value() / 1000.0,
             'auto_find_peaks': self.auto_find_check.isChecked(),
             'prominence_percent': self.prominence_spin.value(),
             'min_height': None if min_height <= 0 else min_height,
             'min_separation_ev': self.min_separation_spin.value(),
             'show_peak_markers': self.show_markers_check.isChecked(),
             'use_peak_list': self.should_use_peak_list(),
+            'smart_id_after_fit': self.smart_id_check.isChecked(),
+            'fwhm_excess_ev': self.fwhm_excess_spin.value(),
+            'smart_id_apply': self.smart_id_apply_check.isChecked(),
         }
