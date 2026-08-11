@@ -144,8 +144,8 @@ class ResultsPanel(QWidget):
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.results_table.setToolTip("Click an element to show its emission lines on the spectrum")
-        self.results_table.itemSelectionChanged.connect(self._on_result_selection_changed)
+        self.results_table.setToolTip("Click an element to show its emission lines on the spectrum (click again to clear)")
+        self.results_table.cellClicked.connect(self._on_result_cell_clicked)
         
         layout.addWidget(self.results_table)
         
@@ -299,13 +299,8 @@ class ResultsPanel(QWidget):
         """Return current results data"""
         return self.results_data
     
-    def _on_result_selection_changed(self):
-        """Emit selected element so the spectrum can show its lines"""
-        selected = self.results_table.selectedItems()
-        if not selected:
-            return
-        
-        row = selected[0].row()
+    def _on_result_cell_clicked(self, row, _column):
+        """Emit selected element so the spectrum can show/clear its lines"""
         if 0 <= row < len(self.results_data):
             symbol = self.results_data[row].get('element')
             if symbol:

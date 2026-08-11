@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QLineEdit, QComboBox, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
     QPushButton, QCheckBox, QTabWidget, QDialog, QTextEdit, QDialogButtonBox,
-    QFormLayout
+    QFormLayout, QListWidget, QListWidgetItem, QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -21,11 +21,13 @@ class ElementPanel(QWidget):
     fit_requested = Signal()  # Emitted when fit button is clicked
     peak_find_requested = Signal()  # Preview auto peak detection only
     element_clicked = Signal(str, int)  # Emitted when element clicked (symbol, Z)
+    peak_list_changed = Signal()  # Emitted when peak list is edited (delete/clear)
     
     def __init__(self, parent=None):
         super().__init__(parent)
         
         self.selected_elements = []
+        self._peak_list_data = []  # List of peak dicts shown in the UI
         self._setup_ui()
     
     def _setup_ui(self):
@@ -326,8 +328,133 @@ class ElementPanel(QWidget):
         """)
         self.fit_button.clicked.connect(self.fit_requested.emit)
         layout.addWidget(self.fit_button)
+
+        # Found / candidate peaks list (editable)
+        peaks_group = QGroupBox("Found Peaks")
+        peaks_layout = QVBoxLayout(peaks_group)
+        peaks_layout.setContentsMargins(5, 8, 5, 5)
+        peaks_layout.setSpacing(3)
+
+        self.peak_list_widget = QListWidget()
+        self.peak_list_widget.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.peak_list_widget.setMinimumHeight(120)
+        self.peak_list_widget.setToolTip(
+            "Peaks that will be fitted.\n"
+            "Use Preview Peak Find or Fit Spectrum to populate.\n"
+            "Select and Delete to remove peaks before fitting."
+        )
+        peaks_layout.addWidget(self.peak_list_widget)
+
+        self.use_peak_list_check = QCheckBox("Fit using peak list")
+        self.use_peak_list_check.setChecked(False)
+        self.use_peak_list_check.setToolTip(
+            "When checked, Fit Spectrum uses the peaks listed here\n"
+            "(after any deletions) instead of rebuilding from elements/auto-find.\n"
+            "Automatically enabled when you delete a peak."
+        )
+        peaks_layout.addWidget(self.use_peak_list_check)
+
+        peak_btn_row = QHBoxLayout()
+        delete_peak_btn = QPushButton("Delete Selected")
+        delete_peak_btn.setToolTip("Remove selected peaks from the list")
+        delete_peak_btn.clicked.connect(self._delete_selected_peaks)
+        peak_btn_row.addWidget(delete_peak_btn)
+
+        clear_peaks_btn = QPushButton("Clear")
+        clear_peaks_btn.setToolTip("Clear the peak list (next fit will rebuild)")
+        clear_peaks_btn.clicked.connect(self._clear_peak_list)
+        peak_btn_row.addWidget(clear_peaks_btn)
+        peaks_layout.addLayout(peak_btn_row)
+
+        layout.addWidget(peaks_group)
         
         return group
+
+    def set_peak_list(self, peaks, enable_use_list=False):
+        """
+        Populate the found-peaks list from peak dicts or Peak objects.
+
+        Args:
+            peaks: Iterable of dicts or Peak-like objects with energy/element/line
+            enable_use_list: If True, check "Fit using peak list"
+        """
+        self._peak_list_data = []
+        self.peak_list_widget.clear()
+
+        for p in peaks or []:
+            if hasattr(p, 'energy'):
+                entry = {
+                    'energy': float(p.energy),
+                    'element': getattr(p, 'element', None),
+                    'line': getattr(p, 'line', None),
+                    'is_tube_line': bool(getattr(p, 'is_tube_line', False)),
+                }
+            else:
+                entry = {
+                    'energy': float(p['energy']),
+                    'element': p.get('element'),
+                    'line': p.get('line'),
+                    'is_tube_line': bool(p.get('is_tube_line', False)),
+                }
+            self._peak_list_data.append(entry)
+            self.peak_list_widget.addItem(self._format_peak_item(entry))
+
+        if enable_use_list and self._peak_list_data:
+            self.use_peak_list_check.setChecked(True)
+
+    def get_peak_list(self):
+        """Return a copy of the current peak list (dicts)."""
+        return [dict(p) for p in self._peak_list_data]
+
+    def should_use_peak_list(self):
+        """True if Fit should use the listed peaks instead of rebuilding."""
+        return (
+            self.use_peak_list_check.isChecked()
+            and len(self._peak_list_data) > 0
+        )
+
+    def _format_peak_item(self, entry):
+        energy = entry['energy']
+        element = entry.get('element')
+        line = entry.get('line')
+        is_tube = entry.get('is_tube_line', False)
+
+        if element and line:
+            label = f"{energy:.3f} keV  {element} {line}"
+            if is_tube:
+                label += " [tube]"
+        elif element:
+            label = f"{energy:.3f} keV  {element}"
+            if is_tube:
+                label += " [tube]"
+        else:
+            label = f"{energy:.3f} keV  (unknown)"
+        return label
+
+    def _delete_selected_peaks(self):
+        rows = sorted(
+            {idx.row() for idx in self.peak_list_widget.selectedIndexes()},
+            reverse=True,
+        )
+        if not rows:
+            return
+        for row in rows:
+            if 0 <= row < len(self._peak_list_data):
+                del self._peak_list_data[row]
+            self.peak_list_widget.takeItem(row)
+        if self._peak_list_data:
+            self.use_peak_list_check.setChecked(True)
+        else:
+            self.use_peak_list_check.setChecked(False)
+        self.peak_list_changed.emit()
+
+    def _clear_peak_list(self):
+        self._peak_list_data = []
+        self.peak_list_widget.clear()
+        self.use_peak_list_check.setChecked(False)
+        self.peak_list_changed.emit()
     
     def _on_periodic_table_changed(self, elements):
         """Handle periodic table selection changes"""
@@ -471,4 +598,5 @@ class ElementPanel(QWidget):
             'min_height': None if min_height <= 0 else min_height,
             'min_separation_ev': self.min_separation_spin.value(),
             'show_peak_markers': self.show_markers_check.isChecked(),
+            'use_peak_list': self.should_use_peak_list(),
         }

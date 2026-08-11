@@ -33,64 +33,37 @@ class SpectrumFitter:
         self.background_modeler = BackgroundModeler()
         self.peak_fitter = PeakFitter()
     
-    def fit_spectrum(self, energy, counts, elements=None, 
-                    background_method='snip', peak_shape='gaussian',
-                    auto_find_peaks=True, tube_element='Rh', 
-                    excitation_kv=50.0, include_tube_lines=True, **kwargs):
+    def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
+                             auto_find_peaks=True, tube_element='Rh',
+                             excitation_kv=50.0, include_tube_lines=True, **kwargs):
         """
-        Fit XRF spectrum with background and peaks
-        
-        Args:
-            energy: Energy array (keV)
-            counts: Counts array
-            elements: List of element dicts with 'symbol' and 'z' keys
-            background_method: 'snip', 'polynomial', 'linear', 'adaptive', 'none'
-            peak_shape: 'gaussian', 'voigt', 'pseudo_voigt'
-            auto_find_peaks: If True, automatically find peaks
-            **kwargs: Additional parameters for background/peak fitting
-            
+        Build the list of peak seed positions (element lines, tube lines, auto-find).
+
         Returns:
-            FitResult object
+            List of dicts with keys: energy, element, line, is_tube_line
         """
-        # Step 1: Estimate background
-        print(f"Estimating background using {background_method} method...")
-        background = self.background_modeler.estimate_background(
-            energy, counts, method=background_method, **kwargs
-        )
-        
-        # Step 2: Subtract background
-        counts_bg_subtracted = self.background_modeler.subtract_background(
-            counts, background
-        )
-        
-        # Step 3: Identify peak positions
         peak_positions = []
-        
+
         if elements and len(elements) > 0:
-            # Use element emission lines as peak positions
             print(f"Using emission lines from {len(elements)} elements...")
             for elem in elements:
                 symbol = elem.get('symbol', '')
                 z = elem.get('z', 0)
-                
+
                 if symbol and z:
                     lines = get_element_lines(symbol, z)
-                    
-                    # Only add major lines to avoid fitting noise
-                    # K-series: Kα1, Kα2, Kβ1 (skip weak Kβ2, Kβ3)
-                    # L-series: Lα1, Lα2, Lβ1, Lβ2 (skip weak Lγ, Lβ3, Lβ4)
+
                     major_lines = {
                         'K': ['Kα1', 'Kα2', 'Kβ1'],
                         'L': ['Lα1', 'Lα2', 'Lβ1', 'Lβ2'],
                         'M': ['Mα1', 'Mα2']
                     }
-                    
+
                     for series in ['K', 'L', 'M']:
                         for line in lines.get(series, []):
                             line_name = line['name']
                             line_energy = line['energy']
-                            
-                            # Only include major lines
+
                             if line_name in major_lines.get(series, []):
                                 if energy[0] <= line_energy <= energy[-1]:
                                     peak_positions.append({
@@ -99,18 +72,16 @@ class SpectrumFitter:
                                         'line': line_name,
                                         'is_tube_line': False
                                     })
-        
-        # Add X-ray tube lines if requested
+
         if include_tube_lines and tube_element:
             print(f"Including {tube_element} tube lines at {excitation_kv} keV...")
             tube_lines = get_tube_lines(tube_element, excitation_kv)
-            
+
             for series in ['K', 'L']:
                 for line in tube_lines.get(series, []):
                     line_name = line['name']
                     line_energy = line['energy']
-                    
-                    # Only major tube lines
+
                     if series == 'K' and line_name in ['Kα1', 'Kα2', 'Kβ1']:
                         if energy[0] <= line_energy <= energy[-1]:
                             peak_positions.append({
@@ -127,9 +98,8 @@ class SpectrumFitter:
                                 'line': line_name,
                                 'is_tube_line': True
                             })
-        
-        if auto_find_peaks:
-            # Also find peaks automatically
+
+        if auto_find_peaks and counts_bg_subtracted is not None:
             print("Auto-detecting peaks...")
             auto_peaks = self.peak_fitter.find_peaks(
                 energy, counts_bg_subtracted,
@@ -139,30 +109,86 @@ class SpectrumFitter:
                 prominence_percent=kwargs.get('prominence_percent', None),
                 min_separation_ev=kwargs.get('min_separation_ev', None),
             )
-            
-            # Match tolerance: use separation setting when provided, else 0.1 keV
+
             match_tol = 0.1
             if kwargs.get('min_separation_ev') is not None:
                 match_tol = max(0.05, float(kwargs['min_separation_ev']) / 1000.0)
-            
-            # Add auto-detected peaks that aren't near element lines
+
             for peak_energy, peak_height in auto_peaks:
-                # Check if this peak is near any element line
                 near_element_line = False
                 for pos in peak_positions:
                     if abs(peak_energy - pos['energy']) < match_tol:
                         near_element_line = True
                         break
-                
+
                 if not near_element_line:
                     peak_positions.append({
                         'energy': peak_energy,
                         'element': None,
-                        'line': None
+                        'line': None,
+                        'is_tube_line': False,
                     })
-            
+
             print(f"Auto-detected {len(auto_peaks)} peaks "
                   f"({sum(1 for p in peak_positions if p.get('element') is None)} unknown added)")
+
+        return peak_positions
+
+    def fit_spectrum(self, energy, counts, elements=None, 
+                    background_method='snip', peak_shape='gaussian',
+                    auto_find_peaks=True, tube_element='Rh', 
+                    excitation_kv=50.0, include_tube_lines=True,
+                    peak_positions=None, **kwargs):
+        """
+        Fit XRF spectrum with background and peaks
+        
+        Args:
+            energy: Energy array (keV)
+            counts: Counts array
+            elements: List of element dicts with 'symbol' and 'z' keys
+            background_method: 'snip', 'polynomial', 'linear', 'adaptive', 'none'
+            peak_shape: 'gaussian', 'voigt', 'pseudo_voigt'
+            auto_find_peaks: If True, automatically find peaks
+            peak_positions: Optional pre-built peak seeds (skips rebuild when provided)
+            **kwargs: Additional parameters for background/peak fitting
+            
+        Returns:
+            FitResult object
+        """
+        # Step 1: Estimate background
+        print(f"Estimating background using {background_method} method...")
+        background = self.background_modeler.estimate_background(
+            energy, counts, method=background_method, **kwargs
+        )
+        
+        # Step 2: Subtract background
+        counts_bg_subtracted = self.background_modeler.subtract_background(
+            counts, background
+        )
+        
+        # Step 3: Identify peak positions (or use caller-provided list)
+        if peak_positions is not None:
+            peak_positions = [
+                {
+                    'energy': float(p['energy']),
+                    'element': p.get('element'),
+                    'line': p.get('line'),
+                    'is_tube_line': p.get('is_tube_line', False),
+                }
+                for p in peak_positions
+            ]
+            print(f"Using {len(peak_positions)} caller-provided peak positions...")
+        else:
+            peak_positions = self.build_peak_positions(
+                energy,
+                counts_bg_subtracted=counts_bg_subtracted,
+                elements=elements,
+                auto_find_peaks=auto_find_peaks,
+                tube_element=tube_element,
+                excitation_kv=excitation_kv,
+                include_tube_lines=include_tube_lines,
+                **kwargs,
+            )
         
         # Step 4: Fit peaks (strongest first; subtract each so overlaps don't stack)
         print(f"Fitting {len(peak_positions)} peaks using {peak_shape} shape...")
@@ -177,10 +203,20 @@ class SpectrumFitter:
         ordered_positions = sorted(peak_positions, key=_local_height, reverse=True)
         
         for pos in ordered_positions:
+            known_line = bool(pos.get('element') and pos.get('line'))
+            # Very weak residual peaks: lock center so LS cannot chase noise
+            local_h = _local_height(pos)
+            residual_max = float(np.nanmax(residual_counts)) if residual_counts.size else 0.0
+            fix_center = (
+                residual_max > 0
+                and local_h < 0.05 * residual_max
+            )
             peak = self.peak_fitter.fit_single_peak(
                 energy, residual_counts,
                 initial_center=pos['energy'],
-                shape=peak_shape
+                shape=peak_shape,
+                known_line=known_line,
+                fix_center=fix_center,
             )
             
             if peak is not None:

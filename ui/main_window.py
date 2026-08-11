@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         self.current_spectrum = None
         self.fit_result = None
         self.settings = QSettings()
+        self._displayed_element_lines = None  # symbol currently shown on plot, or None
         
         # Setup UI (status bar before central widget — FWHM auto-load may message it)
         self._create_actions()
@@ -112,6 +113,18 @@ class MainWindow(QMainWindow):
         self.calibration_action.setStatusTip("Calibrate energy axis")
         self.calibration_action.triggered.connect(self.calibrate_energy)
         
+        self.fwhm_calibration_action = QAction("&FWHM Calibration...", self)
+        self.fwhm_calibration_action.setStatusTip(
+            "Calibrate detector resolution (FWHM vs energy)"
+        )
+        self.fwhm_calibration_action.triggered.connect(self.show_fwhm_calibration)
+        
+        self.standards_calibration_action = QAction("&Standards Calibration...", self)
+        self.standards_calibration_action.setStatusTip(
+            "Intensity calibration using reference standards"
+        )
+        self.standards_calibration_action.triggered.connect(self.show_standards_calibration)
+        
         self.element_db_action = QAction("&Element Database...", self)
         self.element_db_action.setStatusTip("View element database")
         self.element_db_action.triggered.connect(self.show_element_database)
@@ -158,6 +171,10 @@ class MainWindow(QMainWindow):
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(self.calibration_action)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.fwhm_calibration_action)
+        tools_menu.addAction(self.standards_calibration_action)
+        tools_menu.addSeparator()
         tools_menu.addAction(self.element_db_action)
         
         # Help menu
@@ -177,14 +194,14 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.save_project_action)
     
     def _create_central_widget(self):
-        """Create the main layout with tabs for Analysis and Calibration"""
+        """Create the main layout with primary Analysis tabs and nested Calibration"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(5, 5, 5, 5)
         
-        # Create tab widget
+        # Primary workflow tabs only — calibration lives one level down
         self.tab_widget = QTabWidget()
         
         # Analysis tab (main interface)
@@ -197,15 +214,9 @@ class MainWindow(QMainWindow):
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
         
-        # Standards tab (intensity calibration using known concentrations)
-        self.standards_panel = StandardsPanel()
-        self.standards_panel.calibration_complete.connect(self.on_calibration_applied)
-        self.tab_widget.addTab(self.standards_panel, "Standards")
-        
-        # FWHM Calibration tab (detector resolution calibration)
-        self.fwhm_calibration_panel = FWHMCalibrationPanel()
-        self.fwhm_calibration_panel.calibration_complete.connect(self.on_fwhm_calibration_applied)
-        self.tab_widget.addTab(self.fwhm_calibration_panel, "FWHM Calibration")
+        # Calibration tab: infrequent setup tools, grouped and out of the primary bar
+        self.calibration_tab = self._create_calibration_tab()
+        self.tab_widget.addTab(self.calibration_tab, "Calibration")
         
         # Auto-load emits calibration_complete during panel __init__, before this
         # connect runs — re-apply any calibration already loaded from disk.
@@ -213,6 +224,39 @@ class MainWindow(QMainWindow):
             self.on_fwhm_calibration_applied(self.fwhm_calibration_panel.fwhm_calibration)
         
         layout.addWidget(self.tab_widget)
+    
+    def _create_calibration_tab(self):
+        """Nest FWHM and Standards under one Calibration tab (setup workflow order)."""
+        calibration_widget = QWidget()
+        layout = QVBoxLayout(calibration_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.calibration_tabs = QTabWidget()
+        
+        # Step 1: detector resolution
+        self.fwhm_calibration_panel = FWHMCalibrationPanel()
+        self.fwhm_calibration_panel.calibration_complete.connect(
+            self.on_fwhm_calibration_applied
+        )
+        self.calibration_tabs.addTab(self.fwhm_calibration_panel, "FWHM")
+        
+        # Step 2: intensity/response using known concentrations
+        self.standards_panel = StandardsPanel()
+        self.standards_panel.calibration_complete.connect(self.on_calibration_applied)
+        self.calibration_tabs.addTab(self.standards_panel, "Standards")
+        
+        layout.addWidget(self.calibration_tabs)
+        return calibration_widget
+    
+    def show_fwhm_calibration(self):
+        """Open Calibration → FWHM from the Tools menu"""
+        self.tab_widget.setCurrentWidget(self.calibration_tab)
+        self.calibration_tabs.setCurrentWidget(self.fwhm_calibration_panel)
+    
+    def show_standards_calibration(self):
+        """Open Calibration → Standards from the Tools menu"""
+        self.tab_widget.setCurrentWidget(self.calibration_tab)
+        self.calibration_tabs.setCurrentWidget(self.standards_panel)
     
     def _create_analysis_tab(self):
         """Create the analysis tab with sub-tabs on left panel for laptop screens"""
@@ -260,6 +304,7 @@ class MainWindow(QMainWindow):
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
         self.element_panel.peak_find_requested.connect(self.preview_peak_find)
+        self.element_panel.peak_list_changed.connect(self.on_peak_list_changed)
         self.element_panel.element_clicked.connect(self.on_element_clicked)
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
@@ -469,6 +514,11 @@ class MainWindow(QMainWindow):
             
             # Get experimental parameters
             exp_params = self.element_panel.get_experimental_params()
+
+            # Optional: use manually edited peak list
+            peak_positions = None
+            if fit_params.get('use_peak_list'):
+                peak_positions = self.element_panel.get_peak_list()
             
             # Perform fitting (pass all parameters including tube lines and experimental params)
             self.fit_result = self.fitter.fit_spectrum(
@@ -485,6 +535,7 @@ class MainWindow(QMainWindow):
                 prominence_percent=fit_params.get('prominence_percent'),
                 min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
+                peak_positions=peak_positions,
             )
             
             # Update spectrum display
@@ -493,6 +544,14 @@ class MainWindow(QMainWindow):
             self.spectrum_widget.set_peak_markers(
                 self.fit_result.peaks,
                 show=fit_params.get('show_peak_markers', True),
+            )
+            self._displayed_element_lines = None
+
+            # Refresh found-peaks list from fitted result (keep use-list state)
+            keep_use_list = fit_params.get('use_peak_list', False)
+            self.element_panel.set_peak_list(
+                self.fit_result.peaks,
+                enable_use_list=keep_use_list,
             )
             
             # Update results panel
@@ -542,78 +601,58 @@ class MainWindow(QMainWindow):
             counts_bg = self.fitter.background_modeler.subtract_background(
                 self.current_spectrum.counts, background
             )
-            
-            detected = self.fitter.peak_fitter.find_peaks(
+
+            preview_peaks = self.fitter.build_peak_positions(
                 self.current_spectrum.energy,
-                counts_bg,
+                counts_bg_subtracted=counts_bg,
+                elements=self.element_panel.get_selected_elements(),
+                auto_find_peaks=fit_params.get('auto_find_peaks', True),
+                tube_element=fit_params.get('tube_element', 'Rh'),
+                excitation_kv=fit_params.get('excitation_kv', 50.0),
+                include_tube_lines=fit_params.get('include_tube_lines', True),
                 prominence_percent=fit_params.get('prominence_percent'),
-                height=fit_params.get('min_height'),
+                min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
             )
             
             # Show background so detection context is clear
             self.spectrum_widget.set_background(background)
             
-            preview_peaks = [
-                {
-                    'energy': energy,
-                    'element': None,
-                    'line': None,
-                    'is_tube_line': False,
-                }
-                for energy, _height in detected
-            ]
-            
-            # Also mark selected-element major lines for comparison
-            elements = self.element_panel.get_selected_elements()
-            from core.xray_data import get_element_lines
-            major_lines = {
-                'K': ['Kα1', 'Kα2', 'Kβ1'],
-                'L': ['Lα1', 'Lα2', 'Lβ1', 'Lβ2'],
-                'M': ['Mα1', 'Mα2'],
-            }
-            energy = self.current_spectrum.energy
-            for elem in elements or []:
-                symbol = elem.get('symbol', '')
-                z = elem.get('z', 0)
-                if not symbol or not z:
-                    continue
-                lines = get_element_lines(symbol, z)
-                for series in ['K', 'L', 'M']:
-                    for line in lines.get(series, []):
-                        if line['name'] not in major_lines.get(series, []):
-                            continue
-                        if energy[0] <= line['energy'] <= energy[-1]:
-                            preview_peaks.append({
-                                'energy': line['energy'],
-                                'element': symbol,
-                                'line': line['name'],
-                                'is_tube_line': False,
-                            })
-            
             self.spectrum_widget.set_peak_markers(
                 preview_peaks,
                 show=fit_params.get('show_peak_markers', True),
             )
+            self._displayed_element_lines = None
+
+            # Populate editable peak list; enable use-list so Fit respects deletions
+            self.element_panel.set_peak_list(preview_peaks, enable_use_list=True)
             
             # Update results peak list with detection preview
-            lines = [
-                f"Detected @ {e:.3f} keV (height={h:.0f})"
-                for e, h in detected
-            ]
+            n_unknown = sum(1 for p in preview_peaks if not p.get('element'))
+            n_labeled = len(preview_peaks) - n_unknown
+            lines = []
+            for p in preview_peaks:
+                if p.get('element') and p.get('line'):
+                    tag = " [tube]" if p.get('is_tube_line') else ""
+                    lines.append(
+                        f"{p['energy']:.3f} keV  {p['element']} {p['line']}{tag}"
+                    )
+                else:
+                    lines.append(f"{p['energy']:.3f} keV  (unknown)")
             if lines:
                 self.results_panel.peaks_text.setPlainText(
-                    f"Peak find preview ({len(detected)} auto-detected):\n" + "\n".join(lines)
+                    f"Peak find preview ({len(preview_peaks)} total: "
+                    f"{n_labeled} labeled, {n_unknown} unknown):\n" + "\n".join(lines)
                 )
             else:
                 self.results_panel.peaks_text.setPlainText(
                     "Peak find preview: no peaks detected.\n"
-                    "Try lowering Prominence or Min height."
+                    "Try lowering Prominence or Min height, or select elements."
                 )
             
             self.status_bar.showMessage(
-                f"Peak find preview: {len(detected)} auto-detected peaks "
-                f"(orange = selected element lines, teal = unknown)",
+                f"Peak find preview: {len(preview_peaks)} peaks listed "
+                f"(delete unwanted peaks, then Fit Spectrum)",
                 6000
             )
         except Exception as e:
@@ -623,6 +662,19 @@ class MainWindow(QMainWindow):
                 f"An error occurred during peak detection:\n{str(e)}"
             )
             self.status_bar.showMessage("Peak find failed", 5000)
+
+    def on_peak_list_changed(self):
+        """Sync spectrum markers when peaks are deleted/cleared in the Fitting tab."""
+        peaks = self.element_panel.get_peak_list()
+        fit_params = self.element_panel.get_fitting_params()
+        if peaks:
+            self.spectrum_widget.set_peak_markers(
+                peaks,
+                show=fit_params.get('show_peak_markers', True),
+            )
+        else:
+            self.spectrum_widget.clear_peak_markers()
+        self._displayed_element_lines = None
     
     def quantify(self):
         """Perform quantitative analysis from the current fit"""
@@ -754,13 +806,16 @@ class MainWindow(QMainWindow):
         pass
     
     def on_element_clicked(self, symbol, z):
-        """Handle element click - show emission lines on spectrum"""
-        # Clear existing markers
+        """Handle element click — show emission lines, or clear if already shown"""
+        if self._displayed_element_lines == symbol:
+            self.spectrum_widget.clear_peak_markers()
+            self._displayed_element_lines = None
+            self.status_bar.showMessage(f"Cleared emission lines for {symbol}", 3000)
+            return
+        
         self.spectrum_widget.clear_peak_markers()
-        
-        # Show emission lines for clicked element
         self.spectrum_widget.show_element_lines(symbol, z)
-        
+        self._displayed_element_lines = symbol
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
     
     def on_result_element_selected(self, symbol):

@@ -139,6 +139,7 @@ QTableWidget {
 
 QTableWidget::item {
     padding: 4px;
+    color: #212121;
 }
 
 QTableWidget::item:selected {
@@ -146,13 +147,20 @@ QTableWidget::item:selected {
     color: white;
 }
 
+/* Header / table text */
 QHeaderView::section {
     background-color: #e0e0e0;
+    color: #212121;
     padding: 6px;
     border: none;
     border-right: 1px solid #cccccc;
     border-bottom: 1px solid #cccccc;
     font-weight: bold;
+}
+
+/* Line edits / combo / spin text */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QTreeWidget {
+    color: #212121;
 }
 
 /* Text Edit */
@@ -189,30 +197,36 @@ QCheckBox::indicator:hover {
 /* Menu Bar */
 QMenuBar {
     background-color: #f5f5f5;
+    color: #212121;
     border-bottom: 1px solid #cccccc;
 }
 
 QMenuBar::item {
     padding: 6px 12px;
     background-color: transparent;
+    color: #212121;
 }
 
 QMenuBar::item:selected {
     background-color: #e0e0e0;
+    color: #212121;
 }
 
 QMenuBar::item:pressed {
     background-color: #d0d0d0;
+    color: #212121;
 }
 
 /* Menu */
 QMenu {
     background-color: white;
+    color: #212121;
     border: 1px solid #cccccc;
 }
 
 QMenu::item {
     padding: 6px 30px 6px 20px;
+    color: #212121;
 }
 
 QMenu::item:selected {
@@ -229,9 +243,28 @@ QMenu::separator {
 /* Tool Bar */
 QToolBar {
     background-color: #f5f5f5;
+    color: #212121;
     border-bottom: 1px solid #cccccc;
     spacing: 4px;
     padding: 4px;
+}
+
+QToolBar QToolButton {
+    background-color: transparent;
+    color: #212121;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QToolBar QToolButton:hover {
+    background-color: #e0e0e0;
+    color: #212121;
+}
+
+QToolBar QToolButton:pressed {
+    background-color: #d0d0d0;
+    color: #212121;
 }
 
 QToolBar::separator {
@@ -240,9 +273,48 @@ QToolBar::separator {
     margin: 4px 8px;
 }
 
+/* Tabs */
+QTabWidget::pane {
+    border: 1px solid #cccccc;
+    background-color: #f5f5f5;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #e8e8e8;
+    color: #212121;
+    border: 1px solid #cccccc;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    padding: 6px 14px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #f5f5f5;
+    color: #212121;
+    font-weight: bold;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #eeeeee;
+    color: #212121;
+}
+
+QTabBar::tab:disabled {
+    color: #a0a0a0;
+}
+
+/* Labels / checkboxes default text */
+QLabel, QCheckBox {
+    color: #212121;
+}
+
 /* Status Bar */
 QStatusBar {
     background-color: #f5f5f5;
+    color: #212121;
     border-top: 1px solid #cccccc;
 }
 

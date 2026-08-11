@@ -43,6 +43,13 @@ class PeakFitter:
     EPSILON = 0.0015  # Fano factor * w (eV per e-h pair)
     VOIGT_GAMMA_RATIO = 0.15  # gamma/sigma ratio for Voigt peaks
     USE_CALIBRATED_SHAPES = False  # If True, fix peak shapes during fitting
+    # Max allowed center shift during LS (keV). Weak peaks otherwise wander
+    # within the old ±0.2 keV window onto neighbors / noise.
+    CENTER_SHIFT_FRACTION = 0.25  # fraction of local FWHM
+    CENTER_SHIFT_MIN_KEV = 0.010  # 10 eV floor
+    CENTER_SHIFT_MAX_KEV = 0.040  # 40 eV cap
+    # Known (element/tube) line centers stay even tighter
+    KNOWN_LINE_CENTER_SHIFT_KEV = 0.020  # 20 eV
     _fwhm_calibration = None  # Optional FWHMCalibration shared by all fits
     
     @classmethod
@@ -201,9 +208,29 @@ class PeakFitter:
         
         return peaks
     
+    @classmethod
+    def center_shift_limit(cls, energy_kev, known_line=False, center_tolerance=None):
+        """
+        Allowed ±center shift (keV) during least-squares refinement.
+
+        Known tabulated lines stay tighter; auto-found peaks use a
+        FWHM-fraction window capped at CENTER_SHIFT_MAX_KEV.
+        """
+        if center_tolerance is not None:
+            return float(center_tolerance)
+        if known_line:
+            return float(cls.KNOWN_LINE_CENTER_SHIFT_KEV)
+        fwhm = float(cls.calculate_fwhm(energy_kev))
+        return float(np.clip(
+            cls.CENTER_SHIFT_FRACTION * fwhm,
+            cls.CENTER_SHIFT_MIN_KEV,
+            cls.CENTER_SHIFT_MAX_KEV,
+        ))
+
     @staticmethod
     def fit_single_peak(energy, counts, initial_center, shape='gaussian', 
-                       bounds=None):
+                       bounds=None, known_line=False, fix_center=False,
+                       center_tolerance=None):
         """
         Fit a single peak
         
@@ -212,7 +239,10 @@ class PeakFitter:
             counts: Counts array
             initial_center: Initial guess for peak center
             shape: 'gaussian', 'lorentzian', 'voigt', or 'pseudo_voigt'
-            bounds: Parameter bounds
+            bounds: Parameter bounds (optional override)
+            known_line: If True, use tighter center bounds (tabulated line)
+            fix_center: If True, hold center at initial_center (amp/width only)
+            center_tolerance: Optional explicit ±center shift in keV
             
         Returns:
             Peak object with fitted parameters
@@ -238,10 +268,14 @@ class PeakFitter:
         
         # Initial parameter guesses
         amplitude_guess = np.max(y_fit)
-        center_guess = initial_center
+        center_guess = float(initial_center)
         # Use energy-dependent FWHM for better initial guess
         fwhm_guess = PeakFitter.calculate_fwhm(initial_center)
         sigma_guess = fwhm_guess / 2.355  # Convert FWHM to sigma
+        dE = 0.0 if fix_center else PeakFitter.center_shift_limit(
+            center_guess, known_line=known_line, center_tolerance=center_tolerance
+        )
+        c_lo, c_hi = center_guess - dE, center_guess + dE
         
         try:
             shape_params = {}
@@ -249,31 +283,63 @@ class PeakFitter:
             if shape == 'gaussian':
                 if PeakFitter.USE_CALIBRATED_SHAPES:
                     sigma_fixed = sigma_guess
-                    
-                    def gaussian_fixed_shape(x, amplitude, center):
-                        return PeakFitter.gaussian(x, amplitude, center, sigma_fixed)
-                    
-                    p0 = [amplitude_guess, center_guess]
-                    bounds = ([0, center_guess - 0.2], [np.inf, center_guess + 0.2])
-                    
-                    popt, _ = optimize.curve_fit(
-                        gaussian_fixed_shape, x_fit, y_fit, p0=p0, bounds=bounds,
-                        maxfev=5000
-                    )
-                    amplitude, center = popt
+                    if fix_center:
+                        def gaussian_amp_only(x, amplitude):
+                            return PeakFitter.gaussian(
+                                x, amplitude, center_guess, sigma_fixed
+                            )
+                        popt, _ = optimize.curve_fit(
+                            gaussian_amp_only, x_fit, y_fit,
+                            p0=[amplitude_guess],
+                            bounds=([0], [np.inf]),
+                            maxfev=5000,
+                        )
+                        amplitude = popt[0]
+                        center = center_guess
+                    else:
+                        def gaussian_fixed_shape(x, amplitude, center):
+                            return PeakFitter.gaussian(x, amplitude, center, sigma_fixed)
+                        
+                        p0 = [amplitude_guess, center_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo], [np.inf, c_hi])
+                        
+                        popt, _ = optimize.curve_fit(
+                            gaussian_fixed_shape, x_fit, y_fit, p0=p0, bounds=bounds,
+                            maxfev=5000
+                        )
+                        amplitude, center = popt
                     sigma = sigma_fixed
                 else:
-                    p0 = [amplitude_guess, center_guess, sigma_guess]
-                    if bounds is None:
-                        # Allow FWHM to refine within reasonable physical limits
-                        bounds = ([0, center_guess - 0.2, sigma_guess * 0.5],
-                                 [np.inf, center_guess + 0.2, sigma_guess * 2.0])
-                    
-                    popt, _ = optimize.curve_fit(
-                        PeakFitter.gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
-                        maxfev=5000
-                    )
-                    amplitude, center, sigma = popt
+                    if fix_center:
+                        def gaussian_fixed_center(x, amplitude, sigma):
+                            return PeakFitter.gaussian(
+                                x, amplitude, center_guess, sigma
+                            )
+                        p0 = [amplitude_guess, sigma_guess]
+                        if bounds is None:
+                            bounds = (
+                                [0, sigma_guess * 0.5],
+                                [np.inf, sigma_guess * 2.0],
+                            )
+                        popt, _ = optimize.curve_fit(
+                            gaussian_fixed_center, x_fit, y_fit, p0=p0,
+                            bounds=bounds, maxfev=5000,
+                        )
+                        amplitude, sigma = popt
+                        center = center_guess
+                    else:
+                        p0 = [amplitude_guess, center_guess, sigma_guess]
+                        if bounds is None:
+                            # Allow FWHM to refine within reasonable physical limits
+                            bounds = ([0, c_lo, sigma_guess * 0.5],
+                                     [np.inf, c_hi, sigma_guess * 2.0])
+                        
+                        popt, _ = optimize.curve_fit(
+                            PeakFitter.gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
+                            maxfev=5000
+                        )
+                        amplitude, center, sigma = popt
                 fwhm = 2.355 * sigma  # FWHM = 2.355 * sigma for Gaussian
                 area = amplitude * sigma * np.sqrt(2 * np.pi)
                 shape_params = {'sigma': sigma}
@@ -287,31 +353,64 @@ class PeakFitter:
                     sigma_fixed = sigma_guess
                     gamma_fixed = gamma_guess
                     
-                    def voigt_fixed_shape(x, amplitude, center):
-                        return PeakFitter.voigt(x, amplitude, center, sigma_fixed, gamma_fixed)
-                    
-                    p0 = [amplitude_guess, center_guess]
-                    bounds = ([0, center_guess - 0.2], [np.inf, center_guess + 0.2])
-                    
-                    popt, _ = optimize.curve_fit(
-                        voigt_fixed_shape, x_fit, y_fit, p0=p0, bounds=bounds,
-                        maxfev=5000
-                    )
-                    amplitude, center = popt
+                    if fix_center:
+                        def voigt_amp_only(x, amplitude):
+                            return PeakFitter.voigt(
+                                x, amplitude, center_guess, sigma_fixed, gamma_fixed
+                            )
+                        popt, _ = optimize.curve_fit(
+                            voigt_amp_only, x_fit, y_fit,
+                            p0=[amplitude_guess],
+                            bounds=([0], [np.inf]),
+                            maxfev=5000,
+                        )
+                        amplitude = popt[0]
+                        center = center_guess
+                    else:
+                        def voigt_fixed_shape(x, amplitude, center):
+                            return PeakFitter.voigt(x, amplitude, center, sigma_fixed, gamma_fixed)
+                        
+                        p0 = [amplitude_guess, center_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo], [np.inf, c_hi])
+                        
+                        popt, _ = optimize.curve_fit(
+                            voigt_fixed_shape, x_fit, y_fit, p0=p0, bounds=bounds,
+                            maxfev=5000
+                        )
+                        amplitude, center = popt
                     sigma = sigma_fixed
                     gamma = gamma_fixed
                 else:
                     # Fit all parameters including shape
-                    p0 = [amplitude_guess, center_guess, sigma_guess, gamma_guess]
-                    if bounds is None:
-                        bounds = ([0, center_guess - 0.2, sigma_guess * 0.5, 0.001],
-                                 [np.inf, center_guess + 0.2, sigma_guess * 2.0, sigma_guess * 2.0])
-                    
-                    popt, _ = optimize.curve_fit(
-                        PeakFitter.voigt, x_fit, y_fit, p0=p0, bounds=bounds,
-                        maxfev=5000
-                    )
-                    amplitude, center, sigma, gamma = popt
+                    if fix_center:
+                        def voigt_fixed_center(x, amplitude, sigma, gamma):
+                            return PeakFitter.voigt(
+                                x, amplitude, center_guess, sigma, gamma
+                            )
+                        p0 = [amplitude_guess, sigma_guess, gamma_guess]
+                        if bounds is None:
+                            bounds = (
+                                [0, sigma_guess * 0.5, 0.001],
+                                [np.inf, sigma_guess * 2.0, sigma_guess * 2.0],
+                            )
+                        popt, _ = optimize.curve_fit(
+                            voigt_fixed_center, x_fit, y_fit, p0=p0,
+                            bounds=bounds, maxfev=5000,
+                        )
+                        amplitude, sigma, gamma = popt
+                        center = center_guess
+                    else:
+                        p0 = [amplitude_guess, center_guess, sigma_guess, gamma_guess]
+                        if bounds is None:
+                            bounds = ([0, c_lo, sigma_guess * 0.5, 0.001],
+                                     [np.inf, c_hi, sigma_guess * 2.0, sigma_guess * 2.0])
+                        
+                        popt, _ = optimize.curve_fit(
+                            PeakFitter.voigt, x_fit, y_fit, p0=p0, bounds=bounds,
+                            maxfev=5000
+                        )
+                        amplitude, center, sigma, gamma = popt
                 
                 # Approximate Voigt FWHM from Gaussian/Lorentzian components
                 fwhm_g = 2.355 * sigma
@@ -322,46 +421,100 @@ class PeakFitter:
             
             elif shape == 'pseudo_voigt':
                 # Start with more Gaussian character (eta=0.3)
-                p0 = [amplitude_guess, center_guess, sigma_guess, 0.3]
-                if bounds is None:
-                    bounds = ([0, center_guess - 0.2, sigma_guess * 0.3, 0],
-                             [np.inf, center_guess + 0.2, sigma_guess * 3.0, 1])
-                
-                popt, _ = optimize.curve_fit(
-                    PeakFitter.pseudo_voigt, x_fit, y_fit, p0=p0, bounds=bounds,
-                    maxfev=5000
-                )
-                amplitude, center, sigma, eta = popt
+                if fix_center:
+                    def pv_fixed_center(x, amplitude, sigma, eta):
+                        return PeakFitter.pseudo_voigt(
+                            x, amplitude, center_guess, sigma, eta
+                        )
+                    p0 = [amplitude_guess, sigma_guess, 0.3]
+                    if bounds is None:
+                        bounds = (
+                            [0, sigma_guess * 0.3, 0],
+                            [np.inf, sigma_guess * 3.0, 1],
+                        )
+                    popt, _ = optimize.curve_fit(
+                        pv_fixed_center, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=5000,
+                    )
+                    amplitude, sigma, eta = popt
+                    center = center_guess
+                else:
+                    p0 = [amplitude_guess, center_guess, sigma_guess, 0.3]
+                    if bounds is None:
+                        bounds = ([0, c_lo, sigma_guess * 0.3, 0],
+                                 [np.inf, c_hi, sigma_guess * 3.0, 1])
+                    
+                    popt, _ = optimize.curve_fit(
+                        PeakFitter.pseudo_voigt, x_fit, y_fit, p0=p0, bounds=bounds,
+                        maxfev=5000
+                    )
+                    amplitude, center, sigma, eta = popt
                 fwhm = 2.355 * sigma
                 area = amplitude * sigma * np.sqrt(2 * np.pi)
                 shape_params = {'sigma': sigma, 'eta': eta}
             
             elif shape == 'hypermet':
-                p0 = [amplitude_guess, center_guess, sigma_guess, 0.1, 2.0]
-                if bounds is None:
-                    bounds = ([0, center_guess - 0.2, sigma_guess * 0.3, 0, 0.5],
-                             [np.inf, center_guess + 0.2, sigma_guess * 3.0, 0.5, 10])
-                
-                popt, _ = optimize.curve_fit(
-                    PeakFitter.hypermet, x_fit, y_fit, p0=p0, bounds=bounds,
-                    maxfev=5000
-                )
-                amplitude, center, sigma, tail_amp, tail_slope = popt
+                if fix_center:
+                    def hypermet_fixed_center(x, amplitude, sigma, tail_amp, tail_slope):
+                        return PeakFitter.hypermet(
+                            x, amplitude, center_guess, sigma, tail_amp, tail_slope
+                        )
+                    p0 = [amplitude_guess, sigma_guess, 0.1, 2.0]
+                    if bounds is None:
+                        bounds = (
+                            [0, sigma_guess * 0.3, 0, 0.5],
+                            [np.inf, sigma_guess * 3.0, 0.5, 10],
+                        )
+                    popt, _ = optimize.curve_fit(
+                        hypermet_fixed_center, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=5000,
+                    )
+                    amplitude, sigma, tail_amp, tail_slope = popt
+                    center = center_guess
+                else:
+                    p0 = [amplitude_guess, center_guess, sigma_guess, 0.1, 2.0]
+                    if bounds is None:
+                        bounds = ([0, c_lo, sigma_guess * 0.3, 0, 0.5],
+                                 [np.inf, c_hi, sigma_guess * 3.0, 0.5, 10])
+                    
+                    popt, _ = optimize.curve_fit(
+                        PeakFitter.hypermet, x_fit, y_fit, p0=p0, bounds=bounds,
+                        maxfev=5000
+                    )
+                    amplitude, center, sigma, tail_amp, tail_slope = popt
                 fwhm = 2.355 * sigma
                 area = amplitude * sigma * np.sqrt(2 * np.pi) * (1 + tail_amp)
                 shape_params = {'sigma': sigma, 'tail_amplitude': tail_amp, 'tail_slope': tail_slope}
             
             elif shape == 'tail_gaussian':
-                p0 = [amplitude_guess, center_guess, sigma_guess, 0.15, sigma_guess * 3]
-                if bounds is None:
-                    bounds = ([0, center_guess - 0.2, sigma_guess * 0.3, 0, sigma_guess],
-                             [np.inf, center_guess + 0.2, sigma_guess * 3.0, 0.5, sigma_guess * 10])
-                
-                popt, _ = optimize.curve_fit(
-                    PeakFitter.tail_gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
-                    maxfev=5000
-                )
-                amplitude, center, sigma, tail_frac, tail_sigma = popt
+                if fix_center:
+                    def tg_fixed_center(x, amplitude, sigma, tail_frac, tail_sigma):
+                        return PeakFitter.tail_gaussian(
+                            x, amplitude, center_guess, sigma, tail_frac, tail_sigma
+                        )
+                    p0 = [amplitude_guess, sigma_guess, 0.15, sigma_guess * 3]
+                    if bounds is None:
+                        bounds = (
+                            [0, sigma_guess * 0.3, 0, sigma_guess],
+                            [np.inf, sigma_guess * 3.0, 0.5, sigma_guess * 10],
+                        )
+                    popt, _ = optimize.curve_fit(
+                        tg_fixed_center, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=5000,
+                    )
+                    amplitude, sigma, tail_frac, tail_sigma = popt
+                    center = center_guess
+                else:
+                    p0 = [amplitude_guess, center_guess, sigma_guess, 0.15, sigma_guess * 3]
+                    if bounds is None:
+                        bounds = ([0, c_lo, sigma_guess * 0.3, 0, sigma_guess],
+                                 [np.inf, c_hi, sigma_guess * 3.0, 0.5, sigma_guess * 10])
+                    
+                    popt, _ = optimize.curve_fit(
+                        PeakFitter.tail_gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
+                        maxfev=5000
+                    )
+                    amplitude, center, sigma, tail_frac, tail_sigma = popt
                 fwhm = 2.355 * sigma
                 area = amplitude * sigma * np.sqrt(2 * np.pi)
                 shape_params = {'sigma': sigma, 'tail_fraction': tail_frac, 'tail_sigma': tail_sigma}
