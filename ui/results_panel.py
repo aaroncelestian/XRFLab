@@ -46,9 +46,11 @@ class ResultsPanel(QWidget):
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
         
-        self.quantify_button = QPushButton("Run Quant")
+        self.quantify_button = QPushButton("Semi-Quant")
         self.quantify_button.setToolTip(
-            "Quantify element concentrations from the current fit"
+            "Area-normalized relative intensities (semi-quantitative).\n"
+            "Not fundamental-parameters concentrations — use Calibration → Standards "
+            "for instrument-calibrated / FP-style results."
         )
         self.quantify_button.setStyleSheet("""
             QPushButton {
@@ -123,7 +125,7 @@ class ResultsPanel(QWidget):
     
     def _create_results_table_group(self):
         """Create quantification results table"""
-        group = QGroupBox("Quantification Results")
+        group = QGroupBox("Semi-Quant Results (relative intensity)")
         layout = QVBoxLayout(group)
         
         # Create table
@@ -131,8 +133,8 @@ class ResultsPanel(QWidget):
         self.results_table.setColumnCount(4)
         self.results_table.setHorizontalHeaderLabels([
             "Element",
-            "Concentration",
-            "Error",
+            "Rel. Intensity",
+            "Uncertainty",
             "Line"
         ])
         
@@ -152,8 +154,16 @@ class ResultsPanel(QWidget):
         
         layout.addWidget(self.results_table)
         
+        # Method note
+        self.method_label = QLabel(
+            "Method: area-normalized semi-quant (not FP wt%)"
+        )
+        self.method_label.setFont(QFont("Arial", 9))
+        self.method_label.setStyleSheet("color: #666;")
+        layout.addWidget(self.method_label)
+
         # Total concentration label
-        self.total_label = QLabel("Total: -- %")
+        self.total_label = QLabel("Sum of relative intensities: -- %")
         self.total_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.total_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.total_label)
@@ -218,15 +228,19 @@ class ResultsPanel(QWidget):
             element_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.results_table.setItem(i, 0, element_item)
             
-            # Concentration
+            # Relative intensity (area-normalized %)
             conc = result['concentration']
             conc_item = QTableWidgetItem(f"{conc:.3f} %")
             conc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.results_table.setItem(i, 1, conc_item)
             
-            # Error
-            error = result.get('error', 0.0)
-            error_item = QTableWidgetItem(f"± {error:.3f} %")
+            # Uncertainty (None for semi-quant)
+            error = result.get('error', None)
+            if error is None:
+                error_text = "—"
+            else:
+                error_text = f"± {error:.3f} %"
+            error_item = QTableWidgetItem(error_text)
             error_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.results_table.setItem(i, 2, error_item)
             
@@ -238,7 +252,7 @@ class ResultsPanel(QWidget):
             total_concentration += conc
         
         # Update total
-        self.total_label.setText(f"Total: {total_concentration:.2f} %")
+        self.total_label.setText(f"Sum of relative intensities: {total_concentration:.2f} %")
         
         # Color code based on total (should be close to 100%)
         if 98 <= total_concentration <= 102:
@@ -247,6 +261,16 @@ class ResultsPanel(QWidget):
             self.total_label.setStyleSheet("color: orange;")
         else:
             self.total_label.setStyleSheet("color: red;")
+        
+        if hasattr(self, "method_label"):
+            method = "semi_quant_area"
+            if results:
+                method = results[0].get("method", method)
+            self.method_label.setText(
+                "Method: area-normalized semi-quant (not FP wt%)"
+                if method == "semi_quant_area"
+                else f"Method: {method}"
+            )
     
     def set_peaks(self, peaks):
         """
@@ -310,8 +334,9 @@ class ResultsPanel(QWidget):
             results.append({
                 'element': element,
                 'concentration': data['concentration'],
-                'error': data['error'],
-                'line': ', '.join(lines) if lines else '--'
+                'error': data.get('error'),
+                'line': ', '.join(lines) if lines else '--',
+                'method': data.get('method', 'semi_quant_area'),
             })
         
         self.set_results(results)
@@ -320,8 +345,12 @@ class ResultsPanel(QWidget):
         """Clear all results and statistics"""
         self.results_table.setRowCount(0)
         self.results_data = []
-        self.total_label.setText("Total: -- %")
+        self.total_label.setText("Sum of relative intensities: -- %")
         self.total_label.setStyleSheet("")
+        if hasattr(self, "method_label"):
+            self.method_label.setText(
+                "Method: area-normalized semi-quant (not FP wt%)"
+            )
         self.chi_squared_label.setText("χ²: --")
         self.r_squared_label.setText("R²: --")
         self.reduced_chi_label.setText("χ²ᵣ: --")

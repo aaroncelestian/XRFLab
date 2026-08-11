@@ -21,6 +21,7 @@ All except cubic zirconia also have Al Kα (1.49 keV) from sample holder
 """
 
 import numpy as np
+import matplotlib_config  # noqa: F401 — shared plot style
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import optimize

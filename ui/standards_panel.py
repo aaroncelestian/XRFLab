@@ -1143,23 +1143,21 @@ class StandardsPanel(QWidget):
             summary_lines.append(f"• {name}: {n_spots} spot(s), {n_elements} elements")
         self.terminal_output.append(f"{'='*50}\n")
         
-        # For now, show a detailed message about what will be implemented
+        # Multi-standard calibration is not implemented yet — be honest with the user
         QMessageBox.information(
             self,
             "Multi-Standard Calibration",
-            f"Calibration will use {len(loaded_standards)} standard(s):\n\n"
+            f"{len(loaded_standards)} standard(s) are loaded:\n\n"
             + "\n".join(summary_lines) + "\n\n"
-            "The calibration will:\n"
-            "1. Fit each spot spectrum with fixed FWHM\n"
-            "2. Extract peak intensities and spot-to-spot variance\n"
-            "3. Optimize intensity scaling factors\n"
-            "4. Calculate detector efficiency curve\n"
-            "5. Determine scatter peak parameters\n\n"
-            "Full implementation coming soon..."
+            "Multi-standard optimization is not available yet.\n"
+            "Use a single standard with known concentrations for now.\n"
+            "This action will be enabled when multi-standard support lands."
         )
         
-        self.terminal_output.append("Calibration ready to run with loaded standards.")
-        self.terminal_output.append("Full implementation in progress...\n")
+        self.terminal_output.append(
+            "Multi-standard calibration is not implemented yet — no run performed.\n"
+        )
+        return
         
         # TODO: Implement actual calibration
         # This will involve:

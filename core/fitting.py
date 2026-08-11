@@ -34,14 +34,22 @@ class FitResult:
 class SpectrumFitter:
     """Main fitting engine for XRF spectra"""
     
-    def __init__(self):
+    def __init__(self, detector=None):
         self.background_modeler = BackgroundModeler()
-        self.peak_fitter = PeakFitter()
+        self.peak_fitter = PeakFitter(detector=detector)
         self.tube_profile_library = None  # Optional TubeProfileLibrary
+        self.peak_fitter.activate()
 
     def set_tube_profile_library(self, library):
         """Attach per-kV tube profile library for ratio constraints / flags."""
         self.tube_profile_library = library
+
+    def apply_instrument_state(self, instrument_state):
+        """Apply an InstrumentState (detector + tube profiles) to this fitter."""
+        if instrument_state is None:
+            return
+        instrument_state.apply_to_fitter(self)
+        self.peak_fitter.activate()
     
     def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
                              auto_find_peaks=True, tube_element='Rh',
@@ -367,6 +375,9 @@ class SpectrumFitter:
         Returns:
             FitResult object
         """
+        # Ensure class-level PeakFitter helpers use this instance's detector
+        self.peak_fitter.activate()
+
         # Step 1: Estimate background
         print(f"Estimating background using {background_method} method...")
         background = self.background_modeler.estimate_background(
@@ -758,52 +769,56 @@ class SpectrumFitter:
         # Would search through xraylib database to identify peaks
         return peaks
     
-    def quantify_elements(self, peaks, experimental_params):
+    def quantify_elements(self, peaks, experimental_params=None):
         """
-        Quantify element concentrations from fitted peaks
-        
+        Semi-quantitative relative intensities from fitted peak areas.
+
+        This is NOT fundamental-parameters quantification. Peak areas for each
+        labeled sample element are summed and normalized to 100% relative
+        intensity. Tube lines are excluded. Use Calibration → Standards for
+        instrument-calibrated / FP-style concentrations.
+
         Args:
             peaks: List of fitted Peak objects
-            experimental_params: Dict with excitation energy, current, etc.
+            experimental_params: Unused; kept for API compatibility
             
         Returns:
-            Dict with element concentrations (normalized to 100%)
+            Dict keyed by element with relative_intensity_pct, total_area, lines,
+            and method='semi_quant_area'. 'concentration' mirrors relative % for
+            existing UI callers; 'error' is None (no uncertainty model).
         """
-        # Sum all peak areas for each element (K, L, M lines combined)
-        # EXCLUDE tube lines from quantification
+        _ = experimental_params  # reserved for future FP wiring
         element_totals = {}
-        element_lines = {}  # Track which lines contributed
-        
+        element_lines = {}
+
         for peak in peaks:
-            # Skip tube lines - they're not from the sample
             if peak.is_tube_line:
                 continue
-            
+
             if peak.element:
                 if peak.element not in element_totals:
                     element_totals[peak.element] = 0.0
                     element_lines[peak.element] = []
-                
-                # Sum all lines for this element
+
                 element_totals[peak.element] += peak.area
                 element_lines[peak.element].append(peak.line)
-        
-        # Calculate total intensity
+
         total_intensity = sum(element_totals.values())
-        
+
         if total_intensity == 0:
             return {}
-        
-        # Normalize to 100% (weight percent)
+
         concentrations = {}
         for element, total_area in element_totals.items():
-            weight_percent = (total_area / total_intensity) * 100.0
-            
+            relative_pct = (total_area / total_intensity) * 100.0
+
             concentrations[element] = {
-                'concentration': weight_percent,
-                'error': weight_percent * 0.1,  # 10% relative error placeholder
-                'lines': element_lines[element],  # All contributing lines
-                'total_area': total_area
+                'concentration': relative_pct,  # UI compat: relative intensity %
+                'relative_intensity_pct': relative_pct,
+                'error': None,  # no uncertainty for area-normalized semi-quant
+                'lines': element_lines[element],
+                'total_area': total_area,
+                'method': 'semi_quant_area',
             }
-        
+
         return concentrations

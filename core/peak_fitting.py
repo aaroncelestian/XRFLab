@@ -42,6 +42,8 @@ class PeakFitter:
     # Detector parameters for energy-dependent FWHM
     # FWHM(E) = sqrt(FWHM_0^2 + 2.355^2 * epsilon * E)  (standard detector model)
     # Prefer FWHMCalibration via set_fwhm_calibration() when available.
+    # Class attrs remain for tube_constraints helpers; prefer instance DetectorModel
+    # via set_detector() / activate() for session-scoped state.
     FWHM_0 = 0.050  # keV at 0 keV (noise contribution)
     EPSILON = 0.0015  # Fano factor * w (eV per e-h pair)
     VOIGT_GAMMA_RATIO = 0.15  # gamma/sigma ratio for Voigt peaks
@@ -54,7 +56,45 @@ class PeakFitter:
     # Known (element/tube) line centers stay even tighter
     KNOWN_LINE_CENTER_SHIFT_KEV = 0.020  # 20 eV
     _fwhm_calibration = None  # Optional FWHMCalibration shared by all fits
+    _active = None  # Currently activated PeakFitter instance
     
+    def __init__(self, detector=None):
+        from core.instrument_state import DetectorModel
+        self.detector = detector if detector is not None else DetectorModel()
+        self.fwhm_calibration = self.detector.fwhm_calibration
+        self._sync_instance_from_detector()
+
+    def _sync_instance_from_detector(self):
+        """Mirror DetectorModel fields onto this instance."""
+        d = self.detector
+        self.fwhm_calibration = d.fwhm_calibration
+
+    def set_detector(self, detector):
+        """Install an injectable DetectorModel and sync class helpers if active."""
+        from core.instrument_state import DetectorModel
+        self.detector = detector if detector is not None else DetectorModel()
+        self._sync_instance_from_detector()
+        if PeakFitter._active is self:
+            self.activate()
+
+    def activate(self):
+        """
+        Make this fitter's detector the active class-level configuration.
+
+        Static helpers (tube_constraints, calculate_fwhm) read class attrs;
+        activate() keeps them aligned with this instance's DetectorModel.
+        """
+        PeakFitter._active = self
+        PeakFitter._sync_class_from_detector(self.detector)
+
+    @classmethod
+    def _sync_class_from_detector(cls, detector):
+        cls.FWHM_0 = float(detector.fwhm_0)
+        cls.EPSILON = float(detector.epsilon)
+        cls.VOIGT_GAMMA_RATIO = float(detector.voigt_gamma_ratio)
+        cls.USE_CALIBRATED_SHAPES = bool(detector.use_calibrated_shapes)
+        cls._fwhm_calibration = detector.fwhm_calibration
+
     @classmethod
     def set_fwhm_calibration(cls, calibration):
         """
@@ -63,26 +103,27 @@ class PeakFitter:
         Uses the calibrated model for width predictions and, when present,
         fixes peak shapes to those widths during fitting.
         """
-        cls._fwhm_calibration = calibration
-        if calibration is None:
-            cls.USE_CALIBRATED_SHAPES = False
+        from core.instrument_state import DetectorModel
+
+        if cls._active is not None:
+            cls._active.detector.apply_fwhm_calibration(calibration)
+            cls._active._sync_instance_from_detector()
+            cls._sync_class_from_detector(cls._active.detector)
             return
-        
-        if getattr(calibration, 'model_type', None) == 'detector':
-            params = getattr(calibration, 'parameters', {}) or {}
-            if 'fwhm_0' in params:
-                cls.FWHM_0 = float(params['fwhm_0'])
-            if 'epsilon' in params:
-                cls.EPSILON = float(params['epsilon'])
-        
-        cls.USE_CALIBRATED_SHAPES = True
+
+        # No active instance: update class defaults and a fresh detector snapshot
+        detector = DetectorModel()
+        detector.apply_fwhm_calibration(calibration)
+        cls._sync_class_from_detector(detector)
     
-    @staticmethod
-    def calculate_fwhm(energy):
+    @classmethod
+    def calculate_fwhm(cls, energy):
         """Calculate energy-dependent FWHM for detector"""
-        if PeakFitter._fwhm_calibration is not None:
-            return PeakFitter._fwhm_calibration.predict_fwhm(energy)
-        return np.sqrt(PeakFitter.FWHM_0**2 + (2.355 ** 2) * PeakFitter.EPSILON * energy)
+        if cls._active is not None:
+            return cls._active.detector.predict_fwhm(energy)
+        if cls._fwhm_calibration is not None:
+            return cls._fwhm_calibration.predict_fwhm(energy)
+        return np.sqrt(cls.FWHM_0**2 + (2.355 ** 2) * cls.EPSILON * energy)
     
     @staticmethod
     def gaussian(x, amplitude, center, sigma):

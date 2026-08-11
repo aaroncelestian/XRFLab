@@ -282,17 +282,22 @@ def get_fwhm_initial_params(calibration: FWHMCalibration) -> Dict[str, float]:
 
 def apply_fwhm_calibration_to_peak_fitter(calibration: FWHMCalibration, peak_fitter=None):
     """
-    Apply FWHM calibration to PeakFitter (class-level; used by Analysis fitting).
+    Apply FWHM calibration to a PeakFitter instance (and activate class helpers).
     
     Args:
         calibration: FWHMCalibration object
-        peak_fitter: Optional PeakFitter instance (also stores calibration attribute)
+        peak_fitter: Optional PeakFitter instance; when given, updates its DetectorModel
     """
     from core.peak_fitting import PeakFitter
-    
-    # PeakFitter.calculate_fwhm is called as a class/static method throughout fitting,
-    # so calibration must be applied at class level (not only on an instance).
-    PeakFitter.set_fwhm_calibration(calibration)
-    
+
     if peak_fitter is not None:
-        peak_fitter.fwhm_calibration = calibration
+        if hasattr(peak_fitter, "detector"):
+            peak_fitter.detector.apply_fwhm_calibration(calibration)
+            peak_fitter._sync_instance_from_detector()
+            peak_fitter.activate()
+        else:
+            PeakFitter.set_fwhm_calibration(calibration)
+            peak_fitter.fwhm_calibration = calibration
+    else:
+        # No instance: update class-level defaults used by static helpers
+        PeakFitter.set_fwhm_calibration(calibration)

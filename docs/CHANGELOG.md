@@ -1,6 +1,26 @@
 # Changelog
 
+## Version 1.2.0 - Product integrity & session model (2026-08-10)
+
+### Clarifications
+- Analysis quantification is explicitly **semi-quant** (area-normalized relative intensities), not FP wt%
+- Stub menu items removed (project open/save, dark theme, energy calibration dialog, element DB, background dialog)
+- README and feature list brought in line with the implemented app
+
+### Architecture
+- Added `AnalysisSession` document model (`core/session.py`)
+- Added injectable `DetectorModel` / `InstrumentState` (`core/instrument_state.py`)
+- PeakFitter activation syncs session detector state for fitting helpers
+- BatchProcessor aligned with `SpectrumFitter.fit_spectrum` API and semi-quant
+
+### Engineering
+- Added `tests/` pytest suite (I/O, FWHM round-trip, semi-quant, synthetic fit, batch)
+- Added `pyproject.toml`, declared matplotlib, added `matplotlib_config.py`
+
+---
+
 ## Version 1.1.0 - Periodic Table Update (2024-11-22)
+
 
 ### ✨ New Features
 

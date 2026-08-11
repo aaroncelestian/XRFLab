@@ -8,6 +8,7 @@ describes your detector's resolution.
 """
 
 import numpy as np
+import matplotlib_config  # noqa: F401 — shared plot style
 import matplotlib.pyplot as plt
 from pathlib import Path
 from calibrate_peak_shape import PeakShapeCalibrator

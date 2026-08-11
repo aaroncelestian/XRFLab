@@ -11,6 +11,13 @@ This folder contains all documentation for the XRF Fundamental Parameters Analys
   - Basic workflow
   - Troubleshooting
 
+- **[TUTORIAL.md](TUTORIAL.md)** - End-to-end lab tutorial
+  - Blanks / tube profiles
+  - FWHM calibration
+  - Standards (and current limits)
+  - Single-spectrum analysis + Semi-Quant
+  - Batch processing
+
 ### Project Information
 - **[starter.MD](starter.MD)** - Original detailed project specifications
   - Complete feature requirements
@@ -54,8 +61,9 @@ All markdown documentation files are stored in this `docs/` folder, except for t
 
 ### For New Users
 1. Start with [QUICKSTART.md](QUICKSTART.md)
-2. Review [LAYOUT_GUIDE.md](LAYOUT_GUIDE.md) for UI overview
-3. Check [PERIODIC_TABLE_UPDATE.md](PERIODIC_TABLE_UPDATE.md) for element selection
+2. Follow [TUTORIAL.md](TUTORIAL.md) for blanks → FWHM → analysis → batch
+3. Review [LAYOUT_GUIDE.md](LAYOUT_GUIDE.md) for UI overview
+4. Check [PERIODIC_TABLE_UPDATE.md](PERIODIC_TABLE_UPDATE.md) for element selection
 
 ### For Developers
 1. Read [starter.MD](starter.MD) for requirements

@@ -48,7 +48,9 @@ class ElementPanel(QWidget):
         element_group = self._create_element_selection_group()
         layout.addWidget(element_group, stretch=1)
         
-        # Fitting controls group
+        # Peak find (detect + auto-ID) then fitting
+        peak_find_group = self._create_peak_find_group()
+        layout.addWidget(peak_find_group)
         fitting_group = self._create_fitting_controls_group()
         layout.addWidget(fitting_group)
     
@@ -176,14 +178,21 @@ class ElementPanel(QWidget):
         
         return group
     
-    def _create_fitting_controls_group(self):
-        """Create fitting controls group"""
-        group = QGroupBox("Fitting Controls")
+    def _create_peak_find_group(self):
+        """Peak detection controls, find button, and editable peak list."""
+        group = QGroupBox("Peak Find")
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)  # Reduced top margin
-        layout.setSpacing(3)  # Tighter spacing
-        
-        # Background method
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
+
+        hint = QLabel(
+            "1) Find peaks → 2) review Elements (auto-ID) → 3) Fit on the Fitting tab"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555; font-size: 11px; padding: 2px;")
+        layout.addWidget(hint)
+
+        # Background used for detection (shared with Fitting via same widget attrs)
         bg_layout = QHBoxLayout()
         bg_layout.addWidget(QLabel("Background:"))
         self.background_combo = QComboBox()
@@ -195,137 +204,20 @@ class ElementPanel(QWidget):
         ])
         bg_layout.addWidget(self.background_combo)
         layout.addLayout(bg_layout)
-        
-        # Peak shape
-        shape_layout = QHBoxLayout()
-        shape_layout.addWidget(QLabel("Peak Shape:"))
-        self.peak_shape_combo = QComboBox()
-        self.peak_shape_combo.addItems([
-            "Gaussian",
-            "Voigt",
-            "Pseudo-Voigt",
-            "Hypermet",
-            "Tail-Gaussian"
-        ])
-        self.peak_shape_combo.setCurrentText("Voigt")  # Set Voigt as default
-        self.peak_shape_combo.setToolTip(
-            "Gaussian: Simple symmetric peak\n"
-            "Voigt: More accurate for X-ray peaks\n"
-            "Pseudo-Voigt: Fast approximation of Voigt\n"
-            "Hypermet: Includes low-energy tail\n"
-            "Tail-Gaussian: Simplified tail model"
-        )
-        shape_layout.addWidget(self.peak_shape_combo)
-        layout.addLayout(shape_layout)
 
-        # FWHM calibration status (locked widths when active)
-        self.fwhm_status_label = QLabel(
-            "FWHM: no calibration — widths free in LS"
-        )
-        self.fwhm_status_label.setWordWrap(True)
-        self.fwhm_status_label.setStyleSheet(
-            "color: #994400; font-weight: bold; padding: 4px;"
-        )
-        self.fwhm_status_label.setToolTip(
-            "When a FWHM calibration is loaded, Analysis locks peak widths\n"
-            "to FWHM(E) during least-squares (amplitude/center only).\n"
-            "Without calibration, width is free to refine within bounds."
-        )
-        layout.addWidget(self.fwhm_status_label)
-
-        self.tube_profile_status_label = QLabel(
-            "Tube profile: defaults (measure blanks at 15/30/50 kV)"
-        )
-        self.tube_profile_status_label.setWordWrap(True)
-        self.tube_profile_status_label.setStyleSheet(
-            "color: #994400; font-weight: bold; padding: 4px;"
-        )
-        self.tube_profile_status_label.setToolTip(
-            "Per-voltage Rh scatter line ratios from Calibration → Tube Profiles.\n"
-            "Analysis soft-priors tube amplitudes to those ratios and joint-fits\n"
-            "known overlaps (Mo L/S, Rh L/Cl). Elevated ratios after fit still flag\n"
-            "possible extra sample intensity under a tube line."
-        )
-        layout.addWidget(self.tube_profile_status_label)
-        
-        # Escape peaks checkbox
-        self.escape_peaks_check = QCheckBox("Include Escape Peaks")
-        self.escape_peaks_check.setChecked(True)
-        layout.addWidget(self.escape_peaks_check)
-        
-        # Pile-up correction checkbox
-        self.pileup_check = QCheckBox("Pile-up Correction")
-        layout.addWidget(self.pileup_check)
-        
-        # X-ray tube lines
-        tube_layout = QHBoxLayout()
-        self.tube_lines_check = QCheckBox("Include Tube Lines:")
-        self.tube_lines_check.setChecked(True)
-        self.tube_lines_check.setToolTip("Model X-ray tube characteristic lines (excluded from quantification)")
-        tube_layout.addWidget(self.tube_lines_check)
-        
-        self.tube_element_combo = QComboBox()
-        self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
-        self.tube_element_combo.setCurrentText("Rh")
-        self.tube_element_combo.setToolTip("X-ray tube anode element")
-        tube_layout.addWidget(self.tube_element_combo)
-        layout.addLayout(tube_layout)
-
-        # Compton (inelastic) tube scatter — broad ~19 keV feature for Rh
-        compton_row = QHBoxLayout()
-        self.compton_check = QCheckBox("Include Compton:")
-        self.compton_check.setChecked(True)
-        self.compton_check.setToolTip(
-            "Model inelastic tube scatter (e.g. Rh Compton ~18.8 keV at 90°).\n"
-            "Uses a wide fixed FWHM (~250 eV), excluded from quantification.\n"
-            "Peak find skips this region so it does not seed false peaks."
-        )
-        compton_row.addWidget(self.compton_check)
-
-        compton_row.addWidget(QLabel("θ:"))
-        self.scatter_angle_spin = QDoubleSpinBox()
-        self.scatter_angle_spin.setRange(30.0, 150.0)
-        self.scatter_angle_spin.setDecimals(0)
-        self.scatter_angle_spin.setSingleStep(5.0)
-        self.scatter_angle_spin.setValue(90.0)
-        self.scatter_angle_spin.setSuffix("°")
-        self.scatter_angle_spin.setToolTip(
-            "Tube–sample–detector scatter angle for Compton energy.\n"
-            "90° is typical for many XRF geometries."
-        )
-        compton_row.addWidget(self.scatter_angle_spin)
-
-        compton_row.addWidget(QLabel("FWHM:"))
-        self.compton_fwhm_spin = QDoubleSpinBox()
-        self.compton_fwhm_spin.setRange(100.0, 800.0)
-        self.compton_fwhm_spin.setDecimals(0)
-        self.compton_fwhm_spin.setSingleStep(25.0)
-        self.compton_fwhm_spin.setValue(250.0)
-        self.compton_fwhm_spin.setSuffix(" eV")
-        self.compton_fwhm_spin.setToolTip(
-            "Fixed width for Compton peaks (much broader than detector FWHM)."
-        )
-        compton_row.addWidget(self.compton_fwhm_spin)
-        layout.addLayout(compton_row)
-
-        self.tube_lines_check.toggled.connect(self._on_tube_lines_toggled)
-        self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
-        
-        # Peak detection fine-tuning
         detect_group = QGroupBox("Peak Detection")
         detect_layout = QFormLayout(detect_group)
         detect_layout.setContentsMargins(5, 8, 5, 5)
         detect_layout.setSpacing(4)
-        
+
         self.auto_find_check = QCheckBox("Auto-find unknown peaks")
         self.auto_find_check.setChecked(True)
         self.auto_find_check.setToolTip(
-            "Also detect peaks that are not in the selected-element line list.\n"
-            "Turn off to fit only selected element (and tube) lines.\n"
-            "Peaks under Compton tube scatter are excluded when Compton is on."
+            "Detect peaks from the spectrum (not only pre-selected element lines).\n"
+            "Recommended for the Peak Find → Elements workflow."
         )
         detect_layout.addRow(self.auto_find_check)
-        
+
         self.prominence_spin = QDoubleSpinBox()
         self.prominence_spin.setRange(0.1, 50.0)
         self.prominence_spin.setDecimals(1)
@@ -337,7 +229,7 @@ class ElementPanel(QWidget):
             "Lower = find more/weaker peaks; higher = only strong peaks."
         )
         detect_layout.addRow("Prominence:", self.prominence_spin)
-        
+
         self.min_height_spin = QDoubleSpinBox()
         self.min_height_spin.setRange(0, 1e9)
         self.min_height_spin.setDecimals(0)
@@ -349,7 +241,7 @@ class ElementPanel(QWidget):
             "0 / Off disables this filter."
         )
         detect_layout.addRow("Min height:", self.min_height_spin)
-        
+
         self.min_separation_spin = QDoubleSpinBox()
         self.min_separation_spin.setRange(10, 2000)
         self.min_separation_spin.setDecimals(0)
@@ -357,87 +249,83 @@ class ElementPanel(QWidget):
         self.min_separation_spin.setValue(80)
         self.min_separation_spin.setSuffix(" eV")
         self.min_separation_spin.setToolTip(
-            "Minimum energy separation between auto-detected peaks.\n"
-            "Lower finds closer peaks; raise to avoid splitting one peak."
+            "Minimum energy separation between auto-detected peaks."
         )
         detect_layout.addRow("Min separation:", self.min_separation_spin)
-        
+
         self.show_markers_check = QCheckBox("Show peak markers on spectrum")
         self.show_markers_check.setChecked(True)
-        self.show_markers_check.setToolTip(
-            "Draw vertical markers for fitted / previewed peaks on the spectrum plot."
-        )
         detect_layout.addRow(self.show_markers_check)
 
-        # Post-fit smart ID / overlap analysis
-        smart_group = QGroupBox("Post-fit Smart ID")
-        smart_layout = QFormLayout(smart_group)
-        smart_layout.setContentsMargins(5, 8, 5, 5)
-        smart_layout.setSpacing(4)
-
-        self.smart_id_check = QCheckBox("Analyze overlaps & multi-line IDs after fit")
-        self.smart_id_check.setChecked(False)
-        self.smart_id_check.setToolTip(
-            "After fitting, flag peaks whose FWHM is broader than the detector\n"
-            "model (possible unresolved overlap), use shape hints (η / tail),\n"
-            "and check Kβ (and other) lines to confirm or challenge labels."
+        self.auto_id_check = QCheckBox("Auto-ID peaks (common XRF elements)")
+        self.auto_id_check.setChecked(True)
+        self.auto_id_check.setToolTip(
+            "After peak find, match unknown peaks to common XRF emission lines\n"
+            "and select those elements on the Elements tab for review."
         )
-        smart_layout.addRow(self.smart_id_check)
-
-        self.fwhm_excess_spin = QDoubleSpinBox()
-        self.fwhm_excess_spin.setRange(5.0, 200.0)
-        self.fwhm_excess_spin.setDecimals(0)
-        self.fwhm_excess_spin.setSingleStep(5.0)
-        self.fwhm_excess_spin.setValue(30.0)
-        self.fwhm_excess_spin.setSuffix(" eV")
-        self.fwhm_excess_spin.setToolTip(
-            "Flag a peak as an overlap suspect when measured FWHM exceeds\n"
-            "the expected detector FWHM by more than this amount."
-        )
-        smart_layout.addRow("FWHM excess:", self.fwhm_excess_spin)
-
-        self.smart_id_apply_check = QCheckBox("Apply suggestions (relabel + overlap seeds)")
-        self.smart_id_apply_check.setChecked(False)
-        self.smart_id_apply_check.setToolTip(
-            "When checked, high-confidence multi-line suggestions update peak\n"
-            "labels, and overlap suspects get an extra peak-list seed so you\n"
-            "can Fit again to resolve the envelope. Review Elements afterward."
-        )
-        smart_layout.addRow(self.smart_id_apply_check)
+        detect_layout.addRow(self.auto_id_check)
 
         layout.addWidget(detect_group)
-        layout.addWidget(smart_group)
-        
-        # Action buttons
-        preview_button = QPushButton("Preview Peak Find")
-        preview_button.setToolTip(
-            "Run peak detection only (no fit) and mark found peaks on the spectrum.\n"
-            "Use this to tune prominence / height / separation."
+
+        # Tube options affect which seeds are added during peak find
+        tube_layout = QHBoxLayout()
+        self.tube_lines_check = QCheckBox("Include Tube Lines:")
+        self.tube_lines_check.setChecked(True)
+        self.tube_lines_check.setToolTip(
+            "Include X-ray tube characteristic lines in the peak list"
         )
-        preview_button.clicked.connect(self.peak_find_requested.emit)
-        layout.addWidget(preview_button)
-        
-        # Fit button
-        self.fit_button = QPushButton("Fit Spectrum")
-        self.fit_button.setStyleSheet("""
+        tube_layout.addWidget(self.tube_lines_check)
+
+        self.tube_element_combo = QComboBox()
+        self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
+        self.tube_element_combo.setCurrentText("Rh")
+        tube_layout.addWidget(self.tube_element_combo)
+        layout.addLayout(tube_layout)
+
+        compton_row = QHBoxLayout()
+        self.compton_check = QCheckBox("Include Compton:")
+        self.compton_check.setChecked(True)
+        compton_row.addWidget(self.compton_check)
+        compton_row.addWidget(QLabel("θ:"))
+        self.scatter_angle_spin = QDoubleSpinBox()
+        self.scatter_angle_spin.setRange(30.0, 150.0)
+        self.scatter_angle_spin.setDecimals(0)
+        self.scatter_angle_spin.setSingleStep(5.0)
+        self.scatter_angle_spin.setValue(90.0)
+        self.scatter_angle_spin.setSuffix("°")
+        compton_row.addWidget(self.scatter_angle_spin)
+        compton_row.addWidget(QLabel("FWHM:"))
+        self.compton_fwhm_spin = QDoubleSpinBox()
+        self.compton_fwhm_spin.setRange(100.0, 800.0)
+        self.compton_fwhm_spin.setDecimals(0)
+        self.compton_fwhm_spin.setSingleStep(25.0)
+        self.compton_fwhm_spin.setValue(250.0)
+        self.compton_fwhm_spin.setSuffix(" eV")
+        compton_row.addWidget(self.compton_fwhm_spin)
+        layout.addLayout(compton_row)
+
+        self.tube_lines_check.toggled.connect(self._on_tube_lines_toggled)
+        self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
+
+        find_button = QPushButton("Find Peaks + Auto-ID")
+        find_button.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background-color: #2196F3;
                 color: white;
                 padding: 8px;
                 font-weight: bold;
                 border-radius: 4px;
             }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
+            QPushButton:hover { background-color: #1976D2; }
+            QPushButton:pressed { background-color: #0D47A1; }
         """)
-        self.fit_button.clicked.connect(self.fit_requested.emit)
-        layout.addWidget(self.fit_button)
+        find_button.setToolTip(
+            "Detect peaks, auto-ID against common XRF lines, then open Elements\n"
+            "so you can confirm labels before Fitting."
+        )
+        find_button.clicked.connect(self.peak_find_requested.emit)
+        layout.addWidget(find_button)
 
-        # Found / candidate peaks list (editable)
         peaks_group = QGroupBox("Found Peaks")
         peaks_layout = QVBoxLayout(peaks_group)
         peaks_layout.setContentsMargins(5, 8, 5, 5)
@@ -450,36 +338,151 @@ class ElementPanel(QWidget):
         self.peak_list_widget.setMinimumHeight(120)
         self.peak_list_widget.setToolTip(
             "Peaks that will be fitted.\n"
-            "Use Preview Peak Find or Fit Spectrum to populate.\n"
-            "Select and Delete to remove peaks before fitting."
+            "Delete false peaks before Fitting."
         )
         peaks_layout.addWidget(self.peak_list_widget)
 
         self.use_peak_list_check = QCheckBox("Fit using peak list")
         self.use_peak_list_check.setChecked(False)
         self.use_peak_list_check.setToolTip(
-            "When checked, Fit Spectrum uses the peaks listed here\n"
-            "(after any deletions) instead of rebuilding from auto-find.\n"
-            "Labels are always rebuilt from the current Elements selection:\n"
-            "uncheck false IDs, check missing ones, then Fit again.\n"
-            "Automatically enabled when you Preview Peak Find or delete a peak."
+            "When checked, Fit Spectrum uses this list instead of rebuilding.\n"
+            "Enabled automatically after Find Peaks."
         )
         peaks_layout.addWidget(self.use_peak_list_check)
 
         peak_btn_row = QHBoxLayout()
         delete_peak_btn = QPushButton("Delete Selected")
-        delete_peak_btn.setToolTip("Remove selected peaks from the list")
         delete_peak_btn.clicked.connect(self._delete_selected_peaks)
         peak_btn_row.addWidget(delete_peak_btn)
-
         clear_peaks_btn = QPushButton("Clear")
-        clear_peaks_btn.setToolTip("Clear the peak list (next fit will rebuild)")
         clear_peaks_btn.clicked.connect(self._clear_peak_list)
         peak_btn_row.addWidget(clear_peaks_btn)
         peaks_layout.addLayout(peak_btn_row)
-
         layout.addWidget(peaks_group)
-        
+
+        return group
+
+    def _create_fitting_controls_group(self):
+        """Create fitting controls group (shape, tube status, Fit button)."""
+        group = QGroupBox("Fitting Controls")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(5, 8, 5, 5)
+        layout.setSpacing(3)
+
+        hint = QLabel(
+            "Confirm Elements first, then Fit. Semi-Quant is on the Results tab."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555; font-size: 11px; padding: 2px;")
+        layout.addWidget(hint)
+
+        bg_note = QLabel("Background & tube/Compton options: Peak Find tab")
+        bg_note.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(bg_note)
+
+        shape_layout = QHBoxLayout()
+        shape_layout.addWidget(QLabel("Peak Shape:"))
+        self.peak_shape_combo = QComboBox()
+        self.peak_shape_combo.addItems([
+            "Gaussian",
+            "Voigt",
+            "Pseudo-Voigt",
+            "Hypermet",
+            "Tail-Gaussian"
+        ])
+        self.peak_shape_combo.setCurrentText("Voigt")
+        shape_layout.addWidget(self.peak_shape_combo)
+        layout.addLayout(shape_layout)
+
+        self.fwhm_status_label = QLabel(
+            "FWHM: no calibration — widths free in LS"
+        )
+        self.fwhm_status_label.setWordWrap(True)
+        self.fwhm_status_label.setStyleSheet(
+            "color: #994400; font-weight: bold; padding: 4px;"
+        )
+        layout.addWidget(self.fwhm_status_label)
+
+        self.tube_profile_status_label = QLabel(
+            "Tube profile: defaults (measure blanks at 15/30/50 kV)"
+        )
+        self.tube_profile_status_label.setWordWrap(True)
+        self.tube_profile_status_label.setStyleSheet(
+            "color: #994400; font-weight: bold; padding: 4px;"
+        )
+        layout.addWidget(self.tube_profile_status_label)
+
+        self.escape_peaks_check = QCheckBox("Include Escape Peaks")
+        self.escape_peaks_check.setChecked(True)
+        layout.addWidget(self.escape_peaks_check)
+
+        self.pileup_check = QCheckBox("Pile-up Correction")
+        layout.addWidget(self.pileup_check)
+
+        # Ensure tube widgets exist if Peak Find group was not built yet
+        if not hasattr(self, 'tube_lines_check'):
+            tube_layout = QHBoxLayout()
+            self.tube_lines_check = QCheckBox("Include Tube Lines:")
+            self.tube_lines_check.setChecked(True)
+            tube_layout.addWidget(self.tube_lines_check)
+            self.tube_element_combo = QComboBox()
+            self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
+            self.tube_element_combo.setCurrentText("Rh")
+            tube_layout.addWidget(self.tube_element_combo)
+            layout.addLayout(tube_layout)
+            self.compton_check = QCheckBox("Include Compton:")
+            self.compton_check.setChecked(True)
+            layout.addWidget(self.compton_check)
+            self.scatter_angle_spin = QDoubleSpinBox()
+            self.scatter_angle_spin.setRange(30.0, 150.0)
+            self.scatter_angle_spin.setValue(90.0)
+            self.compton_fwhm_spin = QDoubleSpinBox()
+            self.compton_fwhm_spin.setRange(100.0, 800.0)
+            self.compton_fwhm_spin.setValue(250.0)
+
+        smart_group = QGroupBox("Post-fit Smart ID")
+        smart_layout = QFormLayout(smart_group)
+        smart_layout.setContentsMargins(5, 8, 5, 5)
+        smart_layout.setSpacing(4)
+
+        self.smart_id_check = QCheckBox("Analyze overlaps & multi-line IDs after fit")
+        self.smart_id_check.setChecked(True)
+        self.smart_id_check.setToolTip(
+            "After fitting, flag broad peaks and check multi-line IDs."
+        )
+        smart_layout.addRow(self.smart_id_check)
+
+        self.fwhm_excess_spin = QDoubleSpinBox()
+        self.fwhm_excess_spin.setRange(5.0, 200.0)
+        self.fwhm_excess_spin.setDecimals(0)
+        self.fwhm_excess_spin.setSingleStep(5.0)
+        self.fwhm_excess_spin.setValue(30.0)
+        self.fwhm_excess_spin.setSuffix(" eV")
+        smart_layout.addRow("FWHM excess:", self.fwhm_excess_spin)
+
+        self.smart_id_apply_check = QCheckBox("Apply suggestions (relabel + overlap seeds)")
+        self.smart_id_apply_check.setChecked(False)
+        smart_layout.addRow(self.smart_id_apply_check)
+        layout.addWidget(smart_group)
+
+        self.fit_button = QPushButton("Fit Spectrum")
+        self.fit_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:pressed { background-color: #3d8b40; }
+        """)
+        self.fit_button.setToolTip(
+            "Fit peaks using the Elements selection and the Peak Find list."
+        )
+        self.fit_button.clicked.connect(self.fit_requested.emit)
+        layout.addWidget(self.fit_button)
+
         return group
 
     def set_peak_list(self, peaks, enable_use_list=False):
@@ -831,6 +834,9 @@ class ElementPanel(QWidget):
             'min_separation_ev': self.min_separation_spin.value(),
             'show_peak_markers': self.show_markers_check.isChecked(),
             'use_peak_list': self.should_use_peak_list(),
+            'auto_id_after_peak_find': (
+                hasattr(self, 'auto_id_check') and self.auto_id_check.isChecked()
+            ),
             'smart_id_after_fit': self.smart_id_check.isChecked(),
             'fwhm_excess_ev': self.fwhm_excess_spin.value(),
             'smart_id_apply': self.smart_id_apply_check.isChecked(),

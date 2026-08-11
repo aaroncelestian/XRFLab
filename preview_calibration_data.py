@@ -7,6 +7,7 @@ before running full calibration.
 """
 
 import numpy as np
+import matplotlib_config  # noqa: F401 — shared plot style
 import matplotlib.pyplot as plt
 from pathlib import Path
 from utils.spectrum_loader import load_spectrum

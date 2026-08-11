@@ -5,7 +5,7 @@ Main window for XRF Fundamental Parameters Analysis Application
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
-    QTabWidget, QPushButton
+    QTabWidget, QPushButton, QLabel
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
@@ -22,10 +22,12 @@ from utils.updater import check_for_updates
 from utils.desktop_shortcut import install_desktop_shortcut
 from utils.paths import icon_path, resource_path
 from core.fitting import SpectrumFitter
+from core.session import AnalysisSession
 from core.smart_peak_id import (
     SmartIDConfig,
     analyze_fitted_peaks,
     apply_smart_id_suggestions,
+    auto_id_peak_positions,
 )
 
 
@@ -40,9 +42,9 @@ class MainWindow(QMainWindow):
         
         # Initialize components
         self.io_handler = IOHandler()
+        self.session = AnalysisSession()
         self.fitter = SpectrumFitter()
-        self.current_spectrum = None
-        self.fit_result = None
+        self.session.apply_instrument_to_fitter(self.fitter)
         self.settings = QSettings()
         self._displayed_element_lines = None  # symbol currently shown on plot, or None
         
@@ -57,6 +59,22 @@ class MainWindow(QMainWindow):
         
         # Restore window state
         self._restore_settings()
+
+    @property
+    def current_spectrum(self):
+        return self.session.spectrum
+
+    @current_spectrum.setter
+    def current_spectrum(self, value):
+        self.session.spectrum = value
+
+    @property
+    def fit_result(self):
+        return self.session.fit_result
+
+    @fit_result.setter
+    def fit_result(self, value):
+        self.session.fit_result = value
     
     def _create_actions(self):
         """Create all menu and toolbar actions"""
@@ -65,15 +83,6 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_action.setStatusTip("Open an XRF spectrum file")
         self.open_action.triggered.connect(self.open_spectrum)
-        
-        self.open_project_action = QAction("Open &Project...", self)
-        self.open_project_action.setStatusTip("Open an XRF project file")
-        self.open_project_action.triggered.connect(self.open_project)
-        
-        self.save_project_action = QAction("&Save Project...", self)
-        self.save_project_action.setShortcut(QKeySequence.Save)
-        self.save_project_action.setStatusTip("Save current project")
-        self.save_project_action.triggered.connect(self.save_project)
         
         self.export_results_action = QAction("&Export Results...", self)
         self.export_results_action.setStatusTip("Export analysis results")
@@ -90,14 +99,13 @@ class MainWindow(QMainWindow):
         self.fit_spectrum_action.setStatusTip("Fit the current spectrum")
         self.fit_spectrum_action.triggered.connect(self.fit_spectrum)
         
-        self.quantify_action = QAction("&Quantification", self)
+        self.quantify_action = QAction("&Semi-Quant (Relative Intensities)", self)
         self.quantify_action.setShortcut("Ctrl+Q")
-        self.quantify_action.setStatusTip("Perform quantitative analysis")
+        self.quantify_action.setStatusTip(
+            "Area-normalized relative intensities (not FP wt%). "
+            "Use Calibration → Standards for instrument-calibrated results."
+        )
         self.quantify_action.triggered.connect(self.quantify)
-        
-        self.background_action = QAction("&Background Settings...", self)
-        self.background_action.setStatusTip("Configure background removal")
-        self.background_action.triggered.connect(self.configure_background)
         
         # View actions
         self.toggle_log_action = QAction("&Logarithmic Y-axis", self)
@@ -112,16 +120,7 @@ class MainWindow(QMainWindow):
         self.toggle_grid_action.setStatusTip("Toggle grid display")
         self.toggle_grid_action.triggered.connect(self.toggle_grid)
         
-        self.toggle_theme_action = QAction("&Dark Theme", self)
-        self.toggle_theme_action.setCheckable(True)
-        self.toggle_theme_action.setStatusTip("Toggle dark/light theme")
-        self.toggle_theme_action.triggered.connect(self.toggle_theme)
-        
-        # Tools actions
-        self.calibration_action = QAction("Energy &Calibration...", self)
-        self.calibration_action.setStatusTip("Calibrate energy axis")
-        self.calibration_action.triggered.connect(self.calibrate_energy)
-        
+        # Tools actions — jump to Calibration sub-tabs
         self.fwhm_calibration_action = QAction("&FWHM Calibration...", self)
         self.fwhm_calibration_action.setStatusTip(
             "Calibrate detector resolution (FWHM vs energy)"
@@ -139,10 +138,6 @@ class MainWindow(QMainWindow):
             "Intensity calibration using reference standards"
         )
         self.standards_calibration_action.triggered.connect(self.show_standards_calibration)
-        
-        self.element_db_action = QAction("&Element Database...", self)
-        self.element_db_action.setStatusTip("View element database")
-        self.element_db_action.triggered.connect(self.show_element_database)
         
         # Help actions
         self.check_updates_action = QAction("Check for &Updates...", self)
@@ -169,8 +164,6 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
         file_menu.addSeparator()
-        file_menu.addAction(self.open_project_action)
-        file_menu.addAction(self.save_project_action)
         file_menu.addAction(self.export_results_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
@@ -179,25 +172,17 @@ class MainWindow(QMainWindow):
         analysis_menu = menubar.addMenu("&Analysis")
         analysis_menu.addAction(self.fit_spectrum_action)
         analysis_menu.addAction(self.quantify_action)
-        analysis_menu.addSeparator()
-        analysis_menu.addAction(self.background_action)
         
         # View menu
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self.toggle_log_action)
         view_menu.addAction(self.toggle_grid_action)
-        view_menu.addSeparator()
-        view_menu.addAction(self.toggle_theme_action)
         
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
-        tools_menu.addAction(self.calibration_action)
-        tools_menu.addSeparator()
         tools_menu.addAction(self.fwhm_calibration_action)
         tools_menu.addAction(self.tube_profile_action)
         tools_menu.addAction(self.standards_calibration_action)
-        tools_menu.addSeparator()
-        tools_menu.addAction(self.element_db_action)
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -207,14 +192,13 @@ class MainWindow(QMainWindow):
         help_menu.addAction(self.about_action)
     
     def _create_toolbar(self):
-        """Create toolbar with project quick-access buttons"""
+        """Create toolbar with global actions only (tab-specific tools stay in-panel)."""
         toolbar = QToolBar("Main Toolbar")
         toolbar.setObjectName("MainToolbar")  # Set object name to avoid warning
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
-        toolbar.addAction(self.open_project_action)
-        toolbar.addAction(self.save_project_action)
+        toolbar.addAction(self.open_action)
     
     def _create_central_widget(self):
         """Create the main layout with primary Analysis tabs and nested Calibration"""
@@ -236,6 +220,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.batch_analysis_panel, "Batch Analysis")
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
+        self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         
         # Calibration tab: infrequent setup tools, grouped and out of the primary bar
         self.calibration_tab = self._create_calibration_tab()
@@ -308,20 +293,20 @@ class MainWindow(QMainWindow):
         self.analysis_left_tabs = QTabWidget()
         self.analysis_left_tabs.setMaximumWidth(700)  # Doubled width for better usability
         
-        # Tab 1: Sample Info & Experimental Parameters
+        # Tab order: Sample → Peak Find → Elements → Fitting → Results
         self.element_panel = ElementPanel()
         sample_exp_tab = self._create_sample_exp_tab()
         self.analysis_left_tabs.addTab(sample_exp_tab, "Sample/Exp")
+
+        peak_find_tab = self._create_peak_find_tab()
+        self.analysis_left_tabs.addTab(peak_find_tab, "Peak Find")
         
-        # Tab 2: Element Selection
         element_tab = self._create_element_selection_tab()
         self.analysis_left_tabs.addTab(element_tab, "Elements")
         
-        # Tab 3: Fitting Controls
         fitting_tab = self._create_fitting_controls_tab()
         self.analysis_left_tabs.addTab(fitting_tab, "Fitting")
         
-        # Tab 4: Results & Quantification
         results_tab = self._create_results_tab()
         self.analysis_left_tabs.addTab(results_tab, "Results")
         
@@ -371,11 +356,30 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return widget
     
+    def _create_peak_find_tab(self):
+        """Create Peak Find tab (detect + auto-ID before Elements)."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        peak_find_group = self.element_panel._create_peak_find_group()
+        layout.addWidget(peak_find_group)
+        layout.addStretch()
+        return widget
+    
     def _create_element_selection_tab(self):
         """Create Element Selection tab"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
+
+        hint = QLabel(
+            "Review auto-ID selections from Peak Find. Uncheck false IDs, "
+            "add missing elements, then continue to Fitting."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555; padding: 4px;")
+        layout.addWidget(hint)
         
         # Element selection group
         element_group = self.element_panel._create_element_selection_group()
@@ -407,7 +411,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.results_panel)
         
         return widget
-    
+
+    # Analysis left-tab indices for navigation after actions
+    TAB_SAMPLE = 0
+    TAB_PEAK_FIND = 1
+    TAB_ELEMENTS = 2
+    TAB_FITTING = 3
+    TAB_RESULTS = 4
+
     def _create_status_bar(self):
         """Create status bar"""
         self.status_bar = QStatusBar()
@@ -457,9 +468,8 @@ class MainWindow(QMainWindow):
         if file_path:
             try:
                 spectrum = self.io_handler.load_spectrum(file_path)
-                self.current_spectrum = spectrum
+                self.session.set_spectrum(spectrum, path=file_path)
                 self.spectrum_widget.set_spectrum(spectrum)
-                # Note: Standards panel will get spectrum when needed
                 
                 # Auto-populate experimental parameters from spectrum metadata
                 if hasattr(spectrum, 'metadata') and spectrum.metadata:
@@ -471,46 +481,6 @@ class MainWindow(QMainWindow):
                     self,
                     "Error Loading Spectrum",
                     f"Failed to load spectrum:\n{str(e)}"
-                )
-    
-    def open_project(self):
-        """Open an XRF project file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Project",
-            "",
-            "XRF Project (*.xrfp);;All Files (*)"
-        )
-        
-        if file_path:
-            try:
-                # TODO: Implement project loading
-                self.status_bar.showMessage(f"Opened project: {file_path}", 5000)
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error Opening Project",
-                    f"Failed to open project:\n{str(e)}"
-                )
-    
-    def save_project(self):
-        """Save current project"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Project",
-            "",
-            "XRF Project (*.xrfp);;All Files (*)"
-        )
-        
-        if file_path:
-            try:
-                # TODO: Implement project saving
-                self.status_bar.showMessage(f"Saved: {file_path}", 5000)
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error Saving Project",
-                    f"Failed to save project:\n{str(e)}"
                 )
     
     def export_results(self):
@@ -547,22 +517,32 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Fitting spectrum...", 0)
         
         try:
+            # Keep fitter aligned with session instrument calibrations
+            self.session.apply_instrument_to_fitter(self.fitter)
+
             # Get selected elements
             elements = self.element_panel.get_selected_elements()
+            self.session.set_elements(elements)
             if not elements:
                 reply = QMessageBox.warning(
                     self,
                     "No Elements Selected",
-                    "No elements are selected on the Elements tab.\n\n"
-                    "Without labeled sample peaks, Fit will still run, but "
-                    "quantification will be empty.\n\n"
-                    "Select elements (e.g. Fe, Ca, Si), then Fit again.\n\n"
+                    "No elements are selected.\n\n"
+                    "Recommended flow:\n"
+                    "  1) Peak Find → Find Peaks + Auto-ID\n"
+                    "  2) Review Elements\n"
+                    "  3) Fitting → Fit Spectrum\n\n"
+                    "Without labeled sample peaks, Semi-Quant will be empty.\n\n"
                     "Continue fitting anyway?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 if reply != QMessageBox.StandardButton.Yes:
-                    self.status_bar.showMessage("Fit cancelled — select elements first", 5000)
+                    self.status_bar.showMessage(
+                        "Fit cancelled — run Peak Find + Auto-ID first", 5000
+                    )
+                    if hasattr(self, 'analysis_left_tabs'):
+                        self.analysis_left_tabs.setCurrentIndex(self.TAB_PEAK_FIND)
                     return
             
             # Get fitting parameters
@@ -579,7 +559,7 @@ class MainWindow(QMainWindow):
                 peak_positions = self.element_panel.get_peak_list()
             
             # Perform fitting (pass all parameters including tube lines and experimental params)
-            self.fit_result = self.fitter.fit_spectrum(
+            fit_result = self.fitter.fit_spectrum(
                 energy=self.current_spectrum.energy,
                 counts=self.current_spectrum.counts,
                 elements=elements,
@@ -598,6 +578,7 @@ class MainWindow(QMainWindow):
                 min_separation_ev=fit_params.get('min_separation_ev'),
                 peak_positions=peak_positions,
             )
+            self.session.set_fit_result(fit_result)
             
             # Optional post-fit smart ID (FWHM excess + Kβ / multi-line checks)
             smart_report = None
@@ -678,11 +659,12 @@ class MainWindow(QMainWindow):
                 current = self.results_panel.peaks_text.toPlainText()
                 self.results_panel.peaks_text.setPlainText(current + extra)
             
-            # Perform quantification (area-normalized; needs labeled sample peaks)
+            # Semi-quant relative intensities (area-normalized; needs labeled sample peaks)
             exp_params = self.element_panel.get_experimental_params()
             concentrations = self.fitter.quantify_elements(
                 self.fit_result.peaks, exp_params
             )
+            self.session.set_concentrations(concentrations, method="semi_quant_area")
             self.results_panel.set_quantification(concentrations)
 
             # Sync identified sample elements onto Elements tab for review.
@@ -714,18 +696,18 @@ class MainWindow(QMainWindow):
             if identified:
                 fit_msg += (
                     f"; {len(identified)} element(s) on Elements tab — review, "
-                    f"then Fit again / Run Quant"
+                    f"then Fit again / Semi-Quant"
                 )
                 if hasattr(self, 'analysis_left_tabs'):
-                    self.analysis_left_tabs.setCurrentIndex(1)
+                    self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
             elif n_quant:
-                fit_msg += f"; quantified {n_quant} element{'s' if n_quant != 1 else ''}"
+                fit_msg += f"; semi-quant {n_quant} element{'s' if n_quant != 1 else ''}"
                 if hasattr(self, 'analysis_left_tabs'):
-                    self.analysis_left_tabs.setCurrentIndex(3)
+                    self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
             else:
-                fit_msg += "; no labeled sample peaks to quantify"
+                fit_msg += "; no labeled sample peaks for semi-quant"
                 if hasattr(self, 'analysis_left_tabs'):
-                    self.analysis_left_tabs.setCurrentIndex(3)
+                    self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
             self.status_bar.showMessage(fit_msg, 12000)
 
             if smart_report is not None and (
@@ -746,7 +728,7 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Fitting failed", 5000)
     
     def preview_peak_find(self):
-        """Run peak detection only and mark found peaks on the spectrum"""
+        """Run peak detection + optional auto-ID, then open Elements for review."""
         if self.current_spectrum is None:
             QMessageBox.warning(
                 self,
@@ -759,6 +741,8 @@ class MainWindow(QMainWindow):
         background_method = fit_params['background_method'].lower()
         
         try:
+            self.session.apply_instrument_to_fitter(self.fitter)
+
             background = self.fitter.background_modeler.estimate_background(
                 self.current_spectrum.energy,
                 self.current_spectrum.counts,
@@ -768,18 +752,34 @@ class MainWindow(QMainWindow):
                 self.current_spectrum.counts, background
             )
 
+            # Peak find first — do not require Elements yet (auto-find unknowns)
             preview_peaks = self.fitter.build_peak_positions(
                 self.current_spectrum.energy,
                 counts_bg_subtracted=counts_bg,
-                elements=self.element_panel.get_selected_elements(),
+                elements=None,
                 auto_find_peaks=fit_params.get('auto_find_peaks', True),
                 tube_element=fit_params.get('tube_element', 'Rh'),
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
+                include_compton=fit_params.get('include_compton', True),
+                scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
+                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.250),
                 prominence_percent=fit_params.get('prominence_percent'),
                 min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
             )
+
+            id_summary = []
+            identified = []
+            if fit_params.get('auto_id_after_peak_find', True):
+                preview_peaks, identified, id_summary = auto_id_peak_positions(
+                    preview_peaks
+                )
+                if identified:
+                    self.element_panel.set_selected_elements(identified)
+                    self.session.set_elements(
+                        self.element_panel.get_selected_elements()
+                    )
             
             # Show background so detection context is clear
             self.spectrum_widget.set_background(background)
@@ -793,7 +793,6 @@ class MainWindow(QMainWindow):
             # Populate editable peak list; enable use-list so Fit respects deletions
             self.element_panel.set_peak_list(preview_peaks, enable_use_list=True)
             
-            # Update results peak list with detection preview
             n_unknown = sum(1 for p in preview_peaks if not p.get('element'))
             n_labeled = len(preview_peaks) - n_unknown
             lines = []
@@ -805,22 +804,39 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     lines.append(f"{p['energy']:.3f} keV  (unknown)")
+            header = (
+                f"Peak find ({len(preview_peaks)} total: "
+                f"{n_labeled} labeled, {n_unknown} unknown)"
+            )
+            if id_summary:
+                header += "\n" + "\n".join(id_summary[:40])
             if lines:
                 self.results_panel.peaks_text.setPlainText(
-                    f"Peak find preview ({len(preview_peaks)} total: "
-                    f"{n_labeled} labeled, {n_unknown} unknown):\n" + "\n".join(lines)
+                    header + ":\n" + "\n".join(lines)
                 )
             else:
                 self.results_panel.peaks_text.setPlainText(
-                    "Peak find preview: no peaks detected.\n"
-                    "Try lowering Prominence or Min height, or select elements."
+                    "Peak find: no peaks detected.\n"
+                    "Try lowering Prominence or Min height."
                 )
-            
-            self.status_bar.showMessage(
-                f"Peak find preview: {len(preview_peaks)} peaks listed "
-                f"(delete unwanted peaks, then Fit Spectrum)",
-                6000
-            )
+
+            # Guide user to Elements → Fitting
+            if hasattr(self, 'analysis_left_tabs'):
+                self.analysis_left_tabs.setCurrentIndex(self.TAB_ELEMENTS)
+
+            if identified:
+                msg = (
+                    f"Peak find: {len(preview_peaks)} peaks; "
+                    f"auto-ID selected {len(identified)} element(s). "
+                    f"Review Elements, then Fitting → Fit Spectrum."
+                )
+            else:
+                msg = (
+                    f"Peak find: {len(preview_peaks)} peaks "
+                    f"({n_unknown} unlabeled). "
+                    f"Select elements, then Fitting → Fit Spectrum."
+                )
+            self.status_bar.showMessage(msg, 10000)
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -843,25 +859,26 @@ class MainWindow(QMainWindow):
         self._displayed_element_lines = None
     
     def quantify(self):
-        """Perform quantitative analysis from the current fit"""
+        """Semi-quantitative relative intensities from the current fit"""
         if self.fit_result is None or not getattr(self.fit_result, 'peaks', None):
             QMessageBox.warning(
                 self,
                 "No Fit Results",
-                "Please fit a spectrum first before running quantification."
+                "Please fit a spectrum first before running semi-quant."
             )
             return
         
         # Show Results tab so the table update is visible
         if hasattr(self, 'analysis_left_tabs'):
-            self.analysis_left_tabs.setCurrentIndex(3)
+            self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
         
-        self.status_bar.showMessage("Performing quantification...", 0)
+        self.status_bar.showMessage("Computing relative intensities...", 0)
         try:
             exp_params = self.element_panel.get_experimental_params()
             concentrations = self.fitter.quantify_elements(
                 self.fit_result.peaks, exp_params
             )
+            self.session.set_concentrations(concentrations, method="semi_quant_area")
             self.results_panel.set_quantification(concentrations)
             n = len(concentrations)
             
@@ -883,26 +900,22 @@ class MainWindow(QMainWindow):
                     "(peak-find unknowns are skipped until they are labeled)."
                 )
                 self.status_bar.showMessage(
-                    "Quantification: no labeled sample peaks", 5000
+                    "Semi-quant: no labeled sample peaks", 5000
                 )
                 return
             
             self.status_bar.showMessage(
-                f"Quantification complete: {n} element{'s' if n != 1 else ''}",
+                f"Semi-quant complete: {n} element{'s' if n != 1 else ''} "
+                f"(relative intensity, not FP wt%)",
                 5000
             )
         except Exception as e:
             QMessageBox.critical(
                 self,
-                "Quantification Error",
-                f"An error occurred during quantification:\n{str(e)}"
+                "Semi-Quant Error",
+                f"An error occurred during semi-quantification:\n{str(e)}"
             )
-            self.status_bar.showMessage("Quantification failed", 5000)
-    
-    def configure_background(self):
-        """Configure background removal settings"""
-        # TODO: Implement background configuration dialog
-        pass
+            self.status_bar.showMessage("Semi-quant failed", 5000)
     
     def toggle_log_scale(self, checked):
         """Toggle logarithmic Y-axis from the View menu"""
@@ -917,21 +930,6 @@ class MainWindow(QMainWindow):
     def toggle_grid(self, checked):
         """Toggle grid display"""
         self.spectrum_widget.set_grid(checked)
-    
-    def toggle_theme(self, checked):
-        """Toggle between dark and light theme"""
-        # TODO: Implement theme switching
-        pass
-    
-    def calibrate_energy(self):
-        """Open energy calibration dialog"""
-        # TODO: Implement calibration dialog
-        pass
-    
-    def show_element_database(self):
-        """Show element database viewer"""
-        # TODO: Implement element database viewer
-        pass
     
     def check_for_updates(self):
         """Pull latest changes from the git remote and report results"""
@@ -1001,16 +999,16 @@ class MainWindow(QMainWindow):
             "About XRFLab",
             "<h3>XRFLab</h3>"
             "<p>Version 1.0.0</p>"
-            "<p>A professional application for X-ray fluorescence spectroscopy analysis "
-            "using fundamental parameters method.</p>"
-            "<p>Built with PySide6, PyQtGraph, and xraylib.</p>"
+            "<p>Desktop XRF spectrum analysis: fitting, detector/tube calibration, "
+            "and area-normalized semi-quant. Fundamental-parameters / fisx tools are "
+            "available under Calibration → Standards.</p>"
+            "<p>Built with PySide6, PyQtGraph, xraylib, and fisx.</p>"
             "<p>Use <b>Help → Install Desktop Shortcut</b> to add a Desktop launcher.</p>"
         )
     
     def on_elements_changed(self, elements):
         """Handle element selection changes"""
-        # TODO: Update spectrum display with selected elements
-        pass
+        self.session.set_elements(elements)
     
     def on_element_clicked(self, symbol, z):
         """Handle element click — show emission lines, or clear if already shown"""
@@ -1040,11 +1038,15 @@ class MainWindow(QMainWindow):
         """Handle FWHM calibration being applied"""
         from core.fwhm_calibration import apply_fwhm_calibration_to_peak_fitter
         
+        # Store on session instrument state
+        self.session.instrument.apply_fwhm_calibration(fwhm_calibration)
+        self.session.apply_instrument_to_fitter(self.fitter)
+        self.batch_analysis_panel.set_instrument_state(self.session.instrument)
+
         # Update the Standards panel with the FWHM calibration
         self.standards_panel.update_fwhm_status(fwhm_calibration)
         
-        # Apply to Analysis / Batch peak fitting (class-level PeakFitter)
-        # This locks widths to FWHM(E) during LS (USE_CALIBRATED_SHAPES=True)
+        # Apply to Analysis peak fitting
         apply_fwhm_calibration_to_peak_fitter(fwhm_calibration, self.fitter.peak_fitter)
 
         # Fitting tab status
@@ -1068,7 +1070,9 @@ class MainWindow(QMainWindow):
 
     def on_tube_profiles_changed(self, library):
         """Apply per-kV tube profile library to Analysis fitting."""
-        self.fitter.set_tube_profile_library(library)
+        self.session.instrument.tube_profile_library = library
+        self.session.apply_instrument_to_fitter(self.fitter)
+        self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         self.element_panel.update_tube_profile_status(library)
         n_meas = sum(1 for p in library.profiles.values() if p.source == 'measured')
         self.status_bar.showMessage(
@@ -1079,9 +1083,10 @@ class MainWindow(QMainWindow):
         )
     
     def on_calibration_applied(self, calibration_result):
-        """Handle calibration being applied"""
+        """Handle standards calibration being applied"""
+        self.session.instrument.standards_calibration = calibration_result
         self.status_bar.showMessage(
-            f"Calibration applied: FWHM₀={calibration_result.fwhm_0*1000:.1f} eV, "
+            f"Standards calibration stored: FWHM₀={calibration_result.fwhm_0*1000:.1f} eV, "
             f"ε={calibration_result.epsilon*1000:.2f} eV",
             5000
         )

@@ -479,3 +479,122 @@ def apply_smart_id_suggestions(
             f"  Applied: {n_applied} relabel(s), {len(seeds)} overlap seed(s) added"
         )
     return peaks, seeds, n_applied
+
+
+# Common XRF survey set used for pre-fit auto-ID after peak find
+COMMON_XRF_SYMBOLS = (
+    'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K', 'Ca',
+    'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+    'As', 'Se', 'Br', 'Rb', 'Sr', 'Y', 'Zr', 'Nb', 'Mo',
+    'Ag', 'Cd', 'Sn', 'Sb', 'Ba', 'W', 'Pb', 'Bi',
+)
+
+
+def common_xrf_elements() -> List[Dict]:
+    """Return [{symbol, z}, ...] for the common XRF survey set."""
+    from core.advanced_peak_fitting import get_element_z
+
+    out = []
+    for symbol in COMMON_XRF_SYMBOLS:
+        z = get_element_z(symbol)
+        if z:
+            out.append({'symbol': symbol, 'z': int(z)})
+    return out
+
+
+def auto_id_peak_positions(
+    peak_positions: Sequence[dict],
+    candidate_elements: Optional[Sequence[Dict]] = None,
+    energy_tol_kev: float = 0.080,
+    require_confirming_line: bool = False,
+) -> Tuple[List[dict], List[str], List[str]]:
+    """
+    Label unknown peak-find seeds by matching energies to element emission lines.
+
+    Intended for the Peak Find → Elements workflow: detect peaks first, then
+    auto-ID against a survey library (default: COMMON_XRF_SYMBOLS), then let
+    the user confirm on the Elements tab before Fitting.
+
+    Args:
+        peak_positions: Peak seed dicts (energy, element, line, is_tube_line, ...)
+        candidate_elements: Optional [{symbol, z}, ...]; defaults to common XRF
+        energy_tol_kev: Max |E_peak - E_line| for a match
+        require_confirming_line: If True, only accept IDs with a second line nearby
+
+    Returns:
+        (updated_positions, identified_symbols, summary_lines)
+    """
+    candidates = list(candidate_elements) if candidate_elements else common_xrf_elements()
+    candidates = [
+        e for e in candidates
+        if e.get('symbol') and e.get('z')
+    ]
+
+    # Build (symbol, z, line_name, energy) catalog of major lines
+    catalog: List[Tuple[str, int, str, float]] = []
+    for elem in candidates:
+        symbol = elem['symbol']
+        z = int(elem['z'])
+        line_map = _line_lookup(symbol, z)
+        for line_name, line_e in _primary_lines(line_map):
+            catalog.append((symbol, z, line_name, float(line_e)))
+
+    positions = [dict(p) for p in (peak_positions or [])]
+    identified: List[str] = []
+    summary: List[str] = []
+    n_labeled = 0
+
+    # Energies already present (for confirming-line checks)
+    all_energies = [float(p.get('energy', 0.0)) for p in positions]
+
+    for pos in positions:
+        if pos.get('is_tube_line'):
+            continue
+        if pos.get('element') and pos.get('line'):
+            # Keep existing label; still count symbol
+            sym = pos['element']
+            if sym not in identified:
+                identified.append(sym)
+            continue
+
+        e_peak = float(pos.get('energy', 0.0))
+        best = None  # (dist, symbol, z, line_name, line_e)
+
+        for symbol, z, line_name, line_e in catalog:
+            dist = abs(e_peak - line_e)
+            if dist > energy_tol_kev:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, symbol, z, line_name, line_e)
+
+        if best is None:
+            continue
+
+        dist, symbol, z, line_name, line_e = best
+
+        if require_confirming_line:
+            line_map = _line_lookup(symbol, z)
+            partners = _confirming_partners(line_name, line_map)
+            confirmed = False
+            for pname, pe in partners:
+                if any(abs(ae - pe) <= energy_tol_kev for ae in all_energies):
+                    confirmed = True
+                    break
+            if not confirmed:
+                continue
+
+        pos['element'] = symbol
+        pos['line'] = line_name
+        n_labeled += 1
+        if symbol not in identified:
+            identified.append(symbol)
+        summary.append(
+            f"  {e_peak:.3f} keV → {symbol} {line_name} "
+            f"(Δ={dist*1000:.0f} eV)"
+        )
+
+    header = [
+        f"Auto-ID: labeled {n_labeled} peak(s); "
+        f"{len(identified)} element(s): {', '.join(identified) if identified else 'none'}"
+    ]
+    return positions, identified, header + summary

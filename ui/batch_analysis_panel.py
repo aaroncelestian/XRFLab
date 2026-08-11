@@ -54,8 +54,14 @@ class BatchAnalysisPanel(QWidget):
         self.results = []
         self.current_result = None
         self.element_panel = None  # Will be set from main window
+        self._instrument_state = None
         
         self._init_ui()
+
+    def set_instrument_state(self, instrument_state):
+        """Attach shared InstrumentState from AnalysisSession."""
+        self._instrument_state = instrument_state
+        self.config.instrument_state = instrument_state
     
     def set_element_panel(self, element_panel):
         """Set reference to Analysis tab's element panel"""
@@ -219,14 +225,20 @@ class BatchAnalysisPanel(QWidget):
             )
             self.settings_tube.setText(tube_element)
 
-            self.config.elements = elements
+            self.config.elements = list(self.element_panel.selected_elements)
             self.config.excitation_energy = excitation
+            self.config.excitation_kv = float(excitation)
             self.config.tube_current = current
             self.config.live_time = live_time
             self.config.background_method = background.lower()
             self.config.peak_shape = peak_shape.lower()
             self.config.include_escape_peaks = escape_peaks
-            self.config.tube_element = tube_element if tube_on else None
+            self.config.include_tube_lines = tube_on
+            self.config.tube_element = (
+                self.element_panel.tube_element_combo.currentText() if tube_on else "Rh"
+            )
+            if self._instrument_state is not None:
+                self.config.instrument_state = self._instrument_state
 
         except Exception as e:
             self.settings_elements.setText("error")
@@ -809,7 +821,7 @@ class BatchAnalysisPanel(QWidget):
         
         # Create plot
         plot = plot_widget.addPlot()
-        plot.setLabel('left', f'{element} Concentration', units='wt%', color='k')
+        plot.setLabel('left', f'{element} Relative Intensity', units='%', color='k')
         plot.setLabel('bottom', 'Spectrum Number', color='k')
         plot.setTitle(f'{element} Concentration Trend', color='k', size='12pt')
         plot.showGrid(x=True, y=True, alpha=0.3)
@@ -870,7 +882,7 @@ class BatchAnalysisPanel(QWidget):
                 slope = coeffs[0]
                 if abs(slope) > 0.001:
                     plot.setTitle(
-                        f'{element} Concentration Trend (slope: {slope:+.4f} wt%/spectrum)',
+                        f'{element} Relative Intensity Trend (slope: {slope:+.4f} %/spectrum)',
                         color='k', size='12pt'
                     )
             except:

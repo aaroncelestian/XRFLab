@@ -1,214 +1,131 @@
 # XRFLab
 
-A professional desktop application for X-ray fluorescence (XRF) spectroscopy data analysis using the fundamental parameters method.
+Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive fitting, detector/tube calibration, batch processing, and area-normalized semi-quantification. Fundamental-parameters / fisx tools are available under **Calibration → Standards**.
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![PySide6](https://img.shields.io/badge/PySide6-6.6+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-## 📚 Documentation
+## Documentation
 
-- **[Quick Start Guide](docs/QUICKSTART.md)** - Get started in 5 minutes
-- **[Project Summary](docs/PROJECT_SUMMARY.md)** - Detailed implementation overview
-- **[Layout Guide](docs/LAYOUT_GUIDE.md)** - UI layout and design
-- **[Periodic Table Feature](docs/PERIODIC_TABLE_UPDATE.md)** - Interactive element selection
-- **[Changelog](docs/CHANGELOG.md)** - Version history and updates
-- **[Project Specifications](docs/starter.MD)** - Original detailed requirements
+- **[Tutorial](docs/TUTORIAL.md)** — blanks, FWHM, standards, single spectrum, batch
+- **[Quick Start Guide](docs/QUICKSTART.md)** — get started in 5 minutes
+- **[Fitting Guide](docs/FITTING_GUIDE.md)** — spectrum fitting
+- **[Calibration Workflow](docs/CALIBRATION_WORKFLOW.md)** — FWHM / standards
+- **[Changelog](docs/CHANGELOG.md)** — version history
+- **[Project Specifications](docs/starter.MD)** — original requirements
 
 ## Features
 
-### Current Implementation (Phase 1)
-- ✅ **Modern GUI** with PySide6 (Qt6)
-- ✅ **High-performance plotting** using PyQtGraph
-- ✅ **Interactive spectrum display** with crosshair and zoom/pan
-- ✅ **Interactive periodic table** for element selection (118 elements, color-coded)
-- ✅ **Results display** with statistics and quantification table
-- ✅ **Multiple file format support** (TXT, CSV, MCA, HDF5)
-- ✅ **Professional styling** with custom Qt stylesheet
-- ✅ **Sample data generator** for testing
+### Implemented
+- Modern **PySide6** GUI with PyQtGraph spectrum + residuals display
+- Interactive **periodic table** element selection (118 elements)
+- **Spectrum fitting** with SNIP/polynomial backgrounds and Gaussian/Voigt (and related) peak shapes
+- Tube lines, Compton scatter, and tube-profile soft constraints
+- **FWHM calibration**, tube profiles, and standards calibration tabs
+- **Semi-quant**: area-normalized relative intensities (not FP weight %)
+- **Batch analysis** using the same fitter contract as the Analysis tab
+- Multi-format I/O (TXT, CSV, MCA, HDF5, EMSA)
+- Session model with injectable detector / instrument state
+- Optional **fisx** / xraylib FP helpers for standards-based work
 
-### Planned Features (Future Phases)
-- 🔄 **Spectrum fitting engine** with background modeling (SNIP, polynomial)
-- 🔄 **Peak identification** and element suggestion
-- 🔄 **Fundamental parameters quantification** using xraylib
-- 🔄 **Matrix corrections** and secondary fluorescence
-- 🔄 **Energy calibration** tools
-- 🔄 **Batch processing** capabilities
-- 🔄 **Report generation** and export
+### Clarifications
+- Analysis **Semi-Quant** = peak-area relative intensities normalized to 100%. It is **not** fundamental-parameters concentrations.
+- Use **Calibration → Standards** for instrument-calibrated / FP-style intensity work.
+- Project open/save, energy-axis dialog, dark theme, and report generation are not implemented yet (menus for unfinished items are hidden).
 
 ## Installation
 
 ### Requirements
-- Python 3.8 or higher
-- pip package manager
+- Python 3.9 or higher
+- pip
 
 ### Setup
 
-1. **Clone or download this repository**
-
-2. **Create a virtual environment** (recommended):
 ```bash
 python -m venv venv
-source venv/bin/activate  # On macOS/Linux
-# or
-venv\Scripts\activate  # On Windows
+source venv/bin/activate  # macOS/Linux
+pip install -r requirements.txt
+# or: pip install -e ".[dev]"
 ```
 
-3. **Install dependencies**:
-```bash
-pip install -r requirements.txt
-```
+Optional: `./setup.sh` creates the venv, installs deps, and generates sample data.
 
 ## Usage
-
-### Running the Application
 
 ```bash
 python main.py
 ```
 
-### Generating Sample Data
-
-To create sample XRF spectra for testing:
+Generate sample spectra:
 
 ```bash
 python -m utils.sample_data
 ```
 
-This will create a `sample_data/` directory with synthetic spectra:
-- `steel_sample.txt` - Steel alloy (Fe, Cr, Ni, Mn)
-- `brass_sample.txt` - Brass alloy (Cu, Zn)
-- `mineral_sample.txt` - Mineral sample (Ca, Ti, Fe)
+Run core tests:
 
-### Loading Spectra
+```bash
+pytest
+```
 
-1. Click **File → Open Spectrum** or use `Ctrl+O`
-2. Select a spectrum file (supports .txt, .csv, .mca, .h5/.hdf5)
-3. The spectrum will be displayed in the center panel
+### Typical Analysis workflow
 
-### Element Selection
+1. **File → Open Spectrum** (`Ctrl+O`)
+2. **Peak Find → Find Peaks + Auto-ID**
+3. Review **Elements** (uncheck false IDs / add missing)
+4. **Fitting → Fit Spectrum** (`Ctrl+F`)
+5. **Results → Semi-Quant** for relative intensities (or Calibration → Standards for calibrated work)
 
-1. Use the search box to filter elements
-2. Check elements you want to analyze
-3. Click "Fit Spectrum" to perform analysis (coming in Phase 2)
+### Calibration
 
-### Viewing Results
-
-- **Fit Statistics**: Chi-squared, R-squared values
-- **Quantification Results**: Element concentrations with errors
-- **Identified Peaks**: List of detected peaks with energies
+Use the **Calibration** tab (or Tools menu):
+- **FWHM** — detector resolution vs energy
+- **Tube Profiles** — per-kV scatter line ratios
+- **Standards** — intensity / instrument calibration (FP/fisx)
 
 ## Project Structure
 
 ```
 XRFLab/
-├── main.py                 # Application entry point
-├── requirements.txt        # Python dependencies
-├── README.md              # This file
-├── setup.sh               # Automated setup script
-│
-├── docs/                  # Documentation
-│   ├── starter.MD         # Detailed project specifications
-│   ├── QUICKSTART.md      # Quick start guide
-│   ├── PROJECT_SUMMARY.md # Implementation summary
-│   ├── LAYOUT_GUIDE.md    # UI layout guide
-│   ├── PERIODIC_TABLE_UPDATE.md  # Periodic table feature
-│   └── CHANGELOG.md       # Version history
-│
-├── ui/                    # User interface modules
-│   ├── __init__.py
-│   ├── main_window.py     # Main application window
-│   ├── spectrum_widget.py # Spectrum plotting widget
-│   ├── element_panel.py   # Element selection panel
-│   ├── results_panel.py   # Results display panel
-│   └── periodic_table_widget.py  # Periodic table widget
-│
-├── core/                  # Core analysis modules
-│   ├── __init__.py
-│   ├── spectrum.py        # Spectrum data class
-│   ├── fitting.py         # Fitting algorithms (planned)
-│   ├── quantification.py  # FP quantification (planned)
-│   └── database.py        # xraylib interface (planned)
-│
-├── utils/                 # Utility modules
-│   ├── __init__.py
-│   ├── io_handler.py      # File I/O for various formats
-│   ├── sample_data.py     # Sample data generator
-│   └── calculations.py    # Helper calculations (planned)
-│
-└── resources/             # Application resources
-    ├── styles.qss         # Qt stylesheet
-    └── icons/             # Application icons (planned)
+├── main.py                 # GUI entry point
+├── matplotlib_config.py    # Shared matplotlib rcParams for CLI plots
+├── pyproject.toml          # Package metadata + pytest config
+├── requirements.txt
+├── core/                   # Qt-free analysis engine
+│   ├── spectrum.py
+│   ├── fitting.py          # SpectrumFitter + semi-quant
+│   ├── peak_fitting.py
+│   ├── session.py          # AnalysisSession document model
+│   ├── instrument_state.py # DetectorModel / InstrumentState
+│   ├── batch_processing.py
+│   ├── fwhm_calibration.py
+│   ├── calibration.py
+│   └── ...
+├── ui/                     # PySide6 panels
+├── utils/                  # I/O, sample data, updater
+├── tests/                  # pytest suite
+├── docs/
+├── sample_data/
+└── resources/
 ```
 
 ## Technology Stack
 
-### Core Framework
-- **PySide6** - Qt6 bindings for Python (GUI framework)
-- **PyQtGraph** - High-performance scientific plotting
+- **PySide6** / **PyQtGraph** — GUI and interactive plots
+- **NumPy / SciPy / Pandas** — numerics and tables
+- **xraylib** / **fisx** — X-ray physics databases and FP
+- **matplotlib** — offline calibration/CLI plots (`matplotlib_config.py`)
+- **h5py / openpyxl** — HDF5 and Excel I/O
 
-### Scientific Libraries
-- **xraylib** - X-ray cross-section databases and atomic parameters
-- **NumPy** - Numerical computations
-- **SciPy** - Scientific algorithms
-- **Pandas** - Data management and export
+## Roadmap (next)
 
-### File Formats
-- **h5py** - HDF5 file support
-- **openpyxl** - Excel export support
-
-## Development Roadmap
-
-### Phase 1: Basic Infrastructure ✅
-- [x] Main window with menu bar and panels
-- [x] PyQtGraph spectrum display
-- [x] File I/O for common formats
-- [x] Element selection interface
-- [x] Results display panel
-- [x] Professional styling
-
-### Phase 2: Core Analysis (In Progress)
-- [ ] Integrate xraylib for fundamental parameters
-- [ ] Background modeling (SNIP algorithm)
-- [ ] Peak fitting (Gaussian/Voigt profiles)
-- [ ] Automatic peak identification
-- [ ] Element suggestion
-
-### Phase 3: Quantification
-- [ ] Fundamental parameters calculations
-- [ ] Matrix corrections
-- [ ] Secondary fluorescence effects
-- [ ] Calibration methods
-- [ ] Standardless analysis
-
-### Phase 4: Polish & Advanced Features
-- [ ] Dark/light theme toggle
-- [ ] Progress bars for long operations
-- [ ] High-quality plot export
-- [ ] Report generation
-- [ ] Batch processing
-- [ ] Database of reference spectra
-
-## Contributing
-
-This is a research/educational project. Contributions, suggestions, and bug reports are welcome!
-
-## References
-
-- **xraylib**: X-ray fluorescence cross-section library
-- **PyMca**: Open-source XRF analysis software (reference implementation)
-- **PyXRF**: Python-based XRF analysis toolkit
+- Project / session file persistence (`.xrfp`)
+- Wire FP concentrations into Analysis when standards prerequisites are met
+- Energy-axis calibration UI
+- Report generation
+- Collapse remaining orphan/parallel calibration loaders
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Author
-
-Developed for XRF spectroscopy research and education.
-
-## Acknowledgments
-
-- xraylib developers for the fundamental parameters database
-- PyQtGraph team for the excellent plotting library
-- Qt/PySide6 for the GUI framework
+MIT License — see LICENSE file for details.

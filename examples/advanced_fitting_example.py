@@ -11,12 +11,14 @@ Shows how AdvancedPeakFitter automatically selects appropriate models.
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
 import sys
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import matplotlib_config  # noqa: F401 — shared plot style
+import matplotlib.pyplot as plt
 
 from core.advanced_peak_fitting import AdvancedPeakFitter, PeakFitResult
 from core.fwhm_calibration import load_fwhm_calibration, create_default_fwhm_calibration
