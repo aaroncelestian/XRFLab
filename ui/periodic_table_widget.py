@@ -24,7 +24,8 @@ class ElementButton(QPushButton):
         self.group = group
         
         self.setCheckable(True)
-        self.setFixedSize(32, 32)  # Optimized for 700px panel (18 cols × 32px + spacing = ~650px)
+        # Compact tiles: 18 cols × 26px + 1px spacing ≈ 485px
+        self.setFixedSize(26, 26)
         
         # Set text - just symbol for compact view
         self.setText(symbol)
@@ -68,22 +69,21 @@ class ElementButton(QPushButton):
         self.setStyleSheet(f"""
             ElementButton {{
                 background-color: {bg_color};
-                border: 2px solid #999999;
-                border-radius: 4px;
+                border: 1px solid #999999;
+                border-radius: 2px;
                 color: #333333;
-                padding: 2px;
+                padding: 0px;
             }}
             ElementButton:hover {{
-                border: 2px solid #2196F3;
+                border: 1px solid #2196F3;
                 background-color: {self._lighten_color(bg_color)};
             }}
             ElementButton:checked {{
-                border: 3px solid #4CAF50;
+                border: 2px solid #4CAF50;
                 background-color: {self._darken_color(bg_color)};
                 font-weight: bold;
             }}
-        """)
-    
+        """)    
     def _lighten_color(self, hex_color):
         """Lighten a hex color"""
         color = QColor(hex_color)
@@ -124,14 +124,25 @@ class PeriodicTableWidget(QWidget):
         # Scroll area for periodic table
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        # Container for periodic table
+        # Container for periodic table — keep tiles tight; absorb slack at edges
         self.table_widget = QWidget()
         self.table_layout = QGridLayout(self.table_widget)
-        self.table_layout.setSpacing(1)  # Reduced spacing for tighter fit
-        self.table_layout.setContentsMargins(2, 2, 2, 2)  # Minimal margins
+        self.table_layout.setSpacing(1)
+        self.table_layout.setContentsMargins(1, 1, 1, 1)
+        self.table_layout.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        # Fixed-size element columns/rows; stretch empty trailing cells instead
+        for col in range(1, 19):
+            self.table_layout.setColumnStretch(col, 0)
+        for row in range(9):
+            self.table_layout.setRowStretch(row, 0)
+        self.table_layout.setColumnStretch(19, 1)
+        self.table_layout.setRowStretch(9, 1)
         
         scroll.setWidget(self.table_widget)
         layout.addWidget(scroll, stretch=1)
@@ -142,16 +153,19 @@ class PeriodicTableWidget(QWidget):
         
         self.select_all_btn = QPushButton("All")
         self.select_all_btn.setToolTip("Select all elements")
+        self.select_all_btn.setMaximumHeight(24)
         self.select_all_btn.clicked.connect(self._select_all)
         button_layout.addWidget(self.select_all_btn)
         
         self.clear_all_btn = QPushButton("Clear")
         self.clear_all_btn.setToolTip("Clear all selections")
+        self.clear_all_btn.setMaximumHeight(24)
         self.clear_all_btn.clicked.connect(self._clear_all)
         button_layout.addWidget(self.clear_all_btn)
         
         self.select_common_btn = QPushButton("Common")
         self.select_common_btn.setToolTip("Select commonly analyzed elements in XRF")
+        self.select_common_btn.setMaximumHeight(24)
         self.select_common_btn.clicked.connect(self._select_common_xrf)
         button_layout.addWidget(self.select_common_btn)
         
@@ -259,32 +273,32 @@ class PeriodicTableWidget(QWidget):
             ('Bh', 'Bohrium', 107, 6, 7, 'transition'),
             ('Hs', 'Hassium', 108, 6, 8, 'transition'),
             
-            # Lanthanides (row 8)
-            ('Ce', 'Cerium', 58, 8, 4, 'lanthanide'),
-            ('Pr', 'Praseodymium', 59, 8, 5, 'lanthanide'),
-            ('Nd', 'Neodymium', 60, 8, 6, 'lanthanide'),
-            ('Pm', 'Promethium', 61, 8, 7, 'lanthanide'),
-            ('Sm', 'Samarium', 62, 8, 8, 'lanthanide'),
-            ('Eu', 'Europium', 63, 8, 9, 'lanthanide'),
-            ('Gd', 'Gadolinium', 64, 8, 10, 'lanthanide'),
-            ('Tb', 'Terbium', 65, 8, 11, 'lanthanide'),
-            ('Dy', 'Dysprosium', 66, 8, 12, 'lanthanide'),
-            ('Ho', 'Holmium', 67, 8, 13, 'lanthanide'),
-            ('Er', 'Erbium', 68, 8, 14, 'lanthanide'),
-            ('Tm', 'Thulium', 69, 8, 15, 'lanthanide'),
-            ('Yb', 'Ytterbium', 70, 8, 16, 'lanthanide'),
-            ('Lu', 'Lutetium', 71, 8, 17, 'lanthanide'),
+            # Lanthanides (row 7 — directly under main table, no spacer row)
+            ('Ce', 'Cerium', 58, 7, 4, 'lanthanide'),
+            ('Pr', 'Praseodymium', 59, 7, 5, 'lanthanide'),
+            ('Nd', 'Neodymium', 60, 7, 6, 'lanthanide'),
+            ('Pm', 'Promethium', 61, 7, 7, 'lanthanide'),
+            ('Sm', 'Samarium', 62, 7, 8, 'lanthanide'),
+            ('Eu', 'Europium', 63, 7, 9, 'lanthanide'),
+            ('Gd', 'Gadolinium', 64, 7, 10, 'lanthanide'),
+            ('Tb', 'Terbium', 65, 7, 11, 'lanthanide'),
+            ('Dy', 'Dysprosium', 66, 7, 12, 'lanthanide'),
+            ('Ho', 'Holmium', 67, 7, 13, 'lanthanide'),
+            ('Er', 'Erbium', 68, 7, 14, 'lanthanide'),
+            ('Tm', 'Thulium', 69, 7, 15, 'lanthanide'),
+            ('Yb', 'Ytterbium', 70, 7, 16, 'lanthanide'),
+            ('Lu', 'Lutetium', 71, 7, 17, 'lanthanide'),
             
-            # Actinides (row 9)
-            ('Th', 'Thorium', 90, 9, 4, 'actinide'),
-            ('Pa', 'Protactinium', 91, 9, 5, 'actinide'),
-            ('U', 'Uranium', 92, 9, 6, 'actinide'),
-            ('Np', 'Neptunium', 93, 9, 7, 'actinide'),
-            ('Pu', 'Plutonium', 94, 9, 8, 'actinide'),
-            ('Am', 'Americium', 95, 9, 9, 'actinide'),
-            ('Cm', 'Curium', 96, 9, 10, 'actinide'),
-            ('Bk', 'Berkelium', 97, 9, 11, 'actinide'),
-            ('Cf', 'Californium', 98, 9, 12, 'actinide'),
+            # Actinides (row 8)
+            ('Th', 'Thorium', 90, 8, 4, 'actinide'),
+            ('Pa', 'Protactinium', 91, 8, 5, 'actinide'),
+            ('U', 'Uranium', 92, 8, 6, 'actinide'),
+            ('Np', 'Neptunium', 93, 8, 7, 'actinide'),
+            ('Pu', 'Plutonium', 94, 8, 8, 'actinide'),
+            ('Am', 'Americium', 95, 8, 9, 'actinide'),
+            ('Cm', 'Curium', 96, 8, 10, 'actinide'),
+            ('Bk', 'Berkelium', 97, 8, 11, 'actinide'),
+            ('Cf', 'Californium', 98, 8, 12, 'actinide'),
         ]
         
         # Create element buttons
@@ -297,45 +311,52 @@ class PeriodicTableWidget(QWidget):
             self.table_layout.addWidget(btn, row, col)
             self.element_buttons[symbol] = btn
         
-        # Add labels for lanthanides and actinides
-        lanthanide_label = QLabel("Lanthanides →")
+        # Compact labels for lanthanides and actinides
+        label_font = QFont("Arial", 7)
+        lanthanide_label = QLabel("Ln →")
+        lanthanide_label.setFont(label_font)
+        lanthanide_label.setToolTip("Lanthanides")
         lanthanide_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.table_layout.addWidget(lanthanide_label, 8, 2)
+        self.table_layout.addWidget(lanthanide_label, 7, 2)
         
-        actinide_label = QLabel("Actinides →")
+        actinide_label = QLabel("An →")
+        actinide_label.setFont(label_font)
+        actinide_label.setToolTip("Actinides")
         actinide_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.table_layout.addWidget(actinide_label, 9, 2)
+        self.table_layout.addWidget(actinide_label, 8, 2)
     
     def _create_legend(self):
         """Create color legend for element groups"""
         layout = QHBoxLayout()
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
         
         legend_items = [
             ('Alkali', '#FF6B6B'),
             ('Alkaline', '#FFA07A'),
-            ('Transition', '#FFD93D'),
-            ('Post-Trans.', '#95E1D3'),
+            ('Trans.', '#FFD93D'),
+            ('Post-T.', '#95E1D3'),
             ('Metalloid', '#A8E6CF'),
-            ('Nonmetal', '#87CEEB'),
+            ('Nonmet.', '#87CEEB'),
             ('Halogen', '#DDA0DD'),
             ('Noble', '#E6E6FA'),
-            ('Lanthanide', '#FFDAB9'),
-            ('Actinide', '#FFB6C1'),
+            ('Ln', '#FFDAB9'),
+            ('An', '#FFB6C1'),
         ]
         
         for name, color in legend_items:
             frame = QFrame()
-            frame.setFixedSize(10, 10)  # Smaller color boxes
+            frame.setFixedSize(8, 8)
             frame.setStyleSheet(f"background-color: {color}; border: 1px solid #999;")
             
             label = QLabel(name)
-            label.setFont(QFont("Arial", 7))  # Smaller font
+            label.setFont(QFont("Arial", 6))
             
             item_layout = QHBoxLayout()
             item_layout.addWidget(frame)
             item_layout.addWidget(label)
-            item_layout.setSpacing(2)  # Tighter spacing
-            item_layout.setContentsMargins(0, 0, 3, 0)  # Less margin
+            item_layout.setSpacing(1)
+            item_layout.setContentsMargins(0, 0, 4, 0)
             
             layout.addLayout(item_layout)
         

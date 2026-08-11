@@ -6,12 +6,15 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QLabel, QTextEdit
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
 
 class ResultsPanel(QWidget):
     """Panel for displaying analysis results and statistics"""
+    
+    element_selected = Signal(str)  # Element symbol clicked in results table
+    quantify_requested = Signal()  # Emitted when Run Quant is clicked
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,7 +42,32 @@ class ResultsPanel(QWidget):
         peaks_group = self._create_peaks_group()
         main_layout.addWidget(peaks_group, stretch=1)
         
-        # Export button at the bottom (full width)
+        # Action buttons
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        
+        self.quantify_button = QPushButton("Run Quant")
+        self.quantify_button.setToolTip(
+            "Quantify element concentrations from the current fit"
+        )
+        self.quantify_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
+        self.quantify_button.clicked.connect(self.quantify_requested.emit)
+        button_row.addWidget(self.quantify_button)
+        
         self.export_button = QPushButton("Export Results")
         self.export_button.setStyleSheet("""
             QPushButton {
@@ -56,7 +84,9 @@ class ResultsPanel(QWidget):
                 background-color: #0D47A1;
             }
         """)
-        main_layout.addWidget(self.export_button)
+        button_row.addWidget(self.export_button)
+        
+        main_layout.addLayout(button_row)
     
     def _create_statistics_group(self):
         """Create fit statistics display group"""
@@ -112,7 +142,10 @@ class ResultsPanel(QWidget):
         
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_table.setToolTip("Click an element to show its emission lines on the spectrum")
+        self.results_table.itemSelectionChanged.connect(self._on_result_selection_changed)
         
         layout.addWidget(self.results_table)
         
@@ -131,7 +164,7 @@ class ResultsPanel(QWidget):
         
         self.peaks_text = QTextEdit()
         self.peaks_text.setReadOnly(True)
-        self.peaks_text.setMaximumHeight(120)
+        self.peaks_text.setMinimumHeight(140)
         self.peaks_text.setPlaceholderText("No peaks identified yet")
         layout.addWidget(self.peaks_text)
         
@@ -265,6 +298,18 @@ class ResultsPanel(QWidget):
     def get_results(self):
         """Return current results data"""
         return self.results_data
+    
+    def _on_result_selection_changed(self):
+        """Emit selected element so the spectrum can show its lines"""
+        selected = self.results_table.selectedItems()
+        if not selected:
+            return
+        
+        row = selected[0].row()
+        if 0 <= row < len(self.results_data):
+            symbol = self.results_data[row].get('element')
+            if symbol:
+                self.element_selected.emit(symbol)
     
     def add_result_row(self, element, concentration, error, line):
         """

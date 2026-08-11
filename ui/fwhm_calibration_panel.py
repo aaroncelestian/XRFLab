@@ -653,11 +653,17 @@ class FWHMCalibrationPanel(QWidget):
                 # Update plot (show fitted curve only, no measurements)
                 self._plot_fitted_curve_only(self.fwhm_calibration)
                 
+                # Persist as the default calibration and apply to the rest of the app
+                self._auto_save_calibration()
+                self.calibration_complete.emit(self.fwhm_calibration)
+                
                 QMessageBox.information(
                     self,
                     "Calibration Loaded",
                     f"FWHM calibration loaded from:\n{file_path}\n\n"
-                    f"Note: Measurement points not available from saved file."
+                    f"It has been applied to peak fitting and saved as the default "
+                    f"calibration for next startup.\n\n"
+                    f"Note: Measurement points are not available from a saved file."
                 )
             except Exception as e:
                 QMessageBox.critical(

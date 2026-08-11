@@ -280,19 +280,19 @@ def get_fwhm_initial_params(calibration: FWHMCalibration) -> Dict[str, float]:
         }
 
 
-def apply_fwhm_calibration_to_peak_fitter(calibration: FWHMCalibration, peak_fitter):
+def apply_fwhm_calibration_to_peak_fitter(calibration: FWHMCalibration, peak_fitter=None):
     """
-    Apply FWHM calibration to PeakFitter instance
+    Apply FWHM calibration to PeakFitter (class-level; used by Analysis fitting).
     
     Args:
         calibration: FWHMCalibration object
-        peak_fitter: PeakFitter instance
+        peak_fitter: Optional PeakFitter instance (also stores calibration attribute)
     """
-    # Store calibration in peak fitter
-    peak_fitter.fwhm_calibration = calibration
+    from core.peak_fitting import PeakFitter
     
-    # Update default FWHM calculation method
-    def calculate_fwhm(energy):
-        return calibration.predict_fwhm(energy)
+    # PeakFitter.calculate_fwhm is called as a class/static method throughout fitting,
+    # so calibration must be applied at class level (not only on an instance).
+    PeakFitter.set_fwhm_calibration(calibration)
     
-    peak_fitter.calculate_fwhm = calculate_fwhm
+    if peak_fitter is not None:
+        peak_fitter.fwhm_calibration = calibration

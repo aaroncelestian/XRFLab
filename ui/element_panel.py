@@ -5,7 +5,8 @@ Element selection panel for XRF analysis
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QLineEdit, QComboBox, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QPushButton, QCheckBox, QTabWidget, QDialog, QTextEdit, QDialogButtonBox
+    QPushButton, QCheckBox, QTabWidget, QDialog, QTextEdit, QDialogButtonBox,
+    QFormLayout
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -18,6 +19,7 @@ class ElementPanel(QWidget):
     
     elements_changed = Signal(list)  # Emitted when selected elements change
     fit_requested = Signal()  # Emitted when fit button is clicked
+    peak_find_requested = Signal()  # Preview auto peak detection only
     element_clicked = Signal(str, int)  # Emitted when element clicked (symbol, Z)
     
     def __init__(self, parent=None):
@@ -160,6 +162,8 @@ class ElementPanel(QWidget):
         """Create element selection with periodic table"""
         group = QGroupBox("Element Selection")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(3, 6, 3, 3)
+        layout.setSpacing(2)
         
         # Create periodic table widget
         self.periodic_table = PeriodicTableWidget()
@@ -234,6 +238,74 @@ class ElementPanel(QWidget):
         self.tube_element_combo.setToolTip("X-ray tube anode element")
         tube_layout.addWidget(self.tube_element_combo)
         layout.addLayout(tube_layout)
+        
+        # Peak detection fine-tuning
+        detect_group = QGroupBox("Peak Detection")
+        detect_layout = QFormLayout(detect_group)
+        detect_layout.setContentsMargins(5, 8, 5, 5)
+        detect_layout.setSpacing(4)
+        
+        self.auto_find_check = QCheckBox("Auto-find unknown peaks")
+        self.auto_find_check.setChecked(True)
+        self.auto_find_check.setToolTip(
+            "Also detect peaks that are not in the selected-element line list.\n"
+            "Turn off to fit only selected element (and tube) lines."
+        )
+        detect_layout.addRow(self.auto_find_check)
+        
+        self.prominence_spin = QDoubleSpinBox()
+        self.prominence_spin.setRange(0.1, 50.0)
+        self.prominence_spin.setDecimals(1)
+        self.prominence_spin.setSingleStep(0.5)
+        self.prominence_spin.setValue(2.0)
+        self.prominence_spin.setSuffix(" %")
+        self.prominence_spin.setToolTip(
+            "Minimum peak prominence as a percent of the tallest peak.\n"
+            "Lower = find more/weaker peaks; higher = only strong peaks."
+        )
+        detect_layout.addRow("Prominence:", self.prominence_spin)
+        
+        self.min_height_spin = QDoubleSpinBox()
+        self.min_height_spin.setRange(0, 1e9)
+        self.min_height_spin.setDecimals(0)
+        self.min_height_spin.setSingleStep(10)
+        self.min_height_spin.setValue(0)
+        self.min_height_spin.setSpecialValueText("Off")
+        self.min_height_spin.setToolTip(
+            "Minimum absolute peak height in counts (after background subtraction).\n"
+            "0 / Off disables this filter."
+        )
+        detect_layout.addRow("Min height:", self.min_height_spin)
+        
+        self.min_separation_spin = QDoubleSpinBox()
+        self.min_separation_spin.setRange(10, 2000)
+        self.min_separation_spin.setDecimals(0)
+        self.min_separation_spin.setSingleStep(10)
+        self.min_separation_spin.setValue(80)
+        self.min_separation_spin.setSuffix(" eV")
+        self.min_separation_spin.setToolTip(
+            "Minimum energy separation between auto-detected peaks.\n"
+            "Lower finds closer peaks; raise to avoid splitting one peak."
+        )
+        detect_layout.addRow("Min separation:", self.min_separation_spin)
+        
+        self.show_markers_check = QCheckBox("Show peak markers on spectrum")
+        self.show_markers_check.setChecked(True)
+        self.show_markers_check.setToolTip(
+            "Draw vertical markers for fitted / previewed peaks on the spectrum plot."
+        )
+        detect_layout.addRow(self.show_markers_check)
+        
+        layout.addWidget(detect_group)
+        
+        # Action buttons
+        preview_button = QPushButton("Preview Peak Find")
+        preview_button.setToolTip(
+            "Run peak detection only (no fit) and mark found peaks on the spectrum.\n"
+            "Use this to tune prominence / height / separation."
+        )
+        preview_button.clicked.connect(self.peak_find_requested.emit)
+        layout.addWidget(preview_button)
         
         # Fit button
         self.fit_button = QPushButton("Fit Spectrum")
@@ -385,6 +457,7 @@ class ElementPanel(QWidget):
         }
         peak_shape = self.peak_shape_combo.currentText()
         
+        min_height = self.min_height_spin.value()
         return {
             'background_method': self.background_combo.currentText(),
             'peak_shape': peak_shape_map.get(peak_shape, peak_shape.lower()),
@@ -392,5 +465,10 @@ class ElementPanel(QWidget):
             'pileup_correction': self.pileup_check.isChecked(),
             'include_tube_lines': self.tube_lines_check.isChecked(),
             'tube_element': self.tube_element_combo.currentText(),
-            'excitation_kv': self.excitation_spin.value()
+            'excitation_kv': self.excitation_spin.value(),
+            'auto_find_peaks': self.auto_find_check.isChecked(),
+            'prominence_percent': self.prominence_spin.value(),
+            'min_height': None if min_height <= 0 else min_height,
+            'min_separation_ev': self.min_separation_spin.value(),
+            'show_peak_markers': self.show_markers_check.isChecked(),
         }

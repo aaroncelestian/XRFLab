@@ -24,10 +24,6 @@ from ui.concentration_entry_dialog import ConcentrationEntryDialog
 from utils.io_handler import IOHandler
 
 
-# Built-in standards library (empty by default - users load their own)
-STANDARDS_LIBRARY = {}
-
-
 class CalibrationWorker(QThread):
     """Worker thread for running calibration"""
     finished = Signal(object)  # CalibrationResult
@@ -88,8 +84,9 @@ class StandardsPanel(QWidget):
         self.reference_concentrations = None
         self.calibration_result = None
         self.worker = None
-        self.selected_standards = []  # List of standards to use
-        self.standards_data = {}  # Dict of {standard_name: {spectrum, concentrations, loaded}}
+        # {name: {concentrations, spectra: [{path, name, spectrum}], loaded}}
+        self.standards_data = {}
+        self._spot_plot_curves = []
         
         self._init_ui()
         
@@ -152,15 +149,10 @@ class StandardsPanel(QWidget):
         fwhm_group = self._create_fwhm_status_group()
         layout.addWidget(fwhm_group)
         
-        # Standards library group
-        library_group = self._create_standards_library_group()
-        layout.addWidget(library_group)
+        # Standards list (add / reload / remove)
+        standards_group = self._create_standards_group()
+        layout.addWidget(standards_group, stretch=1)
         
-        # Selected standards group
-        selected_group = self._create_selected_standards_group()
-        layout.addWidget(selected_group)
-        
-        layout.addStretch()
         return widget
     
     def _create_calibration_tab(self):
@@ -212,73 +204,71 @@ class StandardsPanel(QWidget):
         
         return group
     
-    def _create_standards_library_group(self):
-        """Create standards library selection"""
-        group = QGroupBox("Standards Library")
+    def _create_standards_group(self):
+        """Create standards list; each standard can hold multiple spot spectra"""
+        group = QGroupBox("Standards")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(5, 8, 5, 5)
         layout.setSpacing(3)
         
-        # Info
         info = QLabel(
-            "<b>Select reference standards for calibration</b><br>"
-            "Choose one or more standards with known concentrations"
+            "Add a standard once (certified concentrations), then load one or "
+            "more spot spectra to check variance. Multi-select files when prompted."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
         
-        # Standards list (scrollable)
-        self.standards_list = QListWidget()
-        self.standards_list.setMinimumHeight(120)
-        self.standards_list.setMaximumHeight(200)
-        self.standards_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.standards_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        for name, info in STANDARDS_LIBRARY.items():
-            item = QListWidgetItem(f"{name} - {info['description']}")
-            item.setData(Qt.UserRole, name)
-            self.standards_list.addItem(item)
-        layout.addWidget(self.standards_list)
+        self.selected_table = QTableWidget()
+        self.selected_table.setColumnCount(3)
+        self.selected_table.setHorizontalHeaderLabels(["Standard", "Spots", "Elements"])
+        header = self.selected_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.selected_table.setMinimumHeight(100)
+        self.selected_table.setMaximumHeight(160)
+        self.selected_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.selected_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.selected_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.selected_table.itemSelectionChanged.connect(self._on_standard_selection_changed)
+        layout.addWidget(self.selected_table)
         
-        # Buttons
+        spots_label = QLabel("Spot spectra for selected standard:")
+        layout.addWidget(spots_label)
+        
+        self.spots_list = QListWidget()
+        self.spots_list.setMinimumHeight(80)
+        self.spots_list.setToolTip("Individual measurement spots on the selected standard")
+        layout.addWidget(self.spots_list, stretch=1)
+        
         btn_layout = QHBoxLayout()
         
         add_btn = QPushButton("Add Standard")
+        add_btn.setToolTip(
+            "Create a new standard: name, spot spectrum file(s), then concentrations"
+        )
         add_btn.clicked.connect(self._add_standard)
         btn_layout.addWidget(add_btn)
         
-        load_custom_btn = QPushButton("Load Custom...")
-        load_custom_btn.clicked.connect(self._load_custom_standard)
-        btn_layout.addWidget(load_custom_btn)
+        add_spectra_btn = QPushButton("Add Spectra…")
+        add_spectra_btn.setToolTip(
+            "Add more spot spectra to the selected standard (same concentrations)"
+        )
+        add_spectra_btn.clicked.connect(self._add_spectra_to_selected)
+        btn_layout.addWidget(add_spectra_btn)
+        
+        remove_spot_btn = QPushButton("Remove Spot")
+        remove_spot_btn.setToolTip("Remove the selected spot spectrum")
+        remove_spot_btn.clicked.connect(self._remove_selected_spot)
+        btn_layout.addWidget(remove_spot_btn)
+        
+        remove_btn = QPushButton("Remove Standard")
+        remove_btn.setToolTip("Remove the selected standard and all its spectra")
+        remove_btn.clicked.connect(self._remove_selected_standard)
+        btn_layout.addWidget(remove_btn)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
-        
-        return group
-    
-    def _create_selected_standards_group(self):
-        """Create selected standards display"""
-        group = QGroupBox("Selected Standards")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
-        # Table of selected standards (scrollable)
-        self.selected_table = QTableWidget()
-        self.selected_table.setColumnCount(3)
-        self.selected_table.setHorizontalHeaderLabels(["Standard", "Status", "Actions"])
-        self.selected_table.horizontalHeader().setStretchLastSection(True)
-        self.selected_table.setMinimumHeight(100)
-        self.selected_table.setMaximumHeight(200)
-        self.selected_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.selected_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        layout.addWidget(self.selected_table)
-        
-        # Info
-        info = QLabel(
-            "<small>Load spectrum and concentration data for each standard before calibration</small>"
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
         
         return group
     
@@ -517,45 +507,43 @@ class StandardsPanel(QWidget):
             )
             self.fwhm_status_label.setStyleSheet("color: #cc6600;")
     
-    def _add_standard(self):
-        """Add selected standard to calibration list"""
-        current_item = self.standards_list.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "No Selection", "Please select a standard from the library.")
-            return
-        
-        standard_name = current_item.data(Qt.UserRole)
-        
-        # Check if already added
-        if standard_name in self.standards_data:
-            QMessageBox.information(self, "Already Added", f"{standard_name} is already in the list.")
-            return
-        
-        # Add to table
-        row = self.selected_table.rowCount()
-        self.selected_table.insertRow(row)
-        
-        self.selected_table.setItem(row, 0, QTableWidgetItem(standard_name))
-        self.selected_table.setItem(row, 1, QTableWidgetItem("Not loaded"))
-        
-        # Add load button
-        load_btn = QPushButton("Load Data")
-        load_btn.clicked.connect(lambda: self._load_standard_data(standard_name, row))
-        self.selected_table.setCellWidget(row, 2, load_btn)
-        
-        # Initialize data storage
-        self.standards_data[standard_name] = {"loaded": False}
+    def _spectrum_file_filter(self):
+        return (
+            "All Supported (*.txt *.csv *.mca);;"
+            "Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
+        )
     
-    def _load_custom_standard(self):
-        """Load custom standard and add to library"""
+    def _pick_spectrum_files(self, title):
+        """Multi-select spectrum files; returns list of paths"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, title, "", self._spectrum_file_filter()
+        )
+        return paths or []
+    
+    def _load_spectra_from_paths(self, paths):
+        """Load spectrum objects from file paths. Returns (entries, errors)."""
+        entries = []
+        errors = []
+        for path in paths:
+            try:
+                spectrum = self.io_handler.load_spectrum(path)
+                entries.append({
+                    'path': path,
+                    'name': Path(path).name,
+                    'spectrum': spectrum,
+                })
+            except Exception as e:
+                errors.append(f"{Path(path).name}: {e}")
+        return entries, errors
+    
+    def _add_standard(self):
+        """Add a new standard: name → one or more spot spectra → concentrations"""
         from PySide6.QtWidgets import QInputDialog
         
-        # Ask for standard name
         standard_name, ok = QInputDialog.getText(
             self,
-            "New Standard Name",
-            "Enter a name for your new standard:\n"
-            "(This will be added to the standards library)",
+            "Add Standard",
+            "Name for this standard\n(e.g. NIST 2586):",
             text="My Standard"
         )
         
@@ -564,150 +552,327 @@ class StandardsPanel(QWidget):
         
         standard_name = standard_name.strip()
         
-        # Check if already exists in library
-        if standard_name in STANDARDS_LIBRARY:
+        if standard_name in self.standards_data:
             reply = QMessageBox.question(
                 self,
                 "Standard Exists",
-                f"A standard named '{standard_name}' already exists in the library.\n\n"
-                "Do you want to replace it?",
+                f"'{standard_name}' is already in the list.\n\n"
+                "Add more spot spectra to it?\n"
+                "(Concentrations stay the same.)",
                 QMessageBox.Yes | QMessageBox.No
             )
-            if reply == QMessageBox.No:
-                return
-        
-        # Load the data first
-        spectrum_path, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Select XRF SPECTRUM File for {standard_name}",
-            "",
-            "All Supported (*.txt *.csv *.mca);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
-        )
-        
-        if not spectrum_path:
+            if reply == QMessageBox.Yes:
+                self._add_spectra_to_standard(standard_name)
             return
         
-        try:
-            spectrum = self.io_handler.load_spectrum(spectrum_path)
-        except Exception as e:
+        paths = self._pick_spectrum_files(
+            f"Select Spot Spectrum File(s) for {standard_name}\n"
+            "(select multiple files for replicate spots)"
+        )
+        if not paths:
+            return
+        
+        entries, errors = self._load_spectra_from_paths(paths)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Some Files Failed",
+                "Could not load:\n" + "\n".join(errors)
+            )
+        if not entries:
             QMessageBox.critical(
                 self,
-                "Error Loading Spectrum",
-                f"Failed to load XRF spectrum file:\n{str(e)}\n\n"
-                f"⚠️ Make sure you selected the SPECTRUM file (XRF data with energy/counts),\n"
-                f"NOT the concentration CSV file.\n\n"
-                f"You'll be asked for the concentration file in the next step."
+                "Error Loading Spectra",
+                "No spectrum files could be loaded.\n\n"
+                "Select measured XRF spectra (energy/counts), "
+                "not the concentration CSV."
             )
             return
         
-        # Load or enter concentrations
         concentrations = self._load_or_enter_concentrations(standard_name)
-        
         if not concentrations:
             return
         
-        # Add to library
-        STANDARDS_LIBRARY[standard_name] = {
-            "description": "User-defined standard",
-            "matrix": "custom",
-            "use_case": "Custom calibration"
-        }
-        
-        # Add to library list widget
-        item = QListWidgetItem(f"{standard_name} - User-defined standard")
-        item.setData(Qt.UserRole, standard_name)
-        self.standards_list.addItem(item)
-        
-        # Store the data
         self.standards_data[standard_name] = {
-            'spectrum': spectrum,
             'concentrations': concentrations,
-            'loaded': True
+            'spectra': entries,
+            'loaded': True,
         }
         
-        # Add to selected standards table
-        row = self.selected_table.rowCount()
-        self.selected_table.insertRow(row)
-        
-        # Standard name
-        name_item = QTableWidgetItem(standard_name)
-        self.selected_table.setItem(row, 0, name_item)
-        
-        # Status
-        status_item = QTableWidgetItem("✓ Loaded")
-        status_item.setForeground(Qt.green)
-        self.selected_table.setItem(row, 1, status_item)
-        
-        # Add load button
-        load_btn = QPushButton("Load Data")
-        load_btn.clicked.connect(lambda: self._load_standard_data(standard_name, row))
-        self.selected_table.setCellWidget(row, 2, load_btn)
-        
-        # Enable calibration if we have standards
+        self._upsert_standard_row(standard_name)
+        self._select_standard_row(standard_name)
         self._check_ready_for_calibration()
         
         QMessageBox.information(
             self,
-            "Standard Added to Library",
-            f"Successfully added '{standard_name}' to the standards library!\n\n"
-            f"Spectrum: {Path(spectrum_path).name}\n"
+            "Standard Added",
+            f"Added '{standard_name}'.\n\n"
+            f"Spot spectra: {len(entries)}\n"
             f"Elements: {len(concentrations)}\n"
             f"Total concentration: {sum(concentrations.values()):.2f} wt%\n\n"
-            f"This standard is now available in the library for future use."
+            "Use Add Spectra… to load more spots on this standard."
         )
     
-    def _load_standard_data(self, standard_name, row):
-        """Load spectrum and concentration data for a standard"""
-        # Step 1: Load spectrum file
-        spectrum_path, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Select Spectrum File for {standard_name}",
-            "",
-            "All Supported (*.txt *.csv *.mca);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
-        )
-        
-        if not spectrum_path:
+    def _add_spectra_to_selected(self):
+        """Add more spot spectra to the currently selected standard"""
+        name = self._selected_standard_name()
+        if not name:
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Select a standard in the list, then click Add Spectra…"
+            )
+            return
+        self._add_spectra_to_standard(name)
+    
+    def _add_spectra_to_standard(self, standard_name):
+        """Append spot spectra to an existing standard"""
+        if standard_name not in self.standards_data:
             return
         
-        try:
-            spectrum = self.io_handler.load_spectrum(spectrum_path)
-        except Exception as e:
-            QMessageBox.critical(
+        paths = self._pick_spectrum_files(
+            f"Add Spot Spectra to {standard_name}"
+        )
+        if not paths:
+            return
+        
+        # Skip duplicates by path
+        existing = {
+            entry['path'] for entry in self.standards_data[standard_name]['spectra']
+        }
+        new_paths = [p for p in paths if p not in existing]
+        if not new_paths:
+            QMessageBox.information(
                 self,
-                "Error Loading Spectrum",
-                f"Failed to load spectrum:\n{str(e)}"
+                "Already Loaded",
+                "All selected files are already loaded for this standard."
             )
             return
         
-        # Step 2: Load or enter concentrations
-        concentrations = self._load_or_enter_concentrations(standard_name)
-        
-        if not concentrations:
+        entries, errors = self._load_spectra_from_paths(new_paths)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Some Files Failed",
+                "Could not load:\n" + "\n".join(errors)
+            )
+        if not entries:
             return
         
-        # Store the data
-        self.standards_data[standard_name] = {
-            'spectrum': spectrum,
-            'concentrations': concentrations,
-            'loaded': True
-        }
+        self.standards_data[standard_name]['spectra'].extend(entries)
+        self.standards_data[standard_name]['loaded'] = True
         
-        # Update table status
-        status_item = QTableWidgetItem("✓ Loaded")
-        status_item.setForeground(Qt.green)
-        self.selected_table.setItem(row, 1, status_item)
-        
-        # Enable calibration if we have standards
+        self._upsert_standard_row(standard_name)
+        self._refresh_spots_list(standard_name)
+        self._plot_standard_spots(standard_name)
         self._check_ready_for_calibration()
         
+        n = len(self.standards_data[standard_name]['spectra'])
         QMessageBox.information(
             self,
-            "Standard Loaded",
-            f"Successfully loaded {standard_name}:\n\n"
-            f"Spectrum: {Path(spectrum_path).name}\n"
-            f"Elements: {len(concentrations)}\n"
-            f"Total concentration: {sum(concentrations.values()):.2f} wt%"
+            "Spectra Added",
+            f"Added {len(entries)} spot(s) to '{standard_name}'.\n"
+            f"Total spots: {n}"
         )
+    
+    def _upsert_standard_row(self, standard_name):
+        """Insert or update a row for this standard in the table"""
+        data = self.standards_data.get(standard_name)
+        if not data:
+            return
+        
+        row = self._find_standard_row(standard_name)
+        if row is None:
+            row = self.selected_table.rowCount()
+            self.selected_table.insertRow(row)
+            self.selected_table.setItem(row, 0, QTableWidgetItem(standard_name))
+        
+        n_spots = len(data.get('spectra', []))
+        spots_item = QTableWidgetItem(str(n_spots))
+        spots_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if n_spots > 0:
+            spots_item.setForeground(Qt.green)
+        self.selected_table.setItem(row, 1, spots_item)
+        
+        n_elem = len(data.get('concentrations', {}))
+        elem_item = QTableWidgetItem(str(n_elem))
+        elem_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.selected_table.setItem(row, 2, elem_item)
+    
+    def _find_standard_row(self, standard_name):
+        """Return table row index for a standard name, or None"""
+        for row in range(self.selected_table.rowCount()):
+            item = self.selected_table.item(row, 0)
+            if item and item.text() == standard_name:
+                return row
+        return None
+    
+    def _select_standard_row(self, standard_name):
+        """Select a standard row and refresh its spot list"""
+        row = self._find_standard_row(standard_name)
+        if row is not None:
+            self.selected_table.selectRow(row)
+    
+    def _selected_standard_name(self):
+        """Return name of currently selected standard, or None"""
+        rows = {index.row() for index in self.selected_table.selectedIndexes()}
+        if len(rows) != 1:
+            return None
+        item = self.selected_table.item(next(iter(rows)), 0)
+        return item.text() if item else None
+    
+    def _on_standard_selection_changed(self):
+        """Refresh spot list and plot when a standard is selected"""
+        name = self._selected_standard_name()
+        self._refresh_spots_list(name)
+        if name:
+            self._plot_standard_spots(name)
+    
+    def _refresh_spots_list(self, standard_name):
+        """Populate the spot spectra list for a standard"""
+        self.spots_list.clear()
+        if not standard_name or standard_name not in self.standards_data:
+            return
+        
+        for i, entry in enumerate(self.standards_data[standard_name]['spectra'], start=1):
+            item = QListWidgetItem(f"Spot {i}: {entry['name']}")
+            item.setData(Qt.UserRole, entry['path'])
+            item.setToolTip(entry['path'])
+            self.spots_list.addItem(item)
+    
+    def _remove_selected_spot(self):
+        """Remove the selected spot spectrum from the current standard"""
+        standard_name = self._selected_standard_name()
+        if not standard_name:
+            QMessageBox.information(
+                self, "No Selection", "Select a standard first."
+            )
+            return
+        
+        spot_item = self.spots_list.currentItem()
+        if not spot_item:
+            QMessageBox.information(
+                self, "No Spot Selected", "Select a spot spectrum to remove."
+            )
+            return
+        
+        path = spot_item.data(Qt.UserRole)
+        spectra = self.standards_data[standard_name]['spectra']
+        self.standards_data[standard_name]['spectra'] = [
+            e for e in spectra if e['path'] != path
+        ]
+        
+        if not self.standards_data[standard_name]['spectra']:
+            self.standards_data[standard_name]['loaded'] = False
+        
+        self._upsert_standard_row(standard_name)
+        self._refresh_spots_list(standard_name)
+        self._plot_standard_spots(standard_name)
+        self._check_ready_for_calibration()
+    
+    def _remove_selected_standard(self):
+        """Remove the currently selected standard and all its spectra"""
+        name = self._selected_standard_name()
+        if not name:
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Select a standard in the list, then click Remove Standard."
+            )
+            return
+        
+        row = self._find_standard_row(name)
+        self.standards_data.pop(name, None)
+        if row is not None:
+            self.selected_table.removeRow(row)
+        
+        self.spots_list.clear()
+        self._clear_spot_plot()
+        self._check_ready_for_calibration()
+    
+    def _clear_spot_plot(self):
+        """Clear overlay curves for spot spectra"""
+        for curve in self._spot_plot_curves:
+            try:
+                self.spectrum_plot.removeItem(curve)
+            except Exception:
+                pass
+        self._spot_plot_curves.clear()
+        self.measured_curve.setData([], [])
+        self.calculated_curve.setData([], [])
+        self.background_curve.setData([], [])
+        self.residual_curve.setData([], [])
+    
+    def _plot_standard_spots(self, standard_name):
+        """Overlay spot spectra and show mean for variance check"""
+        self._clear_spot_plot()
+        
+        data = self.standards_data.get(standard_name)
+        if not data or not data.get('spectra'):
+            self.spectrum_plot.setTitle('Intensity Calibration Fit', color='k')
+            return
+        
+        entries = data['spectra']
+        n = len(entries)
+        self.spectrum_plot.setTitle(
+            f'{standard_name}: {n} spot{"s" if n != 1 else ""}',
+            color='k'
+        )
+        
+        # Light overlays for each spot
+        for i, entry in enumerate(entries):
+            spec = entry['spectrum']
+            color = pg.intColor(i, hues=max(n, 1), values=1, maxValue=200)
+            curve = self.spectrum_plot.plot(
+                spec.energy,
+                spec.counts,
+                pen=pg.mkPen(color, width=1),
+                name=f"Spot {i + 1}" if n <= 8 else None,
+            )
+            self._spot_plot_curves.append(curve)
+        
+        # Mean spectrum (bold)
+        mean_spec = self._mean_spectrum(entries)
+        if mean_spec is not None:
+            self.measured_curve.setData(mean_spec.energy, mean_spec.counts)
+            self.measured_curve.opts['name'] = 'Mean'
+    
+    def _mean_spectrum(self, entries):
+        """Average counts across spot spectra (requires matching energy grids)"""
+        if not entries:
+            return None
+        
+        from core.spectrum import Spectrum
+        
+        ref = entries[0]['spectrum']
+        counts_stack = []
+        for entry in entries:
+            spec = entry['spectrum']
+            if len(spec.energy) != len(ref.energy) or not np.allclose(
+                spec.energy, ref.energy, rtol=0, atol=1e-6
+            ):
+                # Different grids — skip averaging; caller still has overlays
+                return None
+            counts_stack.append(spec.counts)
+        
+        mean_counts = np.mean(np.vstack(counts_stack), axis=0)
+        return Spectrum(
+            energy=ref.energy.copy(),
+            counts=mean_counts,
+            live_time=float(np.mean([e['spectrum'].live_time for e in entries])),
+            real_time=float(np.mean([e['spectrum'].real_time for e in entries])),
+            metadata={'averaged_from': len(entries)},
+        )
+    
+    def get_standard_mean_spectrum(self, standard_name):
+        """Return mean spectrum for a standard, or first spot if grids differ"""
+        data = self.standards_data.get(standard_name)
+        if not data or not data.get('spectra'):
+            return None
+        mean = self._mean_spectrum(data['spectra'])
+        if mean is not None:
+            return mean
+        return data['spectra'][0]['spectrum']
     
     def _load_or_enter_concentrations(self, standard_name):
         """Load concentrations from CSV or enter manually"""
@@ -864,7 +1029,8 @@ class StandardsPanel(QWidget):
     def _check_ready_for_calibration(self):
         """Check if ready to run calibration"""
         has_loaded_standards = any(
-            data.get("loaded", False) for data in self.standards_data.values()
+            data.get("loaded", False) and data.get("spectra")
+            for data in self.standards_data.values()
         )
         has_fwhm = self.calibrator.fwhm_calibration is not None
         
@@ -938,15 +1104,18 @@ class StandardsPanel(QWidget):
     def _run_calibration(self):
         """Run intensity calibration using multiple standards"""
         # Check if we have loaded standards
-        loaded_standards = [name for name, data in self.standards_data.items() 
-                          if data.get('loaded', False)]
+        loaded_standards = [
+            name for name, data in self.standards_data.items()
+            if data.get('loaded', False) and data.get('spectra')
+        ]
         
         if not loaded_standards:
             QMessageBox.warning(
                 self,
                 "No Standards Loaded",
-                "Please load at least one standard before running calibration.\n\n"
-                "Click 'Load Data' for each standard you want to use."
+                "Please add at least one standard with spot spectra before "
+                "running calibration.\n\n"
+                "Click Add Standard, then Add Spectra… for more spots."
             )
             return
         
@@ -965,20 +1134,24 @@ class StandardsPanel(QWidget):
         # Show progress
         self.terminal_output.append(f"\n{'='*50}")
         self.terminal_output.append(f"Starting calibration with {len(loaded_standards)} standard(s):")
+        summary_lines = []
         for name in loaded_standards:
             n_elements = len(self.standards_data[name]['concentrations'])
-            self.terminal_output.append(f"  • {name}: {n_elements} elements")
+            n_spots = len(self.standards_data[name].get('spectra', []))
+            line = f"  • {name}: {n_spots} spot(s), {n_elements} elements"
+            self.terminal_output.append(line)
+            summary_lines.append(f"• {name}: {n_spots} spot(s), {n_elements} elements")
         self.terminal_output.append(f"{'='*50}\n")
         
         # For now, show a detailed message about what will be implemented
         QMessageBox.information(
             self,
             "Multi-Standard Calibration",
-            f"Calibration will be performed using {len(loaded_standards)} standard(s):\n\n"
-            + "\n".join([f"• {name}" for name in loaded_standards]) + "\n\n"
+            f"Calibration will use {len(loaded_standards)} standard(s):\n\n"
+            + "\n".join(summary_lines) + "\n\n"
             "The calibration will:\n"
-            "1. Fit each standard spectrum with fixed FWHM\n"
-            "2. Extract peak intensities for all elements\n"
+            "1. Fit each spot spectrum with fixed FWHM\n"
+            "2. Extract peak intensities and spot-to-spot variance\n"
             "3. Optimize intensity scaling factors\n"
             "4. Calculate detector efficiency curve\n"
             "5. Determine scatter peak parameters\n\n"

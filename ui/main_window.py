@@ -5,7 +5,7 @@ Main window for XRF Fundamental Parameters Analysis Application
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
-    QTabWidget
+    QTabWidget, QPushButton
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
@@ -17,6 +17,7 @@ from ui.batch_analysis_panel import BatchAnalysisPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from utils.io_handler import IOHandler
+from utils.updater import check_for_updates
 from core.fitting import SpectrumFitter
 
 
@@ -36,12 +37,12 @@ class MainWindow(QMainWindow):
         self.fit_result = None
         self.settings = QSettings()
         
-        # Setup UI
+        # Setup UI (status bar before central widget — FWHM auto-load may message it)
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
-        self._create_central_widget()
         self._create_status_bar()
+        self._create_central_widget()
         self._load_stylesheet()
         
         # Restore window state
@@ -54,6 +55,10 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_action.setStatusTip("Open an XRF spectrum file")
         self.open_action.triggered.connect(self.open_spectrum)
+        
+        self.open_project_action = QAction("Open &Project...", self)
+        self.open_project_action.setStatusTip("Open an XRF project file")
+        self.open_project_action.triggered.connect(self.open_project)
         
         self.save_project_action = QAction("&Save Project...", self)
         self.save_project_action.setShortcut(QKeySequence.Save)
@@ -87,7 +92,7 @@ class MainWindow(QMainWindow):
         # View actions
         self.toggle_log_action = QAction("&Logarithmic Y-axis", self)
         self.toggle_log_action.setCheckable(True)
-        self.toggle_log_action.setChecked(True)
+        self.toggle_log_action.setChecked(False)
         self.toggle_log_action.setStatusTip("Toggle logarithmic Y-axis")
         self.toggle_log_action.triggered.connect(self.toggle_log_scale)
         
@@ -112,6 +117,12 @@ class MainWindow(QMainWindow):
         self.element_db_action.triggered.connect(self.show_element_database)
         
         # Help actions
+        self.check_updates_action = QAction("Check for &Updates...", self)
+        self.check_updates_action.setStatusTip(
+            "Pull the latest changes from the XRFLab repository"
+        )
+        self.check_updates_action.triggered.connect(self.check_for_updates)
+        
         self.about_action = QAction("&About", self)
         self.about_action.setStatusTip("About this application")
         self.about_action.triggered.connect(self.show_about)
@@ -123,6 +134,8 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.save_project_action)
         file_menu.addAction(self.export_results_action)
         file_menu.addSeparator()
@@ -149,22 +162,19 @@ class MainWindow(QMainWindow):
         
         # Help menu
         help_menu = menubar.addMenu("&Help")
+        help_menu.addAction(self.check_updates_action)
+        help_menu.addSeparator()
         help_menu.addAction(self.about_action)
     
     def _create_toolbar(self):
-        """Create toolbar with quick-access buttons"""
+        """Create toolbar with project quick-access buttons"""
         toolbar = QToolBar("Main Toolbar")
         toolbar.setObjectName("MainToolbar")  # Set object name to avoid warning
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         
-        toolbar.addAction(self.open_action)
+        toolbar.addAction(self.open_project_action)
         toolbar.addAction(self.save_project_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.fit_spectrum_action)
-        toolbar.addAction(self.quantify_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.toggle_log_action)
     
     def _create_central_widget(self):
         """Create the main layout with tabs for Analysis and Calibration"""
@@ -196,6 +206,11 @@ class MainWindow(QMainWindow):
         self.fwhm_calibration_panel = FWHMCalibrationPanel()
         self.fwhm_calibration_panel.calibration_complete.connect(self.on_fwhm_calibration_applied)
         self.tab_widget.addTab(self.fwhm_calibration_panel, "FWHM Calibration")
+        
+        # Auto-load emits calibration_complete during panel __init__, before this
+        # connect runs — re-apply any calibration already loaded from disk.
+        if self.fwhm_calibration_panel.fwhm_calibration is not None:
+            self.on_fwhm_calibration_applied(self.fwhm_calibration_panel.fwhm_calibration)
         
         layout.addWidget(self.tab_widget)
     
@@ -233,6 +248,7 @@ class MainWindow(QMainWindow):
         
         # Right side - Spectrum display (keep as is)
         self.spectrum_widget = SpectrumWidget()
+        self.spectrum_widget.log_scale_changed.connect(self._on_plot_log_scale_changed)
         main_splitter.addWidget(self.spectrum_widget)
         
         # Set initial sizes for horizontal splitter (50% left, 50% right)
@@ -243,7 +259,11 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
+        self.element_panel.peak_find_requested.connect(self.preview_peak_find)
         self.element_panel.element_clicked.connect(self.on_element_clicked)
+        self.results_panel.element_selected.connect(self.on_result_element_selected)
+        self.results_panel.quantify_requested.connect(self.quantify)
+        self.results_panel.export_button.clicked.connect(self.export_results)
         
         return analysis_widget
     
@@ -252,6 +272,11 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(5, 5, 5, 5)
+        
+        open_spectrum_btn = QPushButton("Open Spectrum...")
+        open_spectrum_btn.setToolTip("Open an XRF spectrum file")
+        open_spectrum_btn.clicked.connect(self.open_spectrum)
+        layout.addWidget(open_spectrum_btn)
         
         # Sample information group
         sample_group = self.element_panel._create_sample_info_group()
@@ -360,6 +385,26 @@ class MainWindow(QMainWindow):
                     f"Failed to load spectrum:\n{str(e)}"
                 )
     
+    def open_project(self):
+        """Open an XRF project file"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            "",
+            "XRF Project (*.xrfp);;All Files (*)"
+        )
+        
+        if file_path:
+            try:
+                # TODO: Implement project loading
+                self.status_bar.showMessage(f"Opened project: {file_path}", 5000)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error Opening Project",
+                    f"Failed to open project:\n{str(e)}"
+                )
+    
     def save_project(self):
         """Save current project"""
         file_path, _ = QFileDialog.getSaveFileName(
@@ -432,16 +477,23 @@ class MainWindow(QMainWindow):
                 elements=elements,
                 background_method=background_method,
                 peak_shape=peak_shape,
-                auto_find_peaks=True,
+                auto_find_peaks=fit_params.get('auto_find_peaks', True),
                 tube_element=fit_params.get('tube_element', 'Rh'),
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
-                experimental_params=exp_params
+                experimental_params=exp_params,
+                prominence_percent=fit_params.get('prominence_percent'),
+                min_height=fit_params.get('min_height'),
+                min_separation_ev=fit_params.get('min_separation_ev'),
             )
             
             # Update spectrum display
             self.spectrum_widget.set_fitted_spectrum(self.fit_result.fitted_spectrum)
             self.spectrum_widget.set_background(self.fit_result.background)
+            self.spectrum_widget.set_peak_markers(
+                self.fit_result.peaks,
+                show=fit_params.get('show_peak_markers', True),
+            )
             
             # Update results panel
             self.results_panel.set_fit_statistics(self.fit_result.statistics)
@@ -468,8 +520,8 @@ class MainWindow(QMainWindow):
             )
             self.status_bar.showMessage("Fitting failed", 5000)
     
-    def quantify(self):
-        """Perform quantitative analysis"""
+    def preview_peak_find(self):
+        """Run peak detection only and mark found peaks on the spectrum"""
         if self.current_spectrum is None:
             QMessageBox.warning(
                 self,
@@ -478,9 +530,129 @@ class MainWindow(QMainWindow):
             )
             return
         
+        fit_params = self.element_panel.get_fitting_params()
+        background_method = fit_params['background_method'].lower()
+        
+        try:
+            background = self.fitter.background_modeler.estimate_background(
+                self.current_spectrum.energy,
+                self.current_spectrum.counts,
+                method=background_method,
+            )
+            counts_bg = self.fitter.background_modeler.subtract_background(
+                self.current_spectrum.counts, background
+            )
+            
+            detected = self.fitter.peak_fitter.find_peaks(
+                self.current_spectrum.energy,
+                counts_bg,
+                prominence_percent=fit_params.get('prominence_percent'),
+                height=fit_params.get('min_height'),
+                min_separation_ev=fit_params.get('min_separation_ev'),
+            )
+            
+            # Show background so detection context is clear
+            self.spectrum_widget.set_background(background)
+            
+            preview_peaks = [
+                {
+                    'energy': energy,
+                    'element': None,
+                    'line': None,
+                    'is_tube_line': False,
+                }
+                for energy, _height in detected
+            ]
+            
+            # Also mark selected-element major lines for comparison
+            elements = self.element_panel.get_selected_elements()
+            from core.xray_data import get_element_lines
+            major_lines = {
+                'K': ['Kα1', 'Kα2', 'Kβ1'],
+                'L': ['Lα1', 'Lα2', 'Lβ1', 'Lβ2'],
+                'M': ['Mα1', 'Mα2'],
+            }
+            energy = self.current_spectrum.energy
+            for elem in elements or []:
+                symbol = elem.get('symbol', '')
+                z = elem.get('z', 0)
+                if not symbol or not z:
+                    continue
+                lines = get_element_lines(symbol, z)
+                for series in ['K', 'L', 'M']:
+                    for line in lines.get(series, []):
+                        if line['name'] not in major_lines.get(series, []):
+                            continue
+                        if energy[0] <= line['energy'] <= energy[-1]:
+                            preview_peaks.append({
+                                'energy': line['energy'],
+                                'element': symbol,
+                                'line': line['name'],
+                                'is_tube_line': False,
+                            })
+            
+            self.spectrum_widget.set_peak_markers(
+                preview_peaks,
+                show=fit_params.get('show_peak_markers', True),
+            )
+            
+            # Update results peak list with detection preview
+            lines = [
+                f"Detected @ {e:.3f} keV (height={h:.0f})"
+                for e, h in detected
+            ]
+            if lines:
+                self.results_panel.peaks_text.setPlainText(
+                    f"Peak find preview ({len(detected)} auto-detected):\n" + "\n".join(lines)
+                )
+            else:
+                self.results_panel.peaks_text.setPlainText(
+                    "Peak find preview: no peaks detected.\n"
+                    "Try lowering Prominence or Min height."
+                )
+            
+            self.status_bar.showMessage(
+                f"Peak find preview: {len(detected)} auto-detected peaks "
+                f"(orange = selected element lines, teal = unknown)",
+                6000
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Peak Find Error",
+                f"An error occurred during peak detection:\n{str(e)}"
+            )
+            self.status_bar.showMessage("Peak find failed", 5000)
+    
+    def quantify(self):
+        """Perform quantitative analysis from the current fit"""
+        if self.fit_result is None or not getattr(self.fit_result, 'peaks', None):
+            QMessageBox.warning(
+                self,
+                "No Fit Results",
+                "Please fit a spectrum first before running quantification."
+            )
+            return
+        
         self.status_bar.showMessage("Performing quantification...", 0)
-        # TODO: Implement quantification
-        self.status_bar.showMessage("Quantification complete", 5000)
+        try:
+            exp_params = self.element_panel.get_experimental_params()
+            concentrations = self.fitter.quantify_elements(
+                self.fit_result.peaks, exp_params
+            )
+            self.results_panel.set_quantification(concentrations)
+            n = len(concentrations)
+            self.status_bar.showMessage(
+                f"Quantification complete: {n} element{'s' if n != 1 else ''}",
+                5000
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Quantification Error",
+                f"An error occurred during quantification:\n{str(e)}"
+            )
+            self.status_bar.showMessage("Quantification failed", 5000)
     
     def configure_background(self):
         """Configure background removal settings"""
@@ -488,8 +660,14 @@ class MainWindow(QMainWindow):
         pass
     
     def toggle_log_scale(self, checked):
-        """Toggle logarithmic Y-axis"""
+        """Toggle logarithmic Y-axis from the View menu"""
         self.spectrum_widget.set_log_scale(checked)
+    
+    def _on_plot_log_scale_changed(self, checked):
+        """Keep View menu Log Y-axis action in sync with plot controls"""
+        self.toggle_log_action.blockSignals(True)
+        self.toggle_log_action.setChecked(checked)
+        self.toggle_log_action.blockSignals(False)
     
     def toggle_grid(self, checked):
         """Toggle grid display"""
@@ -509,6 +687,54 @@ class MainWindow(QMainWindow):
         """Show element database viewer"""
         # TODO: Implement element database viewer
         pass
+    
+    def check_for_updates(self):
+        """Pull latest changes from the git remote and report results"""
+        from PySide6.QtWidgets import QApplication
+        
+        self.status_bar.showMessage("Checking for updates...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            result = check_for_updates()
+        finally:
+            QApplication.restoreOverrideCursor()
+        
+        if not result.success:
+            detail = result.error or ""
+            text = result.message
+            if detail:
+                text = f"{text}\n\nDetails:\n{detail}"
+            QMessageBox.warning(self, "Check for Updates", text)
+            self.status_bar.showMessage("Update check failed", 5000)
+            return
+        
+        if result.updated:
+            details = []
+            if result.commits:
+                details.append("Commits:\n" + "\n".join(f"  • {c}" for c in result.commits[:15]))
+                if len(result.commits) > 15:
+                    details.append(f"  … and {len(result.commits) - 15} more")
+            if result.changed_files:
+                details.append(
+                    "Updated files:\n"
+                    + "\n".join(f"  • {f}" for f in result.changed_files[:20])
+                )
+                if len(result.changed_files) > 20:
+                    details.append(f"  … and {len(result.changed_files) - 20} more")
+            
+            text = result.message
+            if details:
+                text = f"{text}\n\n" + "\n\n".join(details)
+            
+            QMessageBox.information(self, "Updates Installed", text)
+            self.status_bar.showMessage(
+                f"Updated {len(result.changed_files)} file(s) — restart to apply",
+                8000,
+            )
+        else:
+            QMessageBox.information(self, "Check for Updates", result.message)
+            self.status_bar.showMessage("Already up to date", 5000)
     
     def show_about(self):
         """Show about dialog"""
@@ -537,23 +763,39 @@ class MainWindow(QMainWindow):
         
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
     
+    def on_result_element_selected(self, symbol):
+        """Handle element click in Results table — overlay lines on the spectrum"""
+        from core.advanced_peak_fitting import get_element_z
+        
+        z = get_element_z(symbol)
+        if not z:
+            self.status_bar.showMessage(f"Unknown element: {symbol}", 3000)
+            return
+        
+        self.on_element_clicked(symbol, z)
+    
     def on_fwhm_calibration_applied(self, fwhm_calibration):
         """Handle FWHM calibration being applied"""
+        from core.fwhm_calibration import apply_fwhm_calibration_to_peak_fitter
+        
         # Update the Standards panel with the FWHM calibration
         self.standards_panel.update_fwhm_status(fwhm_calibration)
+        
+        # Apply to Analysis / Batch peak fitting (class-level PeakFitter)
+        apply_fwhm_calibration_to_peak_fitter(fwhm_calibration, self.fitter.peak_fitter)
         
         # Show status message
         if fwhm_calibration.model_type == 'detector':
             fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
             epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
             self.status_bar.showMessage(
-                f"FWHM calibration applied to Standards: FWHM₀={fwhm_0_ev:.1f} eV, "
+                f"FWHM calibration applied to fitting: FWHM₀={fwhm_0_ev:.1f} eV, "
                 f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f})",
                 5000
             )
         else:
             self.status_bar.showMessage(
-                f"FWHM calibration applied to Standards: {fwhm_calibration.model_type} model "
+                f"FWHM calibration applied to fitting: {fwhm_calibration.model_type} model "
                 f"(R²={fwhm_calibration.r_squared:.4f})",
                 5000
             )

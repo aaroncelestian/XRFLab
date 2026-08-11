@@ -37,17 +37,42 @@ class PeakFitter:
     """Peak fitting for XRF spectra"""
     
     # Detector parameters for energy-dependent FWHM
-    # FWHM(E) = sqrt(FWHM_0^2 + 2.35 * epsilon * E)
-    # These can be calibrated using InstrumentCalibrator
+    # FWHM(E) = sqrt(FWHM_0^2 + 2.355^2 * epsilon * E)  (standard detector model)
+    # Prefer FWHMCalibration via set_fwhm_calibration() when available.
     FWHM_0 = 0.050  # keV at 0 keV (noise contribution)
     EPSILON = 0.0015  # Fano factor * w (eV per e-h pair)
     VOIGT_GAMMA_RATIO = 0.15  # gamma/sigma ratio for Voigt peaks
     USE_CALIBRATED_SHAPES = False  # If True, fix peak shapes during fitting
+    _fwhm_calibration = None  # Optional FWHMCalibration shared by all fits
+    
+    @classmethod
+    def set_fwhm_calibration(cls, calibration):
+        """
+        Apply a detector FWHM calibration for all subsequent peak fits.
+        
+        Uses the calibrated model for width predictions and, when present,
+        fixes peak shapes to those widths during fitting.
+        """
+        cls._fwhm_calibration = calibration
+        if calibration is None:
+            cls.USE_CALIBRATED_SHAPES = False
+            return
+        
+        if getattr(calibration, 'model_type', None) == 'detector':
+            params = getattr(calibration, 'parameters', {}) or {}
+            if 'fwhm_0' in params:
+                cls.FWHM_0 = float(params['fwhm_0'])
+            if 'epsilon' in params:
+                cls.EPSILON = float(params['epsilon'])
+        
+        cls.USE_CALIBRATED_SHAPES = True
     
     @staticmethod
     def calculate_fwhm(energy):
         """Calculate energy-dependent FWHM for detector"""
-        return np.sqrt(PeakFitter.FWHM_0**2 + 2.35 * PeakFitter.EPSILON * energy)
+        if PeakFitter._fwhm_calibration is not None:
+            return PeakFitter._fwhm_calibration.predict_fwhm(energy)
+        return np.sqrt(PeakFitter.FWHM_0**2 + (2.355 ** 2) * PeakFitter.EPSILON * energy)
     
     @staticmethod
     def gaussian(x, amplitude, center, sigma):
@@ -121,27 +146,43 @@ class PeakFitter:
         return main_peak + tail_peak
     
     @staticmethod
-    def find_peaks(energy, counts, prominence=None, distance=None, height=None):
+    def find_peaks(energy, counts, prominence=None, distance=None, height=None,
+                   prominence_percent=None, min_separation_ev=None):
         """
         Find peaks in spectrum using scipy peak detection
         
         Args:
             energy: Energy array
             counts: Counts array (background-subtracted recommended)
-            prominence: Minimum peak prominence
+            prominence: Absolute minimum peak prominence (counts)
             distance: Minimum distance between peaks (in indices)
             height: Minimum peak height
+            prominence_percent: If set, prominence = percent/100 * max(counts)
+            min_separation_ev: If set, convert to channel distance using energy spacing
             
         Returns:
             List of (energy, height) tuples for detected peaks
         """
+        counts = np.asarray(counts, dtype=float)
+        energy = np.asarray(energy, dtype=float)
+        
         if prominence is None:
-            # Auto-calculate prominence as 5% of max
-            prominence = np.max(counts) * 0.05
+            if prominence_percent is not None:
+                prominence = np.max(counts) * (float(prominence_percent) / 100.0)
+            else:
+                # Auto-calculate prominence as 2% of max (more sensitive default)
+                prominence = np.max(counts) * 0.02
         
         if distance is None:
-            # Default: at least 10 channels apart
-            distance = 10
+            if min_separation_ev is not None and len(energy) > 1:
+                de_kev = float(np.median(np.diff(energy)))
+                if de_kev > 0:
+                    distance = max(1, int(round((float(min_separation_ev) / 1000.0) / de_kev)))
+                else:
+                    distance = 10
+            else:
+                # Default: at least 10 channels apart
+                distance = 10
         
         # Find peaks
         peak_indices, properties = signal.find_peaks(
@@ -206,18 +247,33 @@ class PeakFitter:
             shape_params = {}
             
             if shape == 'gaussian':
-                p0 = [amplitude_guess, center_guess, sigma_guess]
-                if bounds is None:
-                    # Allow FWHM to refine freely within reasonable physical limits
-                    # Use energy-dependent guess but don't constrain too tightly
-                    bounds = ([0, center_guess - 0.2, sigma_guess * 0.3],
-                             [np.inf, center_guess + 0.2, sigma_guess * 3.0])
-                
-                popt, _ = optimize.curve_fit(
-                    PeakFitter.gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
-                    maxfev=5000
-                )
-                amplitude, center, sigma = popt
+                if PeakFitter.USE_CALIBRATED_SHAPES:
+                    sigma_fixed = sigma_guess
+                    
+                    def gaussian_fixed_shape(x, amplitude, center):
+                        return PeakFitter.gaussian(x, amplitude, center, sigma_fixed)
+                    
+                    p0 = [amplitude_guess, center_guess]
+                    bounds = ([0, center_guess - 0.2], [np.inf, center_guess + 0.2])
+                    
+                    popt, _ = optimize.curve_fit(
+                        gaussian_fixed_shape, x_fit, y_fit, p0=p0, bounds=bounds,
+                        maxfev=5000
+                    )
+                    amplitude, center = popt
+                    sigma = sigma_fixed
+                else:
+                    p0 = [amplitude_guess, center_guess, sigma_guess]
+                    if bounds is None:
+                        # Allow FWHM to refine within reasonable physical limits
+                        bounds = ([0, center_guess - 0.2, sigma_guess * 0.5],
+                                 [np.inf, center_guess + 0.2, sigma_guess * 2.0])
+                    
+                    popt, _ = optimize.curve_fit(
+                        PeakFitter.gaussian, x_fit, y_fit, p0=p0, bounds=bounds,
+                        maxfev=5000
+                    )
+                    amplitude, center, sigma = popt
                 fwhm = 2.355 * sigma  # FWHM = 2.355 * sigma for Gaussian
                 area = amplitude * sigma * np.sqrt(2 * np.pi)
                 shape_params = {'sigma': sigma}
@@ -248,8 +304,8 @@ class PeakFitter:
                     # Fit all parameters including shape
                     p0 = [amplitude_guess, center_guess, sigma_guess, gamma_guess]
                     if bounds is None:
-                        bounds = ([0, center_guess - 0.2, sigma_guess * 0.3, 0.001],
-                                 [np.inf, center_guess + 0.2, sigma_guess * 3.0, sigma_guess * 2.0])
+                        bounds = ([0, center_guess - 0.2, sigma_guess * 0.5, 0.001],
+                                 [np.inf, center_guess + 0.2, sigma_guess * 2.0, sigma_guess * 2.0])
                     
                     popt, _ = optimize.curve_fit(
                         PeakFitter.voigt, x_fit, y_fit, p0=p0, bounds=bounds,
@@ -257,7 +313,10 @@ class PeakFitter:
                     )
                     amplitude, center, sigma, gamma = popt
                 
-                fwhm = 2 * sigma  # Approximate
+                # Approximate Voigt FWHM from Gaussian/Lorentzian components
+                fwhm_g = 2.355 * sigma
+                fwhm_l = 2.0 * gamma
+                fwhm = 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
                 area = amplitude * sigma * np.sqrt(2 * np.pi)
                 shape_params = {'sigma': sigma, 'gamma': gamma}
             

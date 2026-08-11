@@ -559,6 +559,7 @@ class CalibrationPanel(QWidget):
         
         # Update PeakFitter class variables
         from core.peak_fitting import PeakFitter
+        PeakFitter._fwhm_calibration = None  # Prefer these instrument params over FWHM file
         PeakFitter.FWHM_0 = self.calibration_result.fwhm_0
         PeakFitter.EPSILON = self.calibration_result.epsilon
         PeakFitter.VOIGT_GAMMA_RATIO = self.calibration_result.voigt_gamma_ratio
@@ -610,6 +611,7 @@ class CalibrationPanel(QWidget):
                 # Auto-apply loaded calibration
                 if self.calibration_result.success:
                     from core.peak_fitting import PeakFitter
+                    PeakFitter._fwhm_calibration = None
                     PeakFitter.FWHM_0 = self.calibration_result.fwhm_0
                     PeakFitter.EPSILON = self.calibration_result.epsilon
                     PeakFitter.VOIGT_GAMMA_RATIO = self.calibration_result.voigt_gamma_ratio

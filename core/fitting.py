@@ -134,15 +134,23 @@ class SpectrumFitter:
             auto_peaks = self.peak_fitter.find_peaks(
                 energy, counts_bg_subtracted,
                 prominence=kwargs.get('prominence', None),
-                distance=kwargs.get('distance', None)
+                distance=kwargs.get('distance', None),
+                height=kwargs.get('min_height', kwargs.get('height', None)),
+                prominence_percent=kwargs.get('prominence_percent', None),
+                min_separation_ev=kwargs.get('min_separation_ev', None),
             )
+            
+            # Match tolerance: use separation setting when provided, else 0.1 keV
+            match_tol = 0.1
+            if kwargs.get('min_separation_ev') is not None:
+                match_tol = max(0.05, float(kwargs['min_separation_ev']) / 1000.0)
             
             # Add auto-detected peaks that aren't near element lines
             for peak_energy, peak_height in auto_peaks:
                 # Check if this peak is near any element line
                 near_element_line = False
                 for pos in peak_positions:
-                    if abs(peak_energy - pos['energy']) < 0.1:  # Within 0.1 keV
+                    if abs(peak_energy - pos['energy']) < match_tol:
                         near_element_line = True
                         break
                 
@@ -152,14 +160,25 @@ class SpectrumFitter:
                         'element': None,
                         'line': None
                     })
+            
+            print(f"Auto-detected {len(auto_peaks)} peaks "
+                  f"({sum(1 for p in peak_positions if p.get('element') is None)} unknown added)")
         
-        # Step 4: Fit peaks
+        # Step 4: Fit peaks (strongest first; subtract each so overlaps don't stack)
         print(f"Fitting {len(peak_positions)} peaks using {peak_shape} shape...")
         fitted_peaks = []
+        residual_counts = np.asarray(counts_bg_subtracted, dtype=float).copy()
         
-        for pos in peak_positions:
+        def _local_height(pos):
+            e0 = pos['energy']
+            idx = int(np.argmin(np.abs(energy - e0)))
+            return float(residual_counts[idx])
+        
+        ordered_positions = sorted(peak_positions, key=_local_height, reverse=True)
+        
+        for pos in ordered_positions:
             peak = self.peak_fitter.fit_single_peak(
-                energy, counts_bg_subtracted,
+                energy, residual_counts,
                 initial_center=pos['energy'],
                 shape=peak_shape
             )
@@ -170,6 +189,44 @@ class SpectrumFitter:
                 peak.line = pos.get('line')
                 peak.is_tube_line = pos.get('is_tube_line', False)
                 fitted_peaks.append(peak)
+                
+                # Remove this peak from the residual spectrum before fitting others
+                if peak.shape == 'gaussian':
+                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
+                    residual_counts -= self.peak_fitter.gaussian(
+                        energy, peak.amplitude, peak.energy, sigma
+                    )
+                elif peak.shape == 'voigt':
+                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
+                    gamma = peak.shape_params.get('gamma', 0.05)
+                    residual_counts -= self.peak_fitter.voigt(
+                        energy, peak.amplitude, peak.energy, sigma, gamma
+                    )
+                elif peak.shape == 'pseudo_voigt':
+                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
+                    eta = peak.shape_params.get('eta', 0.5)
+                    residual_counts -= self.peak_fitter.pseudo_voigt(
+                        energy, peak.amplitude, peak.energy, sigma, eta
+                    )
+                elif peak.shape == 'hypermet':
+                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
+                    tail_amp = peak.shape_params.get('tail_amplitude', 0.1)
+                    tail_slope = peak.shape_params.get('tail_slope', 2.0)
+                    residual_counts -= self.peak_fitter.hypermet(
+                        energy, peak.amplitude, peak.energy, sigma, tail_amp, tail_slope
+                    )
+                elif peak.shape == 'tail_gaussian':
+                    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
+                    tail_frac = peak.shape_params.get('tail_fraction', 0.15)
+                    tail_sigma = peak.shape_params.get('tail_sigma', sigma * 3)
+                    residual_counts -= self.peak_fitter.tail_gaussian(
+                        energy, peak.amplitude, peak.energy, sigma, tail_frac, tail_sigma
+                    )
+                else:
+                    sigma = peak.fwhm / 2.355
+                    residual_counts -= self.peak_fitter.gaussian(
+                        energy, peak.amplitude, peak.energy, sigma
+                    )
         
         print(f"Successfully fitted {len(fitted_peaks)} peaks")
         
