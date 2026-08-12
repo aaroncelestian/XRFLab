@@ -25,7 +25,8 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 - **FWHM calibration**, tube profiles, and standards calibration tabs
 - **Semi-quant**: area-normalized relative intensities (not FP weight %)
 - **Batch analysis** using the same fitter contract as the Analysis tab
-- Multi-format I/O (TXT, CSV, MCA, HDF5, EMSA)
+- **Mapping tab** for Oxford INCA / Horiba XGT `.ipj` projects: element maps, RGB composites, correlations, IPJ line scans, draw-transect profiles, and send spectra to Analysis for fitting/quant
+- Multi-format I/O (TXT, CSV, MCA, HDF5, EMSA, IPJ)
 - Session model with injectable detector / instrument state
 - Optional **fisx** / xraylib FP helpers for standards-based work
 

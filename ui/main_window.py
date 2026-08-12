@@ -17,6 +17,7 @@ from ui.batch_analysis_panel import BatchAnalysisPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from ui.tube_profile_panel import TubeProfilePanel
+from ui.mapping_panel import MappingPanel
 from utils.io_handler import IOHandler
 from utils.updater import check_for_updates
 from utils.desktop_shortcut import install_desktop_shortcut
@@ -83,6 +84,12 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut(QKeySequence.Open)
         self.open_action.setStatusTip("Open an XRF spectrum file")
         self.open_action.triggered.connect(self.open_spectrum)
+
+        self.open_ipj_action = QAction("Open &IPJ Mapping Project...", self)
+        self.open_ipj_action.setStatusTip(
+            "Open an Oxford INCA / Horiba XGT .ipj mapping project"
+        )
+        self.open_ipj_action.triggered.connect(self.open_ipj_project)
         
         self.export_results_action = QAction("&Export Results...", self)
         self.export_results_action.setStatusTip("Export analysis results")
@@ -163,6 +170,7 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.open_ipj_action)
         file_menu.addSeparator()
         file_menu.addAction(self.export_results_action)
         file_menu.addSeparator()
@@ -199,6 +207,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         
         toolbar.addAction(self.open_action)
+        toolbar.addAction(self.open_ipj_action)
     
     def _create_central_widget(self):
         """Create the main layout with primary Analysis tabs and nested Calibration"""
@@ -221,6 +230,16 @@ class MainWindow(QMainWindow):
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
+
+        # Mapping tab (IPJ element maps, line scans, correlations)
+        self.mapping_panel = MappingPanel()
+        self.mapping_panel.set_fitter(self.fitter)
+        self.mapping_panel.set_element_panel(self.element_panel)
+        self.mapping_panel.spectrum_send_requested.connect(self.on_mapping_spectrum_sent)
+        self.mapping_panel.status_message.connect(
+            lambda msg: self.status_bar.showMessage(msg, 5000)
+        )
+        self.tab_widget.addTab(self.mapping_panel, "Mapping")
         
         # Calibration tab: infrequent setup tools, grouped and out of the primary bar
         self.calibration_tab = self._create_calibration_tab()
@@ -482,6 +501,48 @@ class MainWindow(QMainWindow):
                     "Error Loading Spectrum",
                     f"Failed to load spectrum:\n{str(e)}"
                 )
+
+    def open_ipj_project(self):
+        """Open an INCA/XGT .ipj mapping project in the Mapping tab."""
+        self.tab_widget.setCurrentWidget(self.mapping_panel)
+        self.mapping_panel.open_ipj()
+
+    def on_mapping_spectrum_sent(self, spectrum, peak_labels=None):
+        """Receive a spectrum extracted from Mapping → load into Analysis."""
+        path_label = None
+        if getattr(spectrum, "metadata", None):
+            path_label = spectrum.metadata.get("name")
+        if self.mapping_panel.project is not None:
+            proj = self.mapping_panel.project.path
+            name = path_label or "spectrum"
+            path_label = f"{proj}::{name}"
+
+        self.session.set_spectrum(spectrum, path=path_label)
+        self.spectrum_widget.set_spectrum(spectrum)
+
+        if hasattr(spectrum, "metadata") and spectrum.metadata:
+            self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
+
+        # Seed element selection from IPJ peak labels when present
+        if peak_labels:
+            symbols = []
+            seen = set()
+            for pl in peak_labels:
+                el = pl.get("element")
+                if el and el not in seen:
+                    seen.add(el)
+                    symbols.append(el)
+            if symbols:
+                try:
+                    self.element_panel.set_selected_elements(symbols)
+                except Exception:
+                    pass
+
+        self.tab_widget.setCurrentIndex(0)  # Analysis
+        self.status_bar.showMessage(
+            f"Loaded mapping spectrum into Analysis: {path_label or 'spectrum'}",
+            5000,
+        )
     
     def export_results(self):
         """Export analysis results"""

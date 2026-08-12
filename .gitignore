@@ -135,6 +135,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.deps_olefile/
 
 # Spyder project settings
 .spyderproject
