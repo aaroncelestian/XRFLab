@@ -29,7 +29,7 @@ class SpectrumCube:
     """Hyperspectral cube: channels × height × width (uint16 counts)."""
 
     data: np.ndarray  # (n_channels, height, width)
-    ev_per_channel: float = 20.0  # 4096 bins ≈ 8192@10 eV paired
+    ev_per_channel: float = 10.0  # matches INCA/XGT 4096-bin spectra
     energy_offset_ev: float = 0.0
 
     def __post_init__(self):
@@ -118,7 +118,8 @@ def decode_listdata(
         raw: Full ListData stream bytes
         n_channels: Channel axis length (4096 for these XGT files)
         expected_sum: Optional totals for validating type-3 blocks
-            (8192-bin sum spectrum is auto-rebinned to 4096)
+            (n_channels,) totals for validating type-3 blocks
+            (same length as cube axis; 2× length is auto-rebinned)
     """
     if zlib is None:
         raise ImportError("zlib is required to decode SmartMap ListData")
@@ -185,7 +186,7 @@ def decode_listdata(
         pos = nxt
 
     data = cube.reshape(n_channels, height, width)
-    return SpectrumCube(data=data, ev_per_channel=20.0)
+    return SpectrumCube(data=data, ev_per_channel=10.0)
 
 
 def _normalize_expected_sum(

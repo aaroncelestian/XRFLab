@@ -1,8 +1,10 @@
 """
 Loader for Oxford INCA / Horiba XGT .ipj project files (OLE compound documents).
 
-Extracts spot/sum spectra, element intensity maps, overview images,
-ordered line-scan spectrum series, and SmartMap ListData hyperspectral cubes.
+Extracts spot/sum spectra, element intensity maps, SEI transmission overviews,
+XGT optical camera BMPs (sample whole-image and map-area crop), ordered
+point series classified as line scans (equal step) or multipoint (irregular
+steps), and SmartMap ListData hyperspectral cubes.
 """
 
 from __future__ import annotations
@@ -38,7 +40,15 @@ else:
 _MICROMAP_HEADER = 32
 _MICROMAP_TRAILER = 216
 _SPECTRUM_HEADER = 10
+# INCA/XGT Spectrum streams are 4096 × uint32 (10 eV/ch is common after fix;
+# inference may select 20 eV from peak labels)
 _DEFAULT_EV_PER_CHANNEL = 10.0
+_DEFAULT_N_CHANNELS = 4096
+# XGT2Data stage X/Y (float32) — observed across numbered spectra
+_XGT2_STAGE_X_OFF = 154
+_XGT2_STAGE_Y_OFF = 162
+# Max relative deviation from median step for "equal spacing" line scans
+_LINE_SCAN_STEP_REL_TOL = 0.15
 
 
 def load_ipj(file_path: str | Path) -> MappingProject:
@@ -74,6 +84,13 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
             preferred_prefixes=("Sample",),
             default=f"Sample {sample_idx}",
         )
+        whole_image = _parse_xgt_bmp(
+            ole,
+            under=["Samples", sample_id],
+            stream_name="XGT2 WholeImage",
+            name="Sample camera",
+            kind="whole_image",
+        )
         sites: List[MappingFOV] = []
         fov_ids = _child_storages(ole, ["Samples", sample_id, "FOVs"])
         for site_idx, fov_id in enumerate(fov_ids, start=1):
@@ -86,6 +103,7 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
                 id=sample_id,
                 name=sample_name,
                 sites=sites,
+                whole_image=whole_image,
                 metadata={"path": f"Samples/{sample_id}"},
             )
         )
@@ -126,6 +144,13 @@ def _parse_fov(
     )
     element_maps = _parse_element_maps(ole, base)
     overview = _parse_overview(ole, base)
+    optical = _parse_xgt_bmp(
+        ole,
+        under=base,
+        stream_name="XGT2 MapAreaImage",
+        name="Map area photo",
+        kind="map_area",
+    )
     spectra = _parse_spectra(ole, base)
     cube = _parse_smartmap_cube(ole, base, spectra)
 
@@ -163,6 +188,7 @@ def _parse_fov(
         height=int(height),
         element_maps=element_maps,
         overview=overview,
+        optical=optical,
         spectra=spectra,
         cube=cube,
         metadata={
@@ -170,6 +196,7 @@ def _parse_fov(
             "site_name": site_name,
             "has_smartmap": has_smartmap,
             "has_cube": cube is not None,
+            "has_optical": optical is not None,
             "cube_shape": tuple(cube.shape) if cube is not None else None,
             "path": "/".join(base),
         },
@@ -233,8 +260,8 @@ def _parse_smartmap_cube(
     except Exception:
         return None
 
-    # Match energy scale to sum spectrum when possible
-    if expected is not None and len(expected) == cube.n_channels * 2:
+    # Match energy scale to sum spectrum when channel counts agree
+    if expected is not None:
         sum_ms = next(
             (s for s in spectra if s.kind == "sum" or "sum" in s.name.lower()),
             spectra[0] if spectra else None,
@@ -245,7 +272,10 @@ def _parse_smartmap_cube(
                     "ev_per_channel", _DEFAULT_EV_PER_CHANNEL
                 )
             )
-            cube.ev_per_channel = ev * 2.0
+            if len(expected) == cube.n_channels:
+                cube.ev_per_channel = ev
+            elif len(expected) == cube.n_channels * 2:
+                cube.ev_per_channel = ev * 2.0
     return cube
 
 
@@ -274,6 +304,112 @@ def _parse_element_maps(
         )
     maps.sort(key=lambda m: m.name)
     return maps
+
+
+def _parse_xgt_bmp(
+    ole: "olefile.OleFileIO",
+    *,
+    under: Sequence[str],
+    stream_name: str,
+    name: str,
+    kind: str,
+) -> Optional[OverviewImage]:
+    """Decode an XGT-wrapped 24/32-bit BMP (WholeImage or MapAreaImage)."""
+    path = _find_stream(ole, stream_name, under=under)
+    if path is None:
+        return None
+    try:
+        raw = ole.openstream(path).read()
+        data, bmp_meta = decode_embedded_bmp(raw)
+    except Exception:
+        return None
+    if data.size == 0:
+        return None
+    return OverviewImage(
+        name=name,
+        data=data,
+        metadata={
+            "source": "xgt_bmp",
+            "kind": kind,
+            "path": "/".join(path),
+            **bmp_meta,
+        },
+    )
+
+
+def decode_embedded_bmp(raw: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Decode a Windows BMP embedded in an XGT ExtraData stream.
+
+    The stream has a short vendor header; the BMP starts at the first 'BM'.
+    Returns RGB uint8 array (H, W, 3), origin at top-left.
+    """
+    bm = raw.find(b"BM")
+    if bm < 0 or bm + 54 > len(raw):
+        raise ValueError("no BMP signature in stream")
+    bmp = raw[bm:]
+    pixel_off = struct.unpack_from("<I", bmp, 10)[0]
+    dib = struct.unpack_from("<I", bmp, 14)[0]
+    if dib < 16 or pixel_off < 14 or pixel_off > len(bmp):
+        raise ValueError(f"invalid BMP header dib={dib} pixel_off={pixel_off}")
+    width = struct.unpack_from("<i", bmp, 18)[0]
+    height_signed = struct.unpack_from("<i", bmp, 22)[0]
+    planes, bpp = struct.unpack_from("<HH", bmp, 26)
+    compression = (
+        struct.unpack_from("<I", bmp, 30)[0]
+        if dib >= 20 and len(bmp) >= 34
+        else 0
+    )
+    bottom_up = height_signed > 0
+    height = abs(int(height_signed))
+    if width <= 0 or height <= 0 or width > 16384 or height > 16384:
+        raise ValueError(f"invalid BMP size {width}x{height}")
+    if planes != 1 or bpp not in (24, 32) or compression not in (0, 3):
+        raise ValueError(f"unsupported BMP bpp={bpp} compression={compression}")
+
+    nbytes = bpp // 8
+    row_stride = ((width * nbytes + 3) // 4) * 4
+    needed = pixel_off + row_stride * height
+    if len(bmp) < needed:
+        raise ValueError(
+            f"truncated BMP: have {len(bmp)} need {needed} for {width}x{height}"
+        )
+
+    body = np.frombuffer(
+        bmp, dtype=np.uint8, offset=pixel_off, count=row_stride * height
+    )
+    rows = body.reshape((height, row_stride))
+    pixels = rows[:, : width * nbytes].reshape((height, width, nbytes))
+    rgb = np.ascontiguousarray(pixels[:, :, 2::-1])  # BGR(A) → RGB
+    if bottom_up:
+        rgb = np.ascontiguousarray(rgb[::-1])
+    meta = {
+        "width": int(width),
+        "height": int(height),
+        "bpp": int(bpp),
+        "bmp_offset": int(bm),
+    }
+    return rgb, meta
+
+
+def _find_stream(
+    ole: "olefile.OleFileIO",
+    stream_name: str,
+    under: Sequence[str] = (),
+) -> Optional[List[str]]:
+    """Return the first stream path ending with stream_name under `under`."""
+    prefix = tuple(under)
+    for entry in ole.listdir(streams=True, storages=True):
+        if entry[-1] != stream_name:
+            continue
+        if prefix and tuple(entry[: len(prefix)]) != prefix:
+            continue
+        try:
+            if ole.get_type(entry) == olefile.STGTY_STREAM:
+                return list(entry)
+        except Exception:
+            continue
+    return None
 
 
 def _parse_overview(
@@ -319,7 +455,7 @@ def _parse_spectra(
         energy = (np.arange(n, dtype=np.float64) * ev_per_ch) / 1000.0  # keV
 
         kind = "sum" if "sum" in name.lower() else "spot"
-        # Numbered spectra likely belong to a line scan
+        # Numbered spectra belong to an ordered point series (line or multipoint)
         if re.fullmatch(r"Spectrum\s+\d+", name, flags=re.I):
             kind = "line_point"
 
@@ -341,10 +477,14 @@ def _parse_spectra(
         if m and kind == "line_point":
             index = int(m.group(1))
 
+        stage_x, stage_y = _read_xgt2_stage_xy(ole, spe_base)
+
         out.append(
             MapSpectrum(
                 spectrum=spectrum,
                 name=name,
+                x=stage_x,
+                y=stage_y,
                 index=index,
                 kind=kind,
                 peak_labels=peaks,
@@ -364,18 +504,89 @@ def _parse_spectra(
     return out
 
 
+def _read_xgt2_stage_xy(
+    ole: "olefile.OleFileIO",
+    spe_base: List[str],
+) -> Tuple[Optional[float], Optional[float]]:
+    """Read stage X/Y floats from the spectrum's XGT2Data stream, if present."""
+    path = spe_base + ["XGT2Data", "XGT2Data"]
+    if not ole.exists(path):
+        return None, None
+    raw = ole.openstream(path).read()
+    need = max(_XGT2_STAGE_X_OFF, _XGT2_STAGE_Y_OFF) + 4
+    if len(raw) < need:
+        return None, None
+    x = struct.unpack_from("<f", raw, _XGT2_STAGE_X_OFF)[0]
+    y = struct.unpack_from("<f", raw, _XGT2_STAGE_Y_OFF)[0]
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return None, None
+    if abs(x) > 1e5 or abs(y) > 1e5:
+        return None, None
+    if abs(x) < 1e-6 and abs(y) < 1e-6:
+        return None, None
+    return float(x), float(y)
+
+
+def classify_point_series_kind(
+    points: Sequence[MapSpectrum],
+    rel_tol: float = _LINE_SCAN_STEP_REL_TOL,
+) -> str:
+    """
+    Classify ordered points as line_scan (equal step size) or multipoint.
+
+    Uses consecutive Euclidean distances in stage X/Y. Without usable
+    coordinates we cannot verify equal spacing, so the series is multipoint.
+    """
+    coords = [
+        (float(p.x), float(p.y))
+        for p in points
+        if p.x is not None and p.y is not None
+        and np.isfinite(p.x) and np.isfinite(p.y)
+    ]
+    if len(coords) < 3:
+        return "multipoint"
+    arr = np.asarray(coords, dtype=np.float64)
+    steps = np.hypot(np.diff(arr[:, 0]), np.diff(arr[:, 1]))
+    if not np.all(np.isfinite(steps)):
+        return "multipoint"
+    med = float(np.median(steps))
+    if med <= 0:
+        return "multipoint"
+    if float(np.max(np.abs(steps - med))) <= rel_tol * med:
+        return "line_scan"
+    return "multipoint"
+
+
 def _maybe_attach_line_scan(fov: MappingFOV) -> None:
-    """If FOV has many numbered spectra, group them as a LineScan."""
+    """Group numbered spectra as a line scan or multipoint series."""
     points = [s for s in fov.spectra if s.kind == "line_point"]
     if len(points) < 3:
         return
     points = sorted(points, key=lambda s: (s.index is None, s.index or 0, s.name))
+    kind = classify_point_series_kind(points)
+    n = len(points)
+    if kind == "line_scan":
+        name = f"Line scan ({n} points)"
+    else:
+        name = f"Multipoint ({n} points)"
+    steps = None
+    if all(p.x is not None and p.y is not None for p in points):
+        xs = np.array([p.x for p in points], dtype=np.float64)
+        ys = np.array([p.y for p in points], dtype=np.float64)
+        step_arr = np.hypot(np.diff(xs), np.diff(ys))
+        steps = {
+            "median": float(np.median(step_arr)),
+            "mean": float(np.mean(step_arr)),
+            "cv": float(np.std(step_arr) / (np.mean(step_arr) or 1.0)),
+            "rel_tol": _LINE_SCAN_STEP_REL_TOL,
+        }
     fov.line_scans.append(
         LineScan(
-            name=f"Line scan ({len(points)} points)",
+            name=name,
             points=points,
             source="ipj",
-            metadata={"fov_id": fov.id},
+            kind=kind,
+            metadata={"fov_id": fov.id, "step_stats": steps},
         )
     )
 
@@ -419,13 +630,49 @@ def _read_micromap(raw: bytes) -> Tuple[np.ndarray, Dict[str, Any]]:
 
 
 def _read_spectrum_counts(raw: bytes) -> np.ndarray:
-    if len(raw) < _SPECTRUM_HEADER + 2:
+    """
+    Decode an INCA/XGT Spectrum stream.
+
+    Layout: 10-byte header + 4096 little-endian uint32 counts.
+    (Older mistaken u16 decode produced an 8192-bin comb with zeros on odd channels.)
+    """
+    if len(raw) < _SPECTRUM_HEADER + 4:
         raise ValueError("spectrum stream too small")
     body = raw[_SPECTRUM_HEADER:]
+
+    # Prefer explicit channel count from header when present (u16 @ offset 6 = 0x0FFF)
+    n_hint = 0
+    if len(raw) >= 8:
+        n_hint = struct.unpack_from("<H", raw, 6)[0]
+        if n_hint == 0x0FFF:
+            n_hint = 4096
+        elif not (256 <= n_hint <= 8192):
+            n_hint = 0
+
+    # uint32 body (normal XGT/INCA case)
+    if len(body) >= 4 and len(body) % 4 == 0:
+        counts32 = np.frombuffer(body, dtype="<u4")
+        if n_hint and len(counts32) >= n_hint:
+            return np.array(counts32[:n_hint], dtype=np.float64, copy=True)
+        if len(counts32) in (2048, 4096, 8192):
+            return np.array(counts32, dtype=np.float64, copy=True)
+        # 16384 bytes → 4096 u32
+        if len(counts32) == _DEFAULT_N_CHANNELS:
+            return np.array(counts32, dtype=np.float64, copy=True)
+
+    # Fallback: uint16 (rare)
     if len(body) % 2 != 0:
         body = body[: len(body) - 1]
-    counts = np.frombuffer(body, dtype="<u2")
-    return np.array(counts, dtype=np.float64, copy=True)
+    counts16 = np.frombuffer(body, dtype="<u2")
+    # Detect mistaken interleaved high-word zeros → collapse to u32 view
+    if (
+        len(counts16) >= 4
+        and len(counts16) % 2 == 0
+        and np.mean(counts16[1::2] == 0) > 0.9
+        and np.mean(counts16[0::2] > 0) > 0.05
+    ):
+        return np.array(counts16[0::2], dtype=np.float64, copy=True)
+    return np.array(counts16, dtype=np.float64, copy=True)
 
 
 def _read_information(

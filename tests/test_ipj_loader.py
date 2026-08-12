@@ -67,14 +67,15 @@ def test_barstow_spectra_and_dims(barstow):
     assert len(all_spec) >= 10
     # At least one sum spectrum
     assert any(s.kind == "sum" or "sum" in s.name.lower() for s in all_spec)
-    # Spectrum shape
+    # Spectrum shape: 4096 × uint32 (not comb-aliased 8192 u16)
     s0 = all_spec[0].spectrum
-    assert s0.num_channels == 8192
+    assert s0.num_channels == 4096
     assert s0.counts.max() > 0
+    assert np.mean(s0.counts[1::2] == 0) < 0.9  # not the old zero-odd comb
     assert s0.energy[-1] > s0.energy[0]
 
 
-def test_dylan_line_scan_and_maps(dylan):
+def test_dylan_point_series_and_maps(dylan):
     map_fov = dylan.primary_fov
     assert map_fov is not None
     assert map_fov.width == 128
@@ -84,12 +85,54 @@ def test_dylan_line_scan_and_maps(dylan):
     assert any("Fe" in n for n in names)
     assert any("Si" in n for n in names)
 
-    # Line scan FOV with ~34 points
-    line_fovs = [f for f in dylan.fovs if f.line_scans]
-    assert line_fovs, "expected a line-scan FOV"
-    ls = line_fovs[0].line_scans[0]
+    # Numbered Spectrum 1…N series (step spacing decides line vs multipoint)
+    series_fovs = [f for f in dylan.fovs if f.line_scans]
+    assert series_fovs, "expected a numbered point-series FOV"
+    ls = series_fovs[0].line_scans[0]
     assert ls.n_points >= 30
-    assert ls.points[0].spectrum.num_channels == 8192
+    assert ls.points[0].spectrum.num_channels == 4096
+    assert ls.points[0].x is not None and ls.points[0].y is not None
+    # Dylan Site 2 has irregular stage steps → multipoint, not line scan
+    assert ls.kind == "multipoint"
+    assert ls.is_multipoint
+    assert "Multipoint" in ls.name
+
+
+def test_barstow_point_series_is_multipoint(barstow):
+    series_fovs = [f for f in barstow.fovs if f.line_scans]
+    assert series_fovs, "expected numbered spectra FOV"
+    ls = series_fovs[0].line_scans[0]
+    assert ls.n_points >= 10
+    assert ls.kind == "multipoint"
+    assert all(p.x is not None and p.y is not None for p in ls.points)
+
+
+def test_classify_equal_vs_irregular_steps():
+    from core.mapping.models import MapSpectrum
+    from core.spectrum import Spectrum
+    from utils.ipj_loader import classify_point_series_kind
+
+    def _pt(i, x, y):
+        sp = Spectrum(
+            energy=np.arange(4, dtype=np.float64),
+            counts=np.ones(4, dtype=np.float64),
+            live_time=1.0,
+            real_time=1.0,
+            metadata={"name": f"Spectrum {i}"},
+        )
+        return MapSpectrum(spectrum=sp, name=f"Spectrum {i}", x=x, y=y, index=i, kind="line_point")
+
+    line = [_pt(i, float(i), 0.0) for i in range(1, 8)]
+    assert classify_point_series_kind(line) == "line_scan"
+
+    multi = [
+        _pt(1, 0.0, 0.0),
+        _pt(2, 1.0, 0.0),
+        _pt(3, 1.2, 0.0),
+        _pt(4, 5.0, 3.0),
+        _pt(5, 5.1, 3.2),
+    ]
+    assert classify_point_series_kind(multi) == "multipoint"
 
 
 def test_emerald_element_maps(emerald):
@@ -129,16 +172,16 @@ def test_hyperspectral_cube_dylan(dylan):
     assert fov is not None
     assert fov.cube is not None
     assert fov.cube.shape == (4096, 109, 128)
-    # Sum spectrum matches cube totals (4096 paired bins)
+    # Sum spectrum matches cube totals (same 4096 bins)
     sum_ms = fov.sum_spectrum()
     assert sum_ms is not None
-    pair = sum_ms.spectrum.counts.reshape(4096, 2).sum(axis=1)
-    assert np.allclose(fov.cube.sum_spectrum(), pair)
+    assert sum_ms.spectrum.num_channels == 4096
+    assert np.allclose(fov.cube.sum_spectrum(), sum_ms.spectrum.counts)
 
-    # Pixel extract expands to 8192 for Analysis
+    # Pixel extract stays on cube channel axis
     ms = fov.spectrum_at_pixel(64, 54)
     assert ms is not None
-    assert ms.spectrum.num_channels == 8192
+    assert ms.spectrum.num_channels == 4096
     assert ms.spectrum.counts.sum() > 0
 
     # ROI map from Fe Ka region
@@ -156,5 +199,67 @@ def test_hyperspectral_cube_barstow(barstow):
     assert any(m.metadata.get("source") == "cube_total" for m in fov.element_maps)
     sum_ms = fov.sum_spectrum()
     assert sum_ms is not None
-    pair = sum_ms.spectrum.counts.reshape(4096, 2).sum(axis=1)
-    assert np.allclose(fov.cube.sum_spectrum(), pair)
+    assert np.allclose(fov.cube.sum_spectrum(), sum_ms.spectrum.counts)
+
+
+def _make_test_bmp(rgb: np.ndarray) -> bytes:
+    """Minimal 24-bit bottom-up BMP with a 24-byte vendor prefix."""
+    import struct
+
+    h, w = rgb.shape[:2]
+    stride = ((w * 3 + 3) // 4) * 4
+    pixel_off = 54
+    filesize = pixel_off + stride * h
+    header = bytearray(54)
+    header[0:2] = b"BM"
+    struct.pack_into("<I", header, 2, filesize)
+    struct.pack_into("<I", header, 10, pixel_off)
+    struct.pack_into("<I", header, 14, 40)
+    struct.pack_into("<i", header, 18, w)
+    struct.pack_into("<i", header, 22, h)
+    struct.pack_into("<HH", header, 26, 1, 24)
+    body = bytearray(stride * h)
+    flipped = rgb[::-1]
+    for y in range(h):
+        for x in range(w):
+            r, g, b = (int(v) for v in flipped[y, x])
+            i = y * stride + x * 3
+            body[i : i + 3] = bytes((b, g, r))
+    prefix = b"\x02\x00\x01\x00\x03\x00" + b"\x00" * 18
+    return prefix + bytes(header) + bytes(body)
+
+
+def test_decode_embedded_bmp_roundtrip():
+    from utils.ipj_loader import decode_embedded_bmp
+
+    src = np.zeros((3, 5, 3), dtype=np.uint8)
+    src[0, 0] = (255, 0, 0)
+    src[1, 2] = (0, 255, 0)
+    src[2, 4] = (0, 0, 255)
+    rgb, meta = decode_embedded_bmp(_make_test_bmp(src))
+    assert rgb.shape == (3, 5, 3)
+    assert rgb.dtype == np.uint8
+    assert meta["width"] == 5 and meta["height"] == 3
+    np.testing.assert_array_equal(rgb, src)
+
+
+def test_optical_camera_bmps(barstow, dylan, emerald):
+    for proj in (barstow, dylan, emerald):
+        assert proj.samples, proj.name
+        sample = proj.samples[0]
+        assert sample.whole_image is not None, proj.name
+        img = sample.whole_image.data
+        assert img.ndim == 3 and img.shape[2] == 3
+        assert img.shape == (1944, 2592, 3)
+        assert img.dtype == np.uint8
+        assert int(img.max()) > 0
+
+    barstow_opt = next((f for f in barstow.fovs if f.optical is not None), None)
+    assert barstow_opt is not None
+    assert barstow_opt.optical.data.shape[2] == 3
+    assert barstow_opt.optical.data.shape[0] > 100
+    assert barstow_opt.optical.metadata.get("kind") == "map_area"
+
+    dylan_opt = next((f for f in dylan.fovs if f.optical is not None), None)
+    assert dylan_opt is not None
+    assert dylan_opt.optical.data.ndim == 3

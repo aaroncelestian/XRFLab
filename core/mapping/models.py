@@ -44,7 +44,7 @@ class ElementMap:
 
 @dataclass
 class OverviewImage:
-    """Optical / transmission overview aligned to the map grid."""
+    """Optical photo, transmission X-ray, or other 2D/RGB overview."""
 
     name: str
     data: np.ndarray
@@ -80,7 +80,7 @@ class MapSpectrum:
 
 @dataclass
 class LineScan:
-    """Ordered spectra or intensity profiles along a transect."""
+    """Ordered spectra along a transect (line scan) or multipoint series."""
 
     name: str
     points: List[MapSpectrum] = field(default_factory=list)
@@ -88,17 +88,47 @@ class LineScan:
     start_xy: Optional[Tuple[float, float]] = None
     end_xy: Optional[Tuple[float, float]] = None
     source: str = "ipj"  # ipj | drawn
+    # line_scan = equal step spacing; multipoint = irregular gaps
+    kind: str = "line_scan"  # line_scan | multipoint
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_points(self) -> int:
         return len(self.points)
 
+    @property
+    def is_line_scan(self) -> bool:
+        return self.kind == "line_scan"
+
+    @property
+    def is_multipoint(self) -> bool:
+        return self.kind == "multipoint"
+
+    def display_label(self) -> str:
+        """Short UI label: 'Line scan' or 'Multipoint'."""
+        if self.is_multipoint:
+            return "Multipoint"
+        return "Line scan"
+
     def distances(self) -> np.ndarray:
-        """Unit spacing 0..N-1, or geometric distance if start/end set."""
+        """Path distance along points, or unit index spacing as fallback."""
         n = self.n_points
         if n == 0:
             return np.array([])
+        xs = [p.x for p in self.points]
+        ys = [p.y for p in self.points]
+        if (
+            all(v is not None for v in xs)
+            and all(v is not None for v in ys)
+            and n > 1
+        ):
+            coords = np.column_stack(
+                [np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)]
+            )
+            steps = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
+            out = np.zeros(n, dtype=np.float64)
+            out[1:] = np.cumsum(steps)
+            return out
         if self.start_xy is not None and self.end_xy is not None and n > 1:
             length = float(
                 np.hypot(
@@ -119,7 +149,8 @@ class MappingFOV:
     width: int = 0
     height: int = 0
     element_maps: List[ElementMap] = field(default_factory=list)
-    overview: Optional[OverviewImage] = None
+    overview: Optional[OverviewImage] = None  # SEI transmission X-ray
+    optical: Optional[OverviewImage] = None  # XGT map-area camera BMP
     spectra: List[MapSpectrum] = field(default_factory=list)
     line_scans: List[LineScan] = field(default_factory=list)
     cube: Optional[Any] = None  # SpectrumCube when SmartMap ListData decoded
@@ -195,14 +226,14 @@ class MappingFOV:
         energy = self.cube.energy_axis_kev()
         # Align energy scale with FOV sum spectrum when available
         sum_ms = self.sum_spectrum()
-        if sum_ms is not None and sum_ms.spectrum.num_channels == counts.size * 2:
-            # Cube is 2× rebinned vs native 8192; expand for Analysis compatibility
+        if sum_ms is not None and sum_ms.spectrum.num_channels == counts.size:
+            energy = sum_ms.spectrum.energy.copy()
+        elif sum_ms is not None and sum_ms.spectrum.num_channels == counts.size * 2:
+            # Legacy: fine-binned sum vs coarse cube
             fine = np.zeros(counts.size * 2, dtype=np.float64)
             fine[0::2] = counts * 0.5
             fine[1::2] = counts * 0.5
             counts = fine
-            energy = sum_ms.spectrum.energy.copy()
-        elif sum_ms is not None and sum_ms.spectrum.num_channels == counts.size:
             energy = sum_ms.spectrum.energy.copy()
 
         name = f"Pixel ({int(x)}, {int(y)})"
@@ -236,6 +267,7 @@ class MappingSample:
     id: str
     name: str = ""
     sites: List[MappingFOV] = field(default_factory=list)
+    whole_image: Optional[OverviewImage] = None  # XGT sample-camera BMP
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
