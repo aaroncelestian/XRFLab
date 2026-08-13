@@ -7,13 +7,14 @@ fitting parameters and semi-quantitative (area-normalized) intensities.
 
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
 from core.calibration import CalibrationResult
+from core.spectrum import Spectrum
 from utils.io_handler import IOHandler
 
 
@@ -123,43 +124,97 @@ class BatchProcessor:
     def process_file_list(
         self, file_paths: List[Path], progress_callback=None
     ) -> List[BatchFitResult]:
-        total = len(file_paths)
+        return self.process_jobs(list(file_paths), progress_callback=progress_callback)
+
+    def process_spectrum_list(
+        self,
+        spectra: List[Spectrum],
+        progress_callback=None,
+    ) -> List[BatchFitResult]:
+        """Fit already-loaded Spectrum objects (IPJ spots, line-scan points)."""
+        return self.process_jobs(list(spectra), progress_callback=progress_callback)
+
+    @staticmethod
+    def _job_label(job) -> Tuple[str, str]:
+        """Return (display_name, path_label) for a file path or Spectrum."""
+        if isinstance(job, Spectrum):
+            name = str(job.metadata.get("name") or "spectrum")
+            path = str(job.metadata.get("source_label") or name)
+            return name, path
+        path = Path(job)
+        return path.stem, str(path)
+
+    def process_jobs(self, jobs: List[Any], progress_callback=None) -> List[BatchFitResult]:
+        """Fit a mixed list of file paths and in-memory Spectrum objects."""
+        total = len(jobs)
         self.results = []
 
-        for i, file_path in enumerate(file_paths):
+        for i, job in enumerate(jobs):
+            name, path_label = self._job_label(job)
             if progress_callback:
-                progress_callback(i + 1, total, f"Processing {file_path.name}...")
+                progress_callback(i + 1, total, f"Processing {name}...")
 
             try:
-                result = self.process_single_spectrum(file_path)
+                result = self.process_job(job)
                 self.results.append(result)
             except Exception as e:
-                result = BatchFitResult(
-                    spectrum_name=Path(file_path).stem,
-                    spectrum_path=str(file_path),
-                    fit_success=False,
-                    chi_squared=float("inf"),
-                    r_squared=0.0,
-                    elements_found=[],
-                    concentrations={},
-                    concentration_errors={},
-                    peak_areas={},
-                    error_message=str(e),
+                self.results.append(
+                    BatchFitResult(
+                        spectrum_name=name,
+                        spectrum_path=path_label,
+                        fit_success=False,
+                        chi_squared=float("inf"),
+                        r_squared=0.0,
+                        elements_found=[],
+                        concentrations={},
+                        concentration_errors={},
+                        peak_areas={},
+                        error_message=str(e),
+                    )
                 )
-                self.results.append(result)
 
         return self.results
 
+    def process_job(self, job) -> BatchFitResult:
+        if isinstance(job, Spectrum):
+            name, path_label = self._job_label(job)
+            return self._fit_loaded_spectrum(job, name=name, path=path_label)
+        return self.process_single_spectrum(Path(job))
+
     def process_single_spectrum(self, file_path: Path) -> BatchFitResult:
-        start_time = datetime.now()
         file_path = Path(file_path)
+        spectrum = self.io_handler.load_spectrum(str(file_path))
+        return self._fit_loaded_spectrum(
+            spectrum, name=file_path.stem, path=str(file_path)
+        )
+
+    def process_spectrum_object(
+        self,
+        spectrum: Spectrum,
+        name: Optional[str] = None,
+        path: str = "",
+    ) -> BatchFitResult:
+        label, path_label = self._job_label(spectrum)
+        return self._fit_loaded_spectrum(
+            spectrum,
+            name=name or label,
+            path=path or path_label,
+        )
+
+    def _fit_loaded_spectrum(
+        self,
+        spectrum: Spectrum,
+        *,
+        name: str,
+        path: str,
+    ) -> BatchFitResult:
+        start_time = datetime.now()
 
         if self.config.instrument_state is not None:
             self.fitter.apply_instrument_state(self.config.instrument_state)
         else:
             self.fitter.peak_fitter.activate()
 
-        spectrum = self.io_handler.load_spectrum(str(file_path))
         elements = self._normalize_elements()
 
         excitation_kv = self.config.excitation_kv
@@ -205,8 +260,8 @@ class BatchProcessor:
         fit_time = (datetime.now() - start_time).total_seconds()
 
         return BatchFitResult(
-            spectrum_name=file_path.stem,
-            spectrum_path=str(file_path),
+            spectrum_name=name,
+            spectrum_path=path,
             fit_success=True,
             chi_squared=chi_squared,
             r_squared=r_squared,

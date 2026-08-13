@@ -69,6 +69,8 @@ def test_overlay_on_photo_blends_and_resizes():
     rgb, alpha = colorize_map(mmap, cmap="hot")
     assert rgb.shape == (5, 6, 3)
     assert alpha[2, 3] > alpha[0, 0]
+    assert alpha[0, 0] == 0.0
+    np.testing.assert_allclose(rgb[0, 0], 0.0)
     blended = overlay_on_photo(photo, rgb, alpha=alpha, opacity=1.0)
     assert blended.shape == (20, 30, 3)
     # Hot peak should be brighter than the gray photo background
@@ -76,6 +78,37 @@ def test_overlay_on_photo_blends_and_resizes():
     resized = resize_to(mmap, 20, 30)
     assert resized.shape == (20, 30)
     assert resized[8, 15] > 0  # peak maps near center of 5x6 → 20x30
+
+
+def test_overlay_zero_counts_are_fully_transparent():
+    from core.mapping.display import colorize_map, overlay_alpha, overlay_on_photo
+
+    photo = np.full((8, 8, 3), 0.4, dtype=np.float64)
+    mmap = np.zeros((8, 8), dtype=np.float64)
+    mmap[3, 4] = 50.0
+    for cmap in ("hot", "inferno", "cyan"):
+        rgb, scaled = colorize_map(mmap, cmap=cmap)
+        alpha = overlay_alpha(mmap, scaled, mask_low=True)
+        np.testing.assert_allclose(alpha[mmap <= 0], 0.0)
+        out = overlay_on_photo(photo, rgb, alpha=alpha, opacity=1.0)
+        np.testing.assert_allclose(out[0, 0], photo[0, 0], atol=1e-6)
+        assert not np.allclose(out[3, 4], photo[3, 4])
+
+    # Even without the low-count fade, zeros stay clear
+    rgb, scaled = colorize_map(mmap, cmap="cyan")
+    alpha = overlay_alpha(mmap, scaled, mask_low=False)
+    assert alpha[3, 4] == 1.0
+    assert alpha[0, 0] == 0.0
+    out = overlay_on_photo(photo, rgb, alpha=alpha, opacity=0.8)
+    np.testing.assert_allclose(out[1, 1], photo[1, 1], atol=1e-6)
+
+    # Zeros stay clear after stretching the map onto a larger photo
+    big = np.full((40, 48, 3), 0.25, dtype=np.float64)
+    rgb, scaled = colorize_map(mmap, cmap="hot")
+    alpha = overlay_alpha(mmap, scaled, mask_low=True)
+    stretched = overlay_on_photo(big, rgb, alpha=alpha, opacity=1.0)
+    np.testing.assert_allclose(stretched[0, 0], big[0, 0], atol=1e-6)
+    np.testing.assert_allclose(stretched[1, 2], big[1, 2], atol=1e-6)
 
 
 def test_overlay_opacity_zero_is_photo():

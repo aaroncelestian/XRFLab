@@ -4,6 +4,10 @@ Mapping workspace: load INCA/XGT .ipj projects.
 Maps tab: element maps, RGB, correlations, and drawn intensity profiles.
 Line scan tab: collected line / multipoint spectra, ROI profiles, and
 area-normalized semi-quant along that series.
+
+Spectra can be sent to Analysis (one at a time) or Batch Analysis
+(selected subset, whole line scan, site, or project). Spectra-only IPJ
+files open in Analysis with every point queued for batch fitting.
 """
 
 from __future__ import annotations
@@ -47,11 +51,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.mapping.camera import StageCamera, camera_from_image
 from core.mapping.correlations import map_correlation, rgb_composite
 from core.mapping.display import (
     colorize_map,
     enhance_map,
     format_acquisition,
+    overlay_alpha,
     overlay_on_photo,
     upsample_map,
 )
@@ -76,6 +82,8 @@ class MappingPanel(QWidget):
     """Top-level Mapping tab widget."""
 
     spectrum_send_requested = Signal(object, object)  # Spectrum, peak_labels list
+    spectra_batch_requested = Signal(list)  # [(display_name, Spectrum), ...]
+    project_loaded = Signal(object)  # MappingProject
     status_message = Signal(str)
 
     def __init__(self, parent=None):
@@ -99,6 +107,12 @@ class MappingPanel(QWidget):
         self._tree_updating = False
         self._last_pick_xy: Optional[tuple] = None
         self._sample_form_updating = False
+        self._ls_hover_index: Optional[int] = None
+        self._ls_cam_px: Optional[np.ndarray] = None
+        self._ls_cam_py: Optional[np.ndarray] = None
+        self._ls_plot_x: Optional[np.ndarray] = None
+        self._ls_plot_order: Optional[np.ndarray] = None
+        self._ls_camera_model: Optional[StageCamera] = None
 
         self._build_ui()
 
@@ -180,9 +194,12 @@ class MappingPanel(QWidget):
         self.tree.customContextMenuRequested.connect(self._on_data_context_menu)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemChanged.connect(self._on_data_tree_item_changed)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         data_layout.addWidget(self.tree)
-        data_hint = QLabel("F2 or right-click → Rename spectra / line scans / site")
+        data_hint = QLabel(
+            "Shift/Ctrl-click to select spectra · F2 to rename · "
+            "Send selected → Batch for bulk fitting"
+        )
         data_hint.setWordWrap(True)
         data_hint.setStyleSheet("color: #666; font-size: 11px;")
         data_layout.addWidget(data_hint)
@@ -191,7 +208,19 @@ class MappingPanel(QWidget):
         self.rename_data_btn.setToolTip("Rename selected spectrum, line scan, or site")
         self.rename_data_btn.clicked.connect(self._rename_selected_data_item)
         data_btn_row.addWidget(self.rename_data_btn)
-        data_btn_row.addStretch(1)
+        self.select_all_spectra_btn = QPushButton("Select all spectra")
+        self.select_all_spectra_btn.setToolTip(
+            "Select every spot and line-scan point in this site"
+        )
+        self.select_all_spectra_btn.clicked.connect(self._select_all_spectra)
+        data_btn_row.addWidget(self.select_all_spectra_btn)
+        self.send_selected_batch_btn = QPushButton("Send selected → Batch")
+        self.send_selected_batch_btn.setToolTip(
+            "Queue the selected spectra (or the whole line scan if its "
+            "folder is selected) in Batch Analysis"
+        )
+        self.send_selected_batch_btn.clicked.connect(self._send_selected_to_batch)
+        data_btn_row.addWidget(self.send_selected_batch_btn)
         data_layout.addLayout(data_btn_row)
         self.nav_tabs.addTab(data_page, "Data")
 
@@ -233,14 +262,27 @@ class MappingPanel(QWidget):
         self.rgb_check.toggled.connect(self._on_rgb_toggled)
         display_sec.addWidget(self.rgb_check)
 
-        self.overlay_check = QCheckBox("Overlay on Map Area Photo")
+        self.overlay_check = QCheckBox("Overlay on photo")
         self.overlay_check.setToolTip(
-            "Blend the current element map (or RGB composite) onto the "
-            "optical Map Area Photo. Assumes the photo covers the same FOV "
-            "as the XRF map. Pick / line tools stay on the map pixel grid."
+            "Blend the current element map (or RGB composite) onto a camera "
+            "photo. Pixels with 0 counts stay fully transparent. Pick / line "
+            "tools stay on the map pixel grid."
         )
         self.overlay_check.toggled.connect(self._refresh_canvas)
         display_sec.addWidget(self.overlay_check)
+
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Photo"))
+        self.overlay_target = QComboBox()
+        self.overlay_target.addItem("Map area photo", "optical")
+        self.overlay_target.addItem("Sample camera", "whole_image")
+        self.overlay_target.setToolTip(
+            "Background photo for the overlay. Map area is the mapped FOV; "
+            "sample camera is the whole-sample photo."
+        )
+        self.overlay_target.currentIndexChanged.connect(self._refresh_canvas)
+        target_row.addWidget(self.overlay_target, stretch=1)
+        display_sec.addLayout(target_row)
 
         overlay_row = QHBoxLayout()
         overlay_row.addWidget(QLabel("Opacity"))
@@ -274,11 +316,12 @@ class MappingPanel(QWidget):
         self.overlay_mask_check = QCheckBox("Transparent where counts are low")
         self.overlay_mask_check.setChecked(True)
         self.overlay_mask_check.setToolTip(
-            "Empty / background map pixels stay see-through so the photo shows through"
+            "Fade low-count pixels. Zero-count pixels are always fully transparent."
         )
         self.overlay_mask_check.toggled.connect(self._refresh_canvas)
         display_sec.addWidget(self.overlay_mask_check)
         self.overlay_check.setEnabled(False)
+        self.overlay_target.setEnabled(False)
         self.overlay_slider.setEnabled(False)
         self.overlay_cmap.setEnabled(False)
         self.overlay_mask_check.setEnabled(False)
@@ -562,6 +605,26 @@ class MappingPanel(QWidget):
         )
         self.send_btn.clicked.connect(self._send_selected_spectrum)
         quant_sec.addWidget(self.send_btn)
+        self.send_batch_btn = QPushButton("Send selected → Batch")
+        self.send_batch_btn.setToolTip(
+            "Queue selected Data-tree spectra in Batch Analysis. "
+            "Shift/Ctrl-click in Data to choose a subset."
+        )
+        self.send_batch_btn.clicked.connect(self._send_selected_to_batch)
+        quant_sec.addWidget(self.send_batch_btn)
+        self.send_site_batch_btn = QPushButton("Send site spectra → Batch")
+        self.send_site_batch_btn.setToolTip(
+            "Queue every spot and line/multipoint spectrum in the active site"
+        )
+        self.send_site_batch_btn.clicked.connect(self._send_site_to_batch)
+        quant_sec.addWidget(self.send_site_batch_btn)
+        self.send_project_batch_btn = QPushButton("Send all project spectra → Batch")
+        self.send_project_batch_btn.setToolTip(
+            "Queue every spot and line/multipoint spectrum in this IPJ "
+            "(all sites). Map sum spectra are skipped."
+        )
+        self.send_project_batch_btn.clicked.connect(self._send_project_to_batch)
+        quant_sec.addWidget(self.send_project_batch_btn)
         self.export_profile_btn = QPushButton("Export profile CSV…")
         self.export_profile_btn.setToolTip(
             "Export the current drawn-transect intensity profile"
@@ -717,6 +780,14 @@ class MappingPanel(QWidget):
         self.ls_send_btn.clicked.connect(self._send_selected_spectrum)
         ls_layout.addWidget(self.ls_send_btn)
 
+        self.ls_send_batch_btn = QPushButton("Send points → Batch")
+        self.ls_send_batch_btn.setToolTip(
+            "Queue this line/multipoint series in Batch Analysis. "
+            "If points are selected in Data, only those are sent."
+        )
+        self.ls_send_batch_btn.clicked.connect(self._send_line_scan_to_batch)
+        ls_layout.addWidget(self.ls_send_batch_btn)
+
         ls_layout.addStretch(1)
         ls_scroll.setWidget(ls_body)
         ls_split.addWidget(ls_scroll)
@@ -738,19 +809,49 @@ class MappingPanel(QWidget):
         ls_empty_layout.addStretch(1)
         self.ls_content_stack.addWidget(ls_empty)
 
+        ls_view = QSplitter(Qt.Horizontal)
+        cam_wrap = QWidget()
+        cam_layout = QVBoxLayout(cam_wrap)
+        cam_layout.setContentsMargins(0, 0, 0, 0)
+        self.ls_camera = MapCanvas()
+        self.ls_camera.set_line_mode(False)
+        self.ls_camera.cursor_moved.connect(self._on_ls_camera_cursor)
+        self.ls_camera.view_clicked.connect(self._on_ls_camera_clicked)
+        cam_layout.addWidget(self.ls_camera, stretch=1)
+        self.ls_camera_label = QLabel(
+            "Hover the ROI profile to see that point on the sample camera."
+        )
+        self.ls_camera_label.setWordWrap(True)
+        cam_layout.addWidget(self.ls_camera_label)
+        ls_view.addWidget(cam_wrap)
+
         ls_plots = QWidget()
         ls_plots_layout = QVBoxLayout(ls_plots)
         ls_plots_layout.setContentsMargins(0, 0, 0, 0)
         self.ls_profile_plot = pg.PlotWidget(title="Line-scan ROI profile")
-        self.ls_profile_plot.setLabel("bottom", "Distance")
-        self.ls_profile_plot.setLabel("left", "Counts in window")
+        self.ls_profile_plot.setLabel("bottom", "Position")
+        self.ls_profile_plot.setLabel("left", "Counts / s in window")
         self.ls_profile_plot.addLegend(offset=(10, 10))
+        self._ls_profile_hover = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#ffee66", width=1.5, style=Qt.DashLine),
+        )
+        self._ls_profile_hover.setVisible(False)
+        self.ls_profile_plot.addItem(self._ls_profile_hover)
         ls_plots_layout.addWidget(self.ls_profile_plot, stretch=1)
 
         self.quant_plot = pg.PlotWidget(title="Line-scan semi-quant")
-        self.quant_plot.setLabel("bottom", "Distance")
+        self.quant_plot.setLabel("bottom", "Position")
         self.quant_plot.setLabel("left", "Relative %")
         self.quant_plot.addLegend(offset=(10, 10))
+        self._ls_quant_hover = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#ffee66", width=1.5, style=Qt.DashLine),
+        )
+        self._ls_quant_hover.setVisible(False)
+        self.quant_plot.addItem(self._ls_quant_hover)
         ls_plots_layout.addWidget(self.quant_plot, stretch=1)
 
         self.ls_info_label = QLabel(
@@ -758,9 +859,11 @@ class MappingPanel(QWidget):
         )
         self.ls_info_label.setWordWrap(True)
         ls_plots_layout.addWidget(self.ls_info_label)
-        self.ls_content_stack.addWidget(ls_plots)
+        ls_view.addWidget(ls_plots)
+        ls_view.setSizes([440, 520])
+        self.ls_content_stack.addWidget(ls_view)
         ls_split.addWidget(self.ls_content_stack)
-        ls_split.setSizes([280, 720])
+        ls_split.setSizes([260, 900])
         self.workspace_tabs.addTab(ls_page, "Line scan")
 
         splitter.addWidget(self.workspace_tabs)
@@ -768,6 +871,16 @@ class MappingPanel(QWidget):
         root.addWidget(splitter)
 
         self._last_profiles = None  # dict name -> (dist, vals)
+        self._ls_profile_hover_proxy = pg.SignalProxy(
+            self.ls_profile_plot.scene().sigMouseMoved,
+            rateLimit=40,
+            slot=self._on_ls_profile_mouse,
+        )
+        self._ls_quant_hover_proxy = pg.SignalProxy(
+            self.quant_plot.scene().sigMouseMoved,
+            rateLimit=40,
+            slot=self._on_ls_profile_mouse,
+        )
 
     # -------------------------------------------------------------- wiring
     def set_fitter(self, fitter) -> None:
@@ -808,7 +921,16 @@ class MappingPanel(QWidget):
             f"{len(self.project.all_spectra())} spectra"
             + (f", {n_cubes} cube(s)" if n_cubes else "")
         )
+        if self.project.is_spectra_only():
+            n_pts = len(self.project.point_spectra())
+            self.info_label.setText(
+                f"{self.project.name}: {n_pts} point spectra, no maps or line scans. "
+                "Opening in Analysis so you can identify elements, then Process All "
+                "in Batch Analysis (already queued)."
+            )
+            self.nav_tabs.setCurrentIndex(1)
         self._fill_sample_tab()
+        self.project_loaded.emit(self.project)
 
     def _show_sample_info(self) -> None:
         self._fill_sample_tab()
@@ -1445,11 +1567,29 @@ class MappingPanel(QWidget):
         payload = item.data(0, Qt.UserRole)
         if not payload or payload[0] not in ("site", "spectrum", "linescan"):
             return
+        if not item.isSelected():
+            self.tree.clearSelection()
+            item.setSelected(True)
         menu = QMenu(self)
         act_ren = QAction("Rename…", self)
         act_ren.setShortcut(QKeySequence("F2"))
         act_ren.triggered.connect(lambda: self._prompt_rename(item, "Rename"))
         menu.addAction(act_ren)
+        if payload[0] == "spectrum":
+            act_an = QAction("Send to Analysis", self)
+            act_an.triggered.connect(self._send_selected_spectrum)
+            menu.addAction(act_an)
+            act_b = QAction("Send to Batch Analysis", self)
+            act_b.triggered.connect(self._send_selected_to_batch)
+            menu.addAction(act_b)
+        elif payload[0] == "linescan":
+            act_b = QAction("Send all points to Batch Analysis", self)
+            act_b.triggered.connect(self._send_selected_to_batch)
+            menu.addAction(act_b)
+        elif payload[0] == "site":
+            act_b = QAction("Send all site spectra to Batch Analysis", self)
+            act_b.triggered.connect(self._send_site_to_batch)
+            menu.addAction(act_b)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _checked_display_maps(self):
@@ -1622,11 +1762,7 @@ class MappingPanel(QWidget):
         self._fill_map_combos()
         self._fill_profile_map_list()
         self._fill_ls_element_list()
-        has_photo = fov.optical is not None
-        self.overlay_check.setEnabled(has_photo)
-        self.overlay_slider.setEnabled(has_photo)
-        self.overlay_cmap.setEnabled(has_photo)
-        self.overlay_mask_check.setEnabled(has_photo)
+        has_photo = self._sync_overlay_photo_controls()
         self.overlay_check.blockSignals(True)
         self.overlay_check.setChecked(has_photo)
         self.overlay_check.blockSignals(False)
@@ -1635,8 +1771,10 @@ class MappingPanel(QWidget):
             self.rgb_check.blockSignals(True)
             self.rgb_check.setChecked(False)
             self.rgb_check.blockSignals(False)
-        if has_photo:
+        if fov.optical is not None:
             self._select_combo_kind("optical")
+        elif has_photo:
+            self._select_combo_kind("whole_image")
         else:
             self._refresh_canvas()
         self._update_cube_controls()
@@ -1657,8 +1795,11 @@ class MappingPanel(QWidget):
     def _on_workspace_tab(self, index: int) -> None:
         if index == 1:
             self._update_line_scan_page()
-            if self._collected_line_scan() is not None and not self._last_ls_profiles:
+            ls = self._collected_line_scan()
+            if ls is not None and not self._last_ls_profiles:
                 self._replot_collected_line_scan()
+            elif ls is not None:
+                self._refresh_ls_camera(ls)
 
     def _update_workspace_for_fov(
         self, fov: MappingFOV, *, prefer_line_scan: bool = False
@@ -1690,9 +1831,16 @@ class MappingPanel(QWidget):
             self.ls_status_label.setText("No collected line scan in this site.")
             return
         tag = ls.display_label()
-        self.ls_status_label.setText(
-            f"{tag}: {ls.name}  ·  {ls.n_points} spectra"
-        )
+        span = float(ls.distances().max()) if ls.n_points else 0.0
+        if ls.is_multipoint:
+            self.ls_status_label.setText(
+                f"{tag}: {ls.name}  ·  {ls.n_points} spectra  ·  "
+                f"{span:.2f} mm along stage axis (not collection-path distance)"
+            )
+        else:
+            self.ls_status_label.setText(
+                f"{tag}: {ls.name}  ·  {ls.n_points} spectra  ·  {span:.2f} mm"
+            )
 
     def _collected_line_scan(self) -> Optional[LineScan]:
         """Instrument-collected line scan or multipoint (not a drawn map transect)."""
@@ -1723,6 +1871,20 @@ class MappingPanel(QWidget):
             for ls in self.current_fov.line_scans:
                 if ls.source != "drawn" and ls.n_points > 0:
                     return ls
+        return None
+
+    def _first_line_scan_on_sample(self) -> Optional[LineScan]:
+        """Collected series on this site, or another site of the same sample."""
+        ls = self._collected_line_scan()
+        if ls is not None:
+            return ls
+        sample = self._sample_for_site(self.current_fov) if self.current_fov else None
+        if sample is None:
+            return None
+        for site in sample.sites:
+            for cand in site.line_scans:
+                if cand.source != "drawn" and cand.n_points > 0:
+                    return cand
         return None
 
     def _fill_profile_map_list(self) -> None:
@@ -2291,7 +2453,9 @@ class MappingPanel(QWidget):
             self.rgb_check.blockSignals(True)
             self.rgb_check.setChecked(False)
             self.rgb_check.blockSignals(False)
-        if kind in ("whole_image", "overview"):
+        if kind in ("optical", "whole_image"):
+            self._select_overlay_target(kind)
+        if kind == "overview":
             self.overlay_check.blockSignals(True)
             self.overlay_check.setChecked(False)
             self.overlay_check.blockSignals(False)
@@ -2331,11 +2495,77 @@ class MappingPanel(QWidget):
             return fov.element_maps[0]
         return None
 
+    def _photo_availability(self) -> tuple:
+        """Return (has_map_area, has_sample_camera)."""
+        fov = self.current_fov
+        if fov is None:
+            return False, False
+        sample = self._sample_for_site(fov)
+        has_camera = sample is not None and sample.whole_image is not None
+        return fov.optical is not None, has_camera
+
+    def _select_overlay_target(self, kind: str) -> None:
+        for i in range(self.overlay_target.count()):
+            if self.overlay_target.itemData(i) == kind:
+                item = self.overlay_target.model().item(i)
+                if item is not None and not item.isEnabled():
+                    return
+                if self.overlay_target.currentIndex() != i:
+                    self.overlay_target.blockSignals(True)
+                    self.overlay_target.setCurrentIndex(i)
+                    self.overlay_target.blockSignals(False)
+                return
+
+    def _sync_overlay_photo_controls(self) -> bool:
+        """Enable overlay widgets from available photos. Returns True if any photo exists."""
+        has_optical, has_camera = self._photo_availability()
+        has_photo = has_optical or has_camera
+        for w in (
+            self.overlay_check,
+            self.overlay_target,
+            self.overlay_slider,
+            self.overlay_cmap,
+            self.overlay_mask_check,
+        ):
+            w.setEnabled(has_photo)
+        model = self.overlay_target.model()
+        for i in range(self.overlay_target.count()):
+            key = self.overlay_target.itemData(i)
+            enabled = (key == "optical" and has_optical) or (
+                key == "whole_image" and has_camera
+            )
+            item = model.item(i)
+            if item is not None:
+                item.setEnabled(enabled)
+        if has_photo:
+            current = self.overlay_target.currentData()
+            current_ok = (current == "optical" and has_optical) or (
+                current == "whole_image" and has_camera
+            )
+            if not current_ok:
+                self._select_overlay_target("optical" if has_optical else "whole_image")
+        return has_photo
+
+    def _overlay_photo(self):
+        """Return (photo array, short label) for the selected overlay target."""
+        fov = self.current_fov
+        if fov is None:
+            return None, ""
+        target = self.overlay_target.currentData() or "optical"
+        if target == "whole_image":
+            sample = self._sample_for_site(fov)
+            if sample is not None and sample.whole_image is not None:
+                return sample.whole_image.data, "sample camera"
+            return None, ""
+        if fov.optical is not None:
+            return fov.optical.data, "map area photo"
+        return None, ""
+
     def _show_photo_overlay(self) -> bool:
         fov = self.current_fov
-        if fov is None or fov.optical is None:
+        photo, photo_label = self._overlay_photo()
+        if fov is None or photo is None:
             return False
-        photo = fov.optical.data
         opacity = self.overlay_slider.value() / 100.0
         cmap = self.overlay_cmap.currentData() or "hot"
         mask_low = self.overlay_mask_check.isChecked()
@@ -2345,17 +2575,29 @@ class MappingPanel(QWidget):
         alpha = None
 
         if self.rgb_check.isChecked() and fov.element_maps:
-            r = self._enhanced_element_map(fov.find_map(self.r_combo.currentData() or ""))
-            g = self._enhanced_element_map(fov.find_map(self.g_combo.currentData() or ""))
-            b = self._enhanced_element_map(fov.find_map(self.b_combo.currentData() or ""))
+            r_src = fov.find_map(self.r_combo.currentData() or "")
+            g_src = fov.find_map(self.g_combo.currentData() or "")
+            b_src = fov.find_map(self.b_combo.currentData() or "")
+            r = self._enhanced_element_map(r_src)
+            g = self._enhanced_element_map(g_src)
+            b = self._enhanced_element_map(b_src)
             try:
                 overlay_rgb = rgb_composite(r, g, b)
             except Exception as exc:
                 self.status_message.emit(f"RGB overlay failed: {exc}")
                 return False
             coord = overlay_rgb[:, :, 0]
-            alpha = np.max(overlay_rgb, axis=2) if mask_low else None
-            title = "RGB on map area photo"
+            counts = None
+            for src in (r_src, g_src, b_src):
+                if src is None:
+                    continue
+                data = np.asarray(src.data, dtype=np.float64)
+                counts = data if counts is None else np.maximum(counts, data)
+            if counts is None:
+                counts = np.max(overlay_rgb, axis=2)
+            intensity = np.max(overlay_rgb, axis=2)
+            alpha = overlay_alpha(counts, intensity, mask_low=mask_low)
+            title = f"RGB on {photo_label}"
         else:
             em = self._overlay_map_source()
             if em is None:
@@ -2364,8 +2606,8 @@ class MappingPanel(QWidget):
             processed = self._process_map_array(em.data)
             overlay_rgb, scaled = colorize_map(processed, cmap=cmap)
             coord = processed
-            alpha = scaled if mask_low else None
-            title = f"{em.name} on map area photo"
+            alpha = overlay_alpha(em.data, scaled, mask_low=mask_low)
+            title = f"{em.name} on {photo_label}"
 
         try:
             blended = overlay_on_photo(
@@ -2385,10 +2627,12 @@ class MappingPanel(QWidget):
             return
 
         kind = self._combo_kind()
+        if kind != "whole_image":
+            self.canvas.clear_series_markers()
+        photo, _label = self._overlay_photo()
         overlay_ok = (
             self.overlay_check.isChecked()
-            and fov.optical is not None
-            and kind != "whole_image"
+            and photo is not None
             and kind != "overview"
         )
         if overlay_ok:
@@ -2469,6 +2713,14 @@ class MappingPanel(QWidget):
             self.canvas.set_image(arr, rgb=rgb, title=image.name or "Photo")
         except Exception as exc:
             self.status_message.emit(f"Photo display failed: {exc}")
+            return
+        kind = (getattr(image, "metadata", {}) or {}).get("kind")
+        if kind == "whole_image" or self._combo_kind() == "whole_image":
+            if self._ls_camera_model is None:
+                self._ls_camera_model = camera_from_image(image)
+            self._overlay_line_scan_on_maps_camera()
+        else:
+            self.canvas.clear_series_markers()
 
     def _clear_map_checks(self) -> None:
         """Uncheck element maps so a photo/overview can occupy the canvas."""
@@ -2981,6 +3233,7 @@ class MappingPanel(QWidget):
         legend = getattr(self.ls_profile_plot.plotItem, "legend", None)
         if legend is not None:
             legend.clear()
+        self.ls_profile_plot.addItem(self._ls_profile_hover)
 
     def _plot_profiles(self, profiles: dict) -> None:
         self._reset_profile_plot()
@@ -2988,6 +3241,215 @@ class MappingPanel(QWidget):
         for i, (name, (dist, vals)) in enumerate(profiles.items()):
             pen = pg.mkPen(colors[i % len(colors)], width=2)
             self.profile_plot.plot(dist, vals, pen=pen, name=name)
+
+    def _line_scan_axis_labels(self, line_scan: LineScan) -> None:
+        if line_scan.is_multipoint:
+            bottom = "Position along transect"
+        else:
+            bottom = "Distance along scan"
+        self.ls_profile_plot.setLabel("bottom", bottom, units="mm")
+        self.ls_profile_plot.setLabel("left", "Counts / s in window")
+        self.quant_plot.setLabel("bottom", bottom, units="mm")
+
+    @staticmethod
+    def _window_cps(spectrum, e_kev: float, half: float = 0.15) -> float:
+        """Live-time-normalized counts in a ±half keV window."""
+        e_ax = spectrum.energy
+        mask = (e_ax >= e_kev - half) & (e_ax <= e_kev + half)
+        counts = float(spectrum.counts[mask].sum()) if mask.any() else 0.0
+        live = float(spectrum.live_time or 0.0)
+        if live > 0:
+            return counts / live
+        return counts
+
+    def _sample_camera_image(self):
+        """Sample-level overview camera for the current site, if any."""
+        fov = self.current_fov
+        if fov is None:
+            return None
+        sample = self._sample_for_site(fov)
+        if sample is None or sample.whole_image is None:
+            return None
+        return sample.whole_image
+
+    def _refresh_ls_camera(self, line_scan: Optional[LineScan] = None) -> None:
+        image = self._sample_camera_image()
+        ls = line_scan or self._collected_line_scan()
+        if image is None:
+            self.ls_camera.clear_series_markers()
+            self._ls_cam_px = self._ls_cam_py = None
+            self._ls_camera_model = None
+            self.ls_camera_label.setText(
+                "No sample camera in this project — overlay needs the overview photo."
+            )
+            return
+        cam = camera_from_image(image)
+        self._ls_camera_model = cam
+        rgb = image.data.ndim == 3 and image.data.shape[-1] >= 3
+        try:
+            self.ls_camera.set_image(
+                image.data, rgb=rgb, title=image.name or "Sample camera"
+            )
+        except Exception as exc:
+            self.status_message.emit(f"Sample camera display failed: {exc}")
+            return
+        if ls is None or cam is None:
+            self.ls_camera.clear_series_markers()
+            self._ls_cam_px = self._ls_cam_py = None
+            return
+        coords = ls.stage_xy()
+        if coords is None:
+            self.ls_camera.clear_series_markers()
+            self._ls_cam_px = self._ls_cam_py = None
+            self.ls_camera_label.setText(
+                "This series has no stage coordinates to overlay on the camera."
+            )
+            return
+        order = ls.plot_order()
+        px, py = cam.stages_to_pixels(coords[order, 0], coords[order, 1])
+        # Keep pixel arrays aligned with original point index for hover lookup
+        px_all, py_all = cam.stages_to_pixels(coords[:, 0], coords[:, 1])
+        self._ls_cam_px, self._ls_cam_py = px_all, py_all
+        hi = self._ls_hover_index
+        hi_plot = None
+        if hi is not None:
+            matches = np.where(order == hi)[0]
+            if matches.size:
+                hi_plot = int(matches[0])
+        self.ls_camera.set_series_markers(
+            px, py, highlight=hi_plot, connect=True
+        )
+        n = ls.n_points
+        self.ls_camera_label.setText(
+            f"{n} points on the sample camera (stage {cam.fov_width_mm:.0f}×"
+            f"{cam.fov_height_mm:.0f} mm FOV, origin at centre). "
+            "Hover the profile or click a point."
+        )
+        self._overlay_line_scan_on_maps_camera(ls)
+
+    def _overlay_line_scan_on_maps_camera(self, line_scan: Optional[LineScan] = None) -> None:
+        """If Maps is showing the sample camera, overlay the same points."""
+        if self._combo_kind() != "whole_image":
+            return
+        ls = line_scan or self._first_line_scan_on_sample()
+        cam = self._ls_camera_model
+        if ls is None or cam is None:
+            self.canvas.clear_series_markers()
+            return
+        coords = ls.stage_xy()
+        if coords is None:
+            self.canvas.clear_series_markers()
+            return
+        order = ls.plot_order()
+        px, py = cam.stages_to_pixels(coords[order, 0], coords[order, 1])
+        hi = self._ls_hover_index
+        hi_plot = None
+        if hi is not None:
+            matches = np.where(order == hi)[0]
+            if matches.size:
+                hi_plot = int(matches[0])
+        self.canvas.set_series_markers(px, py, highlight=hi_plot, connect=True)
+
+    def _set_ls_hover_index(self, index: Optional[int]) -> None:
+        ls = self._collected_line_scan()
+        if index is not None and (ls is None or not (0 <= index < ls.n_points)):
+            index = None
+        if index == self._ls_hover_index and index is not None:
+            self._sync_ls_hover_overlays()
+            return
+        self._ls_hover_index = index
+        self._sync_ls_hover_overlays()
+        if index is None or ls is None:
+            return
+        pt = ls.points[index]
+        dist = ls.distances()
+        x_mm = float(dist[index]) if dist.size > index else 0.0
+        xy = ""
+        if pt.x is not None and pt.y is not None:
+            xy = f"  ·  stage ({pt.x:.3f}, {pt.y:.3f}) mm"
+        self.ls_camera_label.setText(
+            f"{pt.name}  ·  {x_mm:.2f} mm along transect{xy}"
+        )
+
+    def _sync_ls_hover_overlays(self) -> None:
+        idx = self._ls_hover_index
+        dist = None
+        ls = self._collected_line_scan()
+        if idx is not None and ls is not None:
+            d = ls.distances()
+            if d.size > idx:
+                dist = float(d[idx])
+        for line in (self._ls_profile_hover, self._ls_quant_hover):
+            if dist is None:
+                line.setVisible(False)
+            else:
+                line.setValue(dist)
+                line.setVisible(True)
+        if self._ls_cam_px is None or ls is None:
+            return
+        order = ls.plot_order()
+        hi_plot = None
+        if idx is not None:
+            matches = np.where(order == idx)[0]
+            if matches.size:
+                hi_plot = int(matches[0])
+        self.ls_camera.set_series_highlight(hi_plot)
+        if self._combo_kind() == "whole_image":
+            self.canvas.set_series_highlight(hi_plot)
+
+    def _nearest_ls_point_by_distance(self, x_mm: float) -> Optional[int]:
+        xs = self._ls_plot_x
+        order = self._ls_plot_order
+        if xs is None or order is None or xs.size == 0:
+            ls = self._collected_line_scan()
+            if ls is None:
+                return None
+            xs = ls.distances()
+            order = ls.plot_order()
+            if xs.size == 0:
+                return None
+        i = int(np.argmin(np.abs(xs - x_mm)))
+        return int(order[i])
+
+    def _nearest_ls_point_by_pixel(self, px: float, py: float) -> Optional[int]:
+        if self._ls_cam_px is None or self._ls_cam_py is None:
+            return None
+        d2 = (self._ls_cam_px - px) ** 2 + (self._ls_cam_py - py) ** 2
+        i = int(np.argmin(d2))
+        # Ignore clicks far from any point (~3 mm at 26 px/mm ≈ 80 px)
+        if float(np.sqrt(d2[i])) > 80.0:
+            return None
+        return i
+
+    def _on_ls_profile_mouse(self, event) -> None:
+        pos = event[0]
+        for plot in (self.ls_profile_plot, self.quant_plot):
+            if plot.sceneBoundingRect().contains(pos):
+                mouse = plot.plotItem.vb.mapSceneToView(pos)
+                idx = self._nearest_ls_point_by_distance(float(mouse.x()))
+                self._set_ls_hover_index(idx)
+                return
+
+    def _on_ls_camera_cursor(self, x, y, _val) -> None:
+        idx = self._nearest_ls_point_by_pixel(x, y)
+        if idx is not None:
+            self._set_ls_hover_index(idx)
+
+    def _on_ls_camera_clicked(self, x, y) -> None:
+        idx = self._nearest_ls_point_by_pixel(x, y)
+        if idx is None:
+            return
+        self._set_ls_hover_index(idx)
+        ls = self._collected_line_scan()
+        if ls is None:
+            return
+        pt = ls.points[idx]
+        self._select_spectrum_in_tree_root(pt.name)
+
+    def _select_spectrum_in_tree_root(self, name: str) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            if self._select_spectrum_in_tree(self.tree.topLevelItem(i), name):
+                return
 
     def _plot_ipj_line_scan(self, line_scan: LineScan, *, switch_tab: bool = False) -> None:
         """Plot windowed counts vs distance for a collected line / multipoint."""
@@ -3000,42 +3462,74 @@ class MappingPanel(QWidget):
         self._reset_ls_profile_plot()
         if line_scan.n_points == 0:
             return
+        self._line_scan_axis_labels(line_scan)
         xs = line_scan.distances()
+        order = line_scan.plot_order()
+        x_plot = xs[order]
         rois = self._effective_ls_rois()
         profiles = {}
         colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
         half = 0.15  # keV
         for ci, (sym, e_kev) in enumerate(rois):
-            series = []
-            for p in line_scan.points:
-                e_ax = p.spectrum.energy
-                mask = (e_ax >= e_kev - half) & (e_ax <= e_kev + half)
-                series.append(
-                    float(p.spectrum.counts[mask].sum()) if mask.any() else 0.0
-                )
-            ys = np.asarray(series, dtype=np.float64)
+            series = np.array(
+                [self._window_cps(p.spectrum, e_kev, half) for p in line_scan.points],
+                dtype=np.float64,
+            )
+            y_plot = series[order]
             label = f"{sym} ({e_kev:.2f} keV)"
-            profiles[label] = (xs, ys)
+            profiles[label] = (x_plot, y_plot)
+            color = colors[ci % len(colors)]
             self.ls_profile_plot.plot(
-                xs,
-                ys,
-                pen=pg.mkPen(colors[ci % len(colors)], width=2),
+                x_plot,
+                y_plot,
+                pen=pg.mkPen(color, width=2),
+                symbol="o",
+                symbolSize=7,
+                symbolBrush=color,
+                symbolPen=None,
                 name=label,
             )
 
         if not profiles:
-            totals = np.array([p.spectrum.total_counts for p in line_scan.points])
-            profiles = {"Total counts": (xs, totals)}
+            totals = np.array(
+                [
+                    (
+                        float(p.spectrum.total_counts) / float(p.spectrum.live_time)
+                        if p.spectrum.live_time
+                        else float(p.spectrum.total_counts)
+                    )
+                    for p in line_scan.points
+                ],
+                dtype=np.float64,
+            )
+            y_plot = totals[order]
+            profiles = {"Total counts / s": (x_plot, y_plot)}
             self.ls_profile_plot.plot(
-                xs, totals, pen=pg.mkPen("#377eb8", width=2), name="Total counts"
+                x_plot,
+                y_plot,
+                pen=pg.mkPen("#377eb8", width=2),
+                symbol="o",
+                symbolSize=7,
+                symbolBrush="#377eb8",
+                symbolPen=None,
+                name="Total counts / s",
             )
 
         n_roi = len(rois)
+        span = float(xs.max()) if xs.size else 0.0
+        where = (
+            f"vs stage position ({span:.2f} mm span)"
+            if line_scan.is_multipoint
+            else f"vs scan distance ({span:.2f} mm)"
+        )
         self.ls_info_label.setText(
             f"{line_scan.display_label()} “{line_scan.name}”: "
-            + (f"{n_roi} element ROI(s) — Fit / semi-quant uses this same list."
-               if n_roi else
-               "only total counts. Check elements above, or From Analysis.")
+            + (
+                f"{n_roi} element ROI(s) {where}. "
+                "Fit / semi-quant uses this same list."
+                if n_roi
+                else f"only total counts {where}. Check elements above, or From Analysis."
+            )
         )
         if n_roi == 0:
             self.status_message.emit(
@@ -3048,6 +3542,9 @@ class MappingPanel(QWidget):
                 f"{line_scan.display_label()}: {n_roi} element series ({names})"
             )
         self._last_ls_profiles = profiles
+        self._ls_plot_x = x_plot
+        self._ls_plot_order = order
+        self._refresh_ls_camera(line_scan)
         self._update_line_scan_page()
 
     def _on_cursor(self, x, y, val) -> None:
@@ -3130,6 +3627,163 @@ class MappingPanel(QWidget):
         self.spectrum_send_requested.emit(ms.spectrum, ms.peak_labels)
         self.status_message.emit(f"Sent “{ms.name}” to Analysis")
 
+    def _batch_display_name(self, ms: MapSpectrum, fov: Optional[MappingFOV] = None) -> str:
+        site = fov or (
+            self.project.find_fov_for_spectrum(ms) if self.project else None
+        )
+        if site is None:
+            return ms.name
+        sample = self._sample_name_for_site(site)
+        n_sites = len(self.project.fovs) if self.project else 1
+        if n_sites > 1:
+            return f"{sample} / {site.name} / {ms.name}"
+        return ms.name
+
+    def _pairs_for_batch(self, spectra: list) -> list:
+        pairs = []
+        for ms in spectra:
+            fov = (
+                self.project.find_fov_for_spectrum(ms)
+                if self.project
+                else self.current_fov
+            )
+            spec = ms.spectrum
+            if isinstance(spec.metadata, dict):
+                spec.metadata.setdefault("name", ms.name)
+            pairs.append((self._batch_display_name(ms, fov), spec))
+        return pairs
+
+    def _emit_batch_spectra(self, spectra: list, *, empty_message: str) -> None:
+        if not spectra:
+            QMessageBox.information(self, "Send to Batch", empty_message)
+            return
+        self.spectra_batch_requested.emit(self._pairs_for_batch(spectra))
+        noun = "spectrum" if len(spectra) == 1 else "spectra"
+        self.status_message.emit(f"Queued {len(spectra)} {noun} in Batch Analysis")
+
+    def _spectra_from_tree_item(self, item: QTreeWidgetItem) -> list:
+        payload = item.data(0, Qt.UserRole) if item else None
+        if not payload:
+            return []
+        kind = payload[0]
+        if kind == "spectrum":
+            fov = self._find_fov(payload[1])
+            if fov is None:
+                return []
+            name = payload[2]
+            for s in fov.spectra:
+                if s.name == name:
+                    return [s]
+            for ls in fov.line_scans:
+                for s in ls.points:
+                    if s.name == name:
+                        return [s]
+            return []
+        if kind == "linescan":
+            fov = self._find_fov(payload[1])
+            if fov is None:
+                return []
+            for ls in fov.line_scans:
+                if ls.name == payload[2]:
+                    return list(ls.points)
+            return []
+        if kind == "site":
+            fov_id = payload[2] if len(payload) > 2 else payload[1]
+            fov = self._find_fov(fov_id)
+            if fov is None:
+                return []
+            return fov.point_spectra()
+        return []
+
+    def _collect_selected_map_spectra(self) -> list:
+        items = self.tree.selectedItems()
+        out = []
+        seen: set[int] = set()
+        for item in items:
+            for ms in self._spectra_from_tree_item(item):
+                key = id(ms)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(ms)
+        return out
+
+    def _select_all_spectra(self) -> None:
+        self.tree.clearSelection()
+        count = 0
+
+        def walk(item: QTreeWidgetItem) -> None:
+            nonlocal count
+            payload = item.data(0, Qt.UserRole)
+            if payload and payload[0] == "spectrum":
+                found = self._spectra_from_tree_item(item)
+                if found and MappingFOV._is_sum_spectrum(found[0]):
+                    pass
+                else:
+                    item.setSelected(True)
+                    count += 1
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        self.tree.blockSignals(True)
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        self.tree.blockSignals(False)
+        if count:
+            self.status_message.emit(f"Selected {count} spectra in this site")
+        else:
+            QMessageBox.information(
+                self,
+                "Select spectra",
+                "This site has no spot or line-scan spectra to select.",
+            )
+
+    def _send_selected_to_batch(self) -> None:
+        spectra = self._collect_selected_map_spectra()
+        self._emit_batch_spectra(
+            spectra,
+            empty_message=(
+                "Select one or more spectra in Data (Shift/Ctrl-click), "
+                "or a line-scan folder, then send to Batch.\n\n"
+                "Use Select all spectra for every point in this site."
+            ),
+        )
+
+    def _send_site_to_batch(self) -> None:
+        fov = self.current_fov
+        spectra = fov.point_spectra() if fov else []
+        self._emit_batch_spectra(
+            spectra,
+            empty_message="This site has no spot or line/multipoint spectra to send.",
+        )
+
+    def _send_project_to_batch(self) -> None:
+        spectra = self.project.point_spectra() if self.project else []
+        if not spectra and self.project:
+            spectra = self.project.all_spectra()
+        self._emit_batch_spectra(
+            spectra,
+            empty_message="This project has no spectra to send to Batch.",
+        )
+
+    def _send_line_scan_to_batch(self) -> None:
+        line_scan = self._collected_line_scan()
+        if line_scan is None or line_scan.n_points == 0:
+            QMessageBox.information(
+                self,
+                "Send to Batch",
+                "No collected line scan or multipoint series in this site.",
+            )
+            return
+        selected = self._collect_selected_map_spectra()
+        point_ids = {id(p) for p in line_scan.points}
+        subset = [s for s in selected if id(s) in point_ids]
+        spectra = subset if subset else list(line_scan.points)
+        self._emit_batch_spectra(
+            spectra,
+            empty_message="This line scan has no points to send.",
+        )
+
     def _fit_line_scan(self) -> None:
         if self._fitter is None or self._element_panel is None:
             QMessageBox.warning(
@@ -3183,6 +3837,7 @@ class MappingPanel(QWidget):
         legend = getattr(self.quant_plot.plotItem, "legend", None)
         if legend is not None:
             legend.clear()
+        self.quant_plot.addItem(self._ls_quant_hover)
 
         n = line_scan.n_points
         progress = QProgressDialog(
@@ -3224,7 +3879,14 @@ class MappingPanel(QWidget):
                     min_separation_ev=fit_params.get("min_separation_ev"),
                 )
                 quant = self._fitter.quantify_elements(result.peaks, exp_params)
-                row = {"index": i, "name": pt.name, "distance": float(distances[i])}
+                row = {
+                    "index": i,
+                    "name": pt.name,
+                    "distance": float(distances[i]),
+                    "x": "" if pt.x is None else float(pt.x),
+                    "y": "" if pt.y is None else float(pt.y),
+                    "live_time": float(pt.spectrum.live_time or 0.0),
+                }
                 if isinstance(quant, dict):
                     for k, v in quant.items():
                         if isinstance(v, dict):
@@ -3249,17 +3911,28 @@ class MappingPanel(QWidget):
 
         self._quant_table = rows
         self._quant_distances = distances[: len(rows)]
+        self._line_scan_axis_labels(line_scan)
         colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628"]
-        element_keys = [
-            k for k in rows[0].keys() if k not in ("index", "name", "distance")
-        ]
-        plot_x = distances[: len(rows)]
+        skip = {"index", "name", "distance", "x", "y", "live_time"}
+        element_keys = [k for k in rows[0].keys() if k not in skip]
+        plot_x = np.asarray([r["distance"] for r in rows], dtype=np.float64)
+        order = (
+            np.argsort(plot_x, kind="mergesort")
+            if line_scan.is_multipoint
+            else np.arange(len(rows))
+        )
+        x_plot = plot_x[order]
         for ci, key in enumerate(element_keys):
-            ys = [r.get(key, np.nan) for r in rows]
+            ys = np.array([r.get(key, np.nan) for r in rows], dtype=np.float64)
+            color = colors[ci % len(colors)]
             self.quant_plot.plot(
-                plot_x,
-                ys,
-                pen=pg.mkPen(colors[ci % len(colors)], width=2),
+                x_plot,
+                ys[order],
+                pen=pg.mkPen(color, width=2),
+                symbol="o",
+                symbolSize=7,
+                symbolBrush=color,
+                symbolPen=None,
                 name=key,
             )
         done = (

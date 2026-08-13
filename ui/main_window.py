@@ -267,6 +267,8 @@ class MainWindow(QMainWindow):
         self.mapping_panel.set_fitter(self.fitter)
         self.mapping_panel.set_element_panel(self.element_panel)
         self.mapping_panel.spectrum_send_requested.connect(self.on_mapping_spectrum_sent)
+        self.mapping_panel.spectra_batch_requested.connect(self.on_mapping_spectra_to_batch)
+        self.mapping_panel.project_loaded.connect(self.on_mapping_project_loaded)
         self.mapping_panel.status_message.connect(
             lambda msg: self.status_bar.showMessage(msg, 5000)
         )
@@ -614,6 +616,49 @@ class MainWindow(QMainWindow):
             f"Loaded mapping spectrum into Analysis: {path_label or 'spectrum'}",
             5000,
         )
+
+    def on_mapping_spectra_to_batch(self, pairs, *, replace=False, switch_tab=True):
+        """Queue Mapping/IPJ spectra in Batch Analysis."""
+        added = self.batch_analysis_panel.add_spectra(pairs, replace=replace)
+        if added == 0:
+            self.status_bar.showMessage("Those spectra are already in Batch Analysis", 4000)
+            if switch_tab:
+                self.tab_widget.setCurrentWidget(self.batch_analysis_panel)
+            return
+        self.batch_analysis_panel._update_settings_summary()
+        if switch_tab:
+            self.tab_widget.setCurrentWidget(self.batch_analysis_panel)
+        n = self.batch_analysis_panel.file_list.count()
+        noun = "spectrum" if added == 1 else "spectra"
+        self.status_bar.showMessage(
+            f"Queued {added} {noun} in Batch Analysis "
+            f"({n} total). Identify elements in Analysis, then Process All.",
+            8000,
+        )
+
+    def on_mapping_project_loaded(self, project):
+        """Spectra-only IPJ: jump to Analysis and queue every point for batch."""
+        if project is None or not project.is_spectra_only():
+            return
+        points = project.point_spectra()
+        if not points:
+            points = project.all_spectra()
+        if not points:
+            return
+        try:
+            self.mapping_panel._copy_sample_to_analysis()
+        except Exception:
+            pass
+        pairs = self.mapping_panel._pairs_for_batch(points)
+        self.on_mapping_spectra_to_batch(pairs, replace=True, switch_tab=False)
+        first = points[0]
+        self.on_mapping_spectrum_sent(first.spectrum, first.peak_labels)
+        n = len(points)
+        self.status_bar.showMessage(
+            f"Spectra-only project: {n} point{'s' if n != 1 else ''} queued for "
+            "Batch. Identify elements here, then Process All in Batch Analysis.",
+            12000,
+        )
     
     def export_results(self):
         """Export analysis results"""
@@ -801,8 +846,6 @@ class MainWindow(QMainWindow):
             self.results_panel.set_formula_summary("")
             self.results_panel.set_quantification(concentrations)
 
-            # Sync identified sample elements onto Elements tab for review.
-            # User can uncheck false IDs / check missing ones, then Fit again.
             identified = []
             seen = set()
             for peak in self.fit_result.peaks:
@@ -812,9 +855,7 @@ class MainWindow(QMainWindow):
                     continue
                 seen.add(peak.element)
                 identified.append(peak.element)
-            if identified:
-                self.element_panel.set_selected_elements(identified)
-            
+
             n_quant = len(concentrations)
             fit_msg = (
                 f"Fitting complete: {len(self.fit_result.peaks)} peaks fitted, "
@@ -829,8 +870,8 @@ class MainWindow(QMainWindow):
                     fit_msg += f", applied {smart_report.n_applied}"
             if identified:
                 fit_msg += (
-                    f"; {len(identified)} element(s) on Elements tab — review, "
-                    f"then Fit again / Semi-Quant"
+                    f"; {len(identified)} fitted element"
+                    f"{'s' if len(identified) != 1 else ''}"
                 )
                 if hasattr(self, 'analysis_left_tabs'):
                     self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)

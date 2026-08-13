@@ -188,7 +188,12 @@ class SpectrumWidget(QWidget):
     def set_peak_markers(self, peaks, show=True):
         """
         Replace peak markers from fitted Peak objects or (energy, label) specs.
-        
+
+        Stick height is normalized per element: that element's strongest
+        fitted line is 100%, and its other lines (Kβ, L, …) scale to their
+        share of that element's area. Tube lines are a separate group.
+        Peaks without an area stay as full-height dashed markers.
+
         Args:
             peaks: List of Peak objects, or dicts with energy/element/line/is_tube_line
             show: If False, clear markers without drawing
@@ -196,37 +201,76 @@ class SpectrumWidget(QWidget):
         self.clear_peak_markers()
         if not show or not peaks:
             return
-        
+
+        def _attr(peak, name, default=None):
+            if hasattr(peak, name):
+                return getattr(peak, name, default)
+            if isinstance(peak, dict):
+                return peak.get(name, default)
+            return default
+
+        max_area = {}
         for peak in peaks:
-            if hasattr(peak, 'energy'):
-                energy = peak.energy
-                element = getattr(peak, 'element', None)
-                line = getattr(peak, 'line', None)
-                is_tube = getattr(peak, 'is_tube_line', False)
-            else:
-                energy = peak.get('energy')
-                element = peak.get('element')
-                line = peak.get('line')
-                is_tube = peak.get('is_tube_line', False)
-            
+            area = float(_attr(peak, "area", 0.0) or 0.0)
+            if area <= 0:
+                area = float(_attr(peak, "amplitude", 0.0) or 0.0)
+            if area <= 0:
+                continue
+            element = _attr(peak, "element")
+            is_tube = bool(_attr(peak, "is_tube_line", False))
             if is_tube:
-                color = '#9C27B0'
-                label = f"{element or 'Tube'}-{line or '?'}"
-            elif element and line:
-                color = '#E65100'
-                label = f"{element}-{line}"
+                key = ("tube", element or "Tube")
             elif element:
-                color = '#E65100'
-                label = str(element)
+                key = ("sample", element)
             else:
-                color = '#00897B'
+                key = ("unlabeled", None)
+            max_area[key] = max(max_area.get(key, 0.0), area)
+
+        for peak in peaks:
+            if hasattr(peak, "energy"):
+                energy = peak.energy
+            else:
+                energy = peak.get("energy")
+            element = _attr(peak, "element")
+            line = _attr(peak, "line")
+            is_tube = bool(_attr(peak, "is_tube_line", False))
+            area = float(_attr(peak, "area", 0.0) or 0.0)
+            if area <= 0:
+                area = float(_attr(peak, "amplitude", 0.0) or 0.0)
+
+            if is_tube:
+                color = "#9C27B0"
+                label = f"{element or 'Tube'}-{line or '?'}"
+                key = ("tube", element or "Tube")
+            elif element and line:
+                color = "#E65100"
+                label = f"{element}-{line}"
+                key = ("sample", element)
+            elif element:
+                color = "#E65100"
+                label = str(element)
+                key = ("sample", element)
+            else:
+                color = "#00897B"
                 label = f"{float(energy):.1f}"
-            
+                key = ("unlabeled", None)
+
+            denom = max_area.get(key, 0.0)
+            rel = (area / denom) if denom > 0 and area > 0 else None
+            if rel is not None:
+                pct = int(round(100.0 * rel))
+                label = f"{label} {pct}%"
+
             self.add_peak_marker(
-                energy, element=element, line=line, color=color, label=label,
+                energy,
+                element=element,
+                line=line,
+                color=color,
+                label=label,
+                relative_intensity=rel,
                 redraw=False,
             )
-        
+
         self._redraw_peak_markers()
     
     def clear_peak_markers(self):

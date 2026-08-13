@@ -255,20 +255,52 @@ def colorize_map(
     """
     Map a 2D intensity array to RGB in [0, 1] plus an alpha mask in [0, 1].
 
-    Alpha follows scaled intensity so empty pixels stay transparent.
+    Alpha follows scaled intensity. Pixels with counts <= 0 are alpha 0 so
+    they stay fully transparent in a photo overlay.
     """
     arr = np.asarray(data, dtype=np.float64)
     if arr.ndim != 2:
         raise ValueError("colorize_map expects a 2D array")
     lut_fn = COLORMAPS.get((cmap or "hot").lower(), _lut_hot)
     lut = lut_fn(256)
+    lut[0] = 0.0
     lo, hi = np.percentile(arr, percentile)
     if hi <= lo:
         hi = lo + 1.0
     scaled = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    present = np.isfinite(arr) & (arr > 0)
+    scaled = np.where(present, scaled, 0.0)
     idx = np.clip((scaled * 255).astype(np.int32), 0, 255)
     rgb = lut[idx]
+    rgb = np.where(present[:, :, None], rgb, 0.0)
     return rgb, scaled
+
+
+def overlay_alpha(
+    counts: np.ndarray,
+    intensity: Optional[np.ndarray] = None,
+    *,
+    mask_low: bool = True,
+) -> np.ndarray:
+    """
+    Per-pixel overlay alpha in [0, 1].
+
+    Pixels with counts <= 0 (or non-finite) are always fully transparent.
+    If ``mask_low`` is True, remaining pixels follow ``intensity`` (typically
+    0–1 scaled counts); otherwise they are opaque before global opacity.
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    if intensity is None:
+        intensity = counts
+    else:
+        intensity = np.asarray(intensity, dtype=np.float64)
+    if intensity.shape != counts.shape:
+        raise ValueError("overlay_alpha intensity must match counts shape")
+    if mask_low:
+        alpha = np.clip(intensity, 0.0, 1.0)
+    else:
+        alpha = np.ones(counts.shape, dtype=np.float64)
+    return np.where(np.isfinite(counts) & (counts > 0), alpha, 0.0)
 
 
 def overlay_on_photo(
@@ -282,8 +314,9 @@ def overlay_on_photo(
     Alpha-blend an RGB overlay onto an optical photo.
 
     The overlay is resized to the photo. ``opacity`` is 0–1. If ``alpha`` is
-    given (0–1, same shape as the overlay before resize), low-count pixels
-    stay more transparent. Returns HxWx3 float in [0, 1].
+    given (0–1, same shape as the overlay before resize), it is resized with
+    nearest-neighbor so zero-count pixels stay fully transparent. Returns
+    HxWx3 float in [0, 1].
     """
     photo_arr = np.asarray(photo, dtype=np.float64)
     if photo_arr.ndim == 2:
@@ -310,7 +343,8 @@ def overlay_on_photo(
     else:
         a = np.asarray(alpha, dtype=np.float64)
         if a.shape != (h, w):
-            a = resize_to(a, h, w, order=1)
+            # Nearest-neighbor so zero-count pixels stay fully transparent
+            a = resize_to(a, h, w, order=0)
         a = np.clip(a, 0.0, 1.0) * opac
     a3 = a[:, :, None]
     return np.clip(photo_arr * (1.0 - a3) + over * a3, 0.0, 1.0)

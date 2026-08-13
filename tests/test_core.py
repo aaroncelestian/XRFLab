@@ -155,6 +155,41 @@ def test_synthetic_fit_smoke():
     assert isinstance(quant, dict)
 
 
+def test_fit_spectrum_accepts_bare_element_symbols():
+    from core.fitting import SpectrumFitter
+
+    energy = np.linspace(5.0, 10.0, 400)
+    counts = np.full_like(energy, 40.0)
+    counts += 600.0 * np.exp(-((energy - 6.40) ** 2) / (2 * 0.06**2))
+    fitter = SpectrumFitter()
+    # Line-scan tab passes symbols, not {'symbol','z'} dicts
+    positions = fitter.build_peak_positions(
+        energy,
+        counts_bg_subtracted=counts,
+        elements=["Fe", "As"],
+        auto_find_peaks=False,
+        include_tube_lines=False,
+        include_compton=False,
+        tube_element=None,
+    )
+    labeled = {p["element"] for p in positions if p.get("element")}
+    assert "Fe" in labeled
+    result = fitter.fit_spectrum(
+        energy=energy,
+        counts=counts,
+        elements=["Fe", "As"],
+        background_method="snip",
+        peak_shape="gaussian",
+        auto_find_peaks=False,
+        include_tube_lines=False,
+        include_compton=False,
+        tube_element=None,
+    )
+    assert result.peaks
+    quant = fitter.quantify_elements(result.peaks)
+    assert isinstance(quant, dict)
+
+
 def test_batch_processor_api_alignment(tmp_path, io_handler):
     from core.batch_processing import BatchProcessor, BatchProcessingConfig
 
@@ -270,3 +305,62 @@ def test_auto_id_pb_requires_l_alpha():
     assert "Lα" in labeled[0]["line"]
     assert labeled[1]["element"] == "Pb"
     assert labeled[1]["line"].startswith("M")
+
+
+def test_batch_processor_in_memory_spectrum(io_handler):
+    from core.batch_processing import BatchProcessor, BatchProcessingConfig
+
+    spectrum = io_handler.load_spectrum(str(SAMPLE_STEEL))
+    spectrum.metadata["name"] = "steel_in_memory"
+    config = BatchProcessingConfig(
+        elements=[{"symbol": "Fe", "z": 26}],
+        background_method="snip",
+        peak_shape="gaussian",
+        include_tube_lines=False,
+        include_compton=False,
+        auto_find_peaks=False,
+        excitation_kv=50.0,
+    )
+    processor = BatchProcessor(config)
+    results = processor.process_spectrum_list([spectrum])
+    assert len(results) == 1
+    assert results[0].spectrum_name == "steel_in_memory"
+    assert results[0].fit_success or results[0].error_message
+
+
+def test_mapping_project_spectra_only_helpers():
+    from core.mapping.models import MappingFOV, MappingProject, MapSpectrum
+    from core.spectrum import Spectrum
+
+    energy = np.linspace(0.0, 10.0, 64)
+    counts = np.ones(64)
+    spec = Spectrum(energy=energy, counts=counts, metadata={"name": "Spectrum 1"})
+    spot = MapSpectrum(spectrum=spec, name="Spectrum 1", kind="spot")
+    summed = MapSpectrum(
+        spectrum=Spectrum(energy=energy, counts=counts * 2, metadata={"name": "Sum Spectrum"}),
+        name="Sum Spectrum",
+        kind="sum",
+    )
+    site = MappingFOV(id="s1", name="Site 1", spectra=[spot, summed])
+    project = MappingProject(path="points.ipj", fovs=[site])
+    assert project.is_spectra_only()
+    points = project.point_spectra()
+    assert [p.name for p in points] == ["Spectrum 1"]
+    assert not project.has_spatial_data()
+
+    mapped = MappingFOV(
+        id="s2",
+        name="Site 2",
+        spectra=[spot],
+        element_maps=[],
+    )
+    mapped.element_maps = []
+    # A site with only spectra is still spectra-only; add a dummy map via spatial flag
+    from core.mapping.models import ElementMap
+
+    mapped.element_maps.append(
+        ElementMap(name="Fe Ka1", data=np.zeros((4, 4)))
+    )
+    mapped_project = MappingProject(path="maps.ipj", fovs=[mapped])
+    assert mapped_project.has_spatial_data()
+    assert not mapped_project.is_spectra_only()

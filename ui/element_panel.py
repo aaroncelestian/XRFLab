@@ -729,6 +729,34 @@ class ElementPanel(QWidget):
         """Handle periodic table selection changes"""
         self.selected_elements = elements
         self.elements_changed.emit(self.selected_elements)
+        self._drop_unselected_peak_labels()
+
+    def _drop_unselected_peak_labels(self):
+        """Unlabeled peak-list rows for elements the user just unchecked."""
+        if not getattr(self, "_peak_list_data", None):
+            return
+        if not hasattr(self, "peak_list_widget"):
+            return
+        allowed = {
+            e.get("symbol")
+            for e in (self.selected_elements or [])
+            if e.get("symbol")
+        }
+        changed = False
+        for entry in self._peak_list_data:
+            if entry.get("is_tube_line"):
+                continue
+            el = entry.get("element")
+            if el and el not in allowed:
+                entry["element"] = None
+                entry["line"] = None
+                changed = True
+        if not changed:
+            return
+        self.peak_list_widget.clear()
+        for entry in self._peak_list_data:
+            self.peak_list_widget.addItem(self._format_peak_item(entry))
+        self.peak_list_changed.emit()
     
     def _show_element_info(self, symbol, z):
         """Show detailed element information dialog"""
@@ -796,8 +824,8 @@ class ElementPanel(QWidget):
         """
         Select elements on the periodic table by symbol list.
 
-        Used after a fit to populate the Elements tab with identified
-        sample elements so the user can uncheck false IDs and refit.
+        Used by Peak Find / Auto-ID to seed the Elements tab. Fitting does
+        not overwrite this list — unchecking an element must stick.
         """
         symbols = [s for s in (symbols or []) if s]
         self.periodic_table.set_selected_elements(symbols)

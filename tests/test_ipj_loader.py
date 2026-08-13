@@ -112,6 +112,15 @@ def test_dylan_point_series_and_maps(dylan):
     assert ls.kind == "multipoint"
     assert ls.is_multipoint
     assert "Multipoint" in ls.name
+    # Collection order zigzags (~55 mm travel); the spots only span ~11 mm
+    path = ls.path_distances()
+    proj = ls.distances()
+    assert float(path[-1]) > 40.0
+    assert 10.0 < float(proj.max()) < 15.0
+    np.testing.assert_allclose(proj, ls.projected_positions())
+    # Plot order is spatial, so the abscissa is monotonic
+    order = ls.plot_order()
+    assert np.all(np.diff(proj[order]) >= -1e-12)
 
 
 def test_barstow_point_series_is_multipoint(barstow):
@@ -149,6 +158,41 @@ def test_classify_equal_vs_irregular_steps():
         _pt(5, 5.1, 3.2),
     ]
     assert classify_point_series_kind(multi) == "multipoint"
+
+
+def test_multipoint_distances_use_projected_axis_not_path():
+    """Zigzag collection order must not inflate the profile x-axis."""
+    from core.mapping.models import LineScan, MapSpectrum
+    from core.spectrum import Spectrum
+
+    def _pt(i, x, y):
+        sp = Spectrum(
+            energy=np.arange(4, dtype=np.float64),
+            counts=np.ones(4, dtype=np.float64),
+            live_time=1.0,
+            real_time=1.0,
+            metadata={"name": f"Spectrum {i}"},
+        )
+        return MapSpectrum(
+            spectrum=sp, name=f"Spectrum {i}", x=x, y=y, index=i, kind="line_point"
+        )
+
+    # Collect 0 → 1 → 2 → 1 (backtrack). Path travel = 3; spatial span = 2.
+    pts = [_pt(1, 0.0, 0.0), _pt(2, 1.0, 0.0), _pt(3, 2.0, 0.0), _pt(4, 1.0, 0.0)]
+    ls = LineScan(name="multi", points=pts, source="ipj", kind="multipoint")
+    path = ls.path_distances()
+    proj = ls.projected_positions()
+    np.testing.assert_allclose(path, [0.0, 1.0, 2.0, 3.0])
+    np.testing.assert_allclose(proj, [0.0, 1.0, 2.0, 1.0])
+    np.testing.assert_allclose(ls.distances(), proj)
+    np.testing.assert_array_equal(ls.plot_order(), [0, 1, 3, 2])
+
+    line_pts = [_pt(i, float(i), 0.0) for i in range(1, 6)]
+    line = LineScan(
+        name="line", points=line_pts, source="ipj", kind="line_scan"
+    )
+    np.testing.assert_allclose(line.distances(), line.path_distances())
+    np.testing.assert_array_equal(line.plot_order(), np.arange(5))
 
 
 def test_emerald_element_maps(emerald):
@@ -321,3 +365,16 @@ def test_optical_camera_bmps(barstow, dylan, emerald):
     dylan_opt = next((f for f in dylan.fovs if f.optical is not None), None)
     assert dylan_opt is not None
     assert dylan_opt.optical.data.ndim == 3
+
+
+def test_point_spectra_skip_sum_and_spectra_only_flag(barstow, dylan):
+    assert not barstow.is_spectra_only()
+    assert barstow.has_spatial_data()
+    points = barstow.point_spectra()
+    assert points
+    assert all("sum" not in p.name.lower() for p in points)
+    assert dylan.has_spatial_data() or dylan.has_line_scans()
+    assert not dylan.is_spectra_only()
+    ls_fov = next(f for f in dylan.fovs if f.line_scans)
+    ls_points = ls_fov.point_spectra()
+    assert len(ls_points) == ls_fov.line_scans[0].n_points or len(ls_points) >= ls_fov.line_scans[0].n_points

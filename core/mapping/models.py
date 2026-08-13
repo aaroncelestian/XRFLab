@@ -110,25 +110,30 @@ class LineScan:
             return "Multipoint"
         return "Line scan"
 
-    def distances(self) -> np.ndarray:
-        """Path distance along points, or unit index spacing as fallback."""
+    def stage_xy(self) -> Optional[np.ndarray]:
+        """N×2 stage coordinates, or None if any point is missing XY."""
+        return self._stage_xy()
+
+    def _stage_xy(self) -> Optional[np.ndarray]:
+        """N×2 stage coordinates, or None if any point is missing XY."""
+        n = self.n_points
+        if n < 2:
+            return None
+        xs = [p.x for p in self.points]
+        ys = [p.y for p in self.points]
+        if not all(v is not None for v in xs) or not all(v is not None for v in ys):
+            return None
+        coords = np.column_stack(
+            [np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)]
+        )
+        if not np.all(np.isfinite(coords)):
+            return None
+        return coords
+
+    def _index_distances(self) -> np.ndarray:
         n = self.n_points
         if n == 0:
             return np.array([])
-        xs = [p.x for p in self.points]
-        ys = [p.y for p in self.points]
-        if (
-            all(v is not None for v in xs)
-            and all(v is not None for v in ys)
-            and n > 1
-        ):
-            coords = np.column_stack(
-                [np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)]
-            )
-            steps = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
-            out = np.zeros(n, dtype=np.float64)
-            out[1:] = np.cumsum(steps)
-            return out
         if self.start_xy is not None and self.end_xy is not None and n > 1:
             length = float(
                 np.hypot(
@@ -138,6 +143,56 @@ class LineScan:
             )
             return np.linspace(0.0, length, n)
         return np.arange(n, dtype=np.float64)
+
+    def path_distances(self) -> np.ndarray:
+        """Cumulative travel in current point order (collection / index)."""
+        coords = self._stage_xy()
+        n = self.n_points
+        if coords is None:
+            return self._index_distances()
+        steps = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
+        out = np.zeros(n, dtype=np.float64)
+        out[1:] = np.cumsum(steps)
+        return out
+
+    def projected_positions(self) -> np.ndarray:
+        """
+        Position along the best-fit stage axis, origin at the minimum.
+
+        For a roughly colinear series this is distance along the transect and
+        does not inflate when collection order jumps back and forth.
+        """
+        coords = self._stage_xy()
+        if coords is None:
+            return self._index_distances()
+        centered = coords - coords.mean(axis=0)
+        gram = centered.T @ centered
+        evals, evecs = np.linalg.eigh(gram)
+        if float(np.max(evals)) <= 1e-18:
+            return self.path_distances()
+        axis = evecs[:, int(np.argmax(evals))]
+        # Point toward + of the original axis with the larger span
+        spans = np.ptp(coords, axis=0)
+        dom = int(np.argmax(spans))
+        if axis[dom] < 0:
+            axis = -axis
+        proj = coords @ axis
+        return proj - float(np.min(proj))
+
+    def distances(self) -> np.ndarray:
+        """Profile abscissa: path for line scans, projected position for multipoint."""
+        if self.is_multipoint:
+            return self.projected_positions()
+        return self.path_distances()
+
+    def plot_order(self) -> np.ndarray:
+        """Indices that plot left-to-right along ``distances()``."""
+        xs = self.distances()
+        if xs.size == 0:
+            return np.array([], dtype=int)
+        if self.is_multipoint:
+            return np.argsort(xs, kind="mergesort")
+        return np.arange(len(xs), dtype=int)
 
 
 @dataclass
@@ -191,6 +246,47 @@ class MappingFOV:
             if s.kind != "roi" and "sum" in s.name.lower():
                 return s
         return None
+
+    def has_spatial_data(self) -> bool:
+        """True if this site has maps, a cube, or an overview/optical image."""
+        return bool(
+            self.element_maps
+            or self.cube is not None
+            or self.overview is not None
+            or self.optical is not None
+        )
+
+    @staticmethod
+    def _is_sum_spectrum(ms: MapSpectrum) -> bool:
+        if ms.kind == "sum":
+            return True
+        return "sum" in (ms.name or "").lower()
+
+    def point_spectra(self, *, include_sum: bool = False) -> List[MapSpectrum]:
+        """Spot and line/multipoint spectra suitable for batch fitting.
+
+        Line-scan points are often listed both on ``spectra`` and on
+        ``line_scans``; this returns each spectrum once. Map sum spectra are
+        omitted unless ``include_sum`` is True.
+        """
+        out: List[MapSpectrum] = []
+        seen: set[int] = set()
+
+        def add(ms: MapSpectrum) -> None:
+            key = id(ms)
+            if key in seen:
+                return
+            if not include_sum and self._is_sum_spectrum(ms):
+                return
+            seen.add(key)
+            out.append(ms)
+
+        for ls in self.line_scans:
+            for point in ls.points:
+                add(point)
+        for spec in self.spectra:
+            add(spec)
+        return out
 
     def add_roi_map_from_cube(
         self,
@@ -530,11 +626,51 @@ class MappingProject:
 
     def all_spectra(self) -> List[MapSpectrum]:
         out: List[MapSpectrum] = []
+        seen: set[int] = set()
         for fov in self.fovs:
-            out.extend(fov.spectra)
+            for ms in fov.spectra:
+                if id(ms) not in seen:
+                    seen.add(id(ms))
+                    out.append(ms)
             for ls in fov.line_scans:
-                out.extend(ls.points)
+                for ms in ls.points:
+                    if id(ms) not in seen:
+                        seen.add(id(ms))
+                        out.append(ms)
         return out
+
+    def has_spatial_data(self) -> bool:
+        return any(site.has_spatial_data() for site in self.fovs)
+
+    def has_line_scans(self) -> bool:
+        return any(site.line_scans for site in self.fovs)
+
+    def is_spectra_only(self) -> bool:
+        """Point spectra with no maps, images, or collected line/multipoint series."""
+        if self.has_spatial_data() or self.has_line_scans():
+            return False
+        return any(site.point_spectra() for site in self.fovs)
+
+    def point_spectra(self, *, include_sum: bool = False) -> List[MapSpectrum]:
+        out: List[MapSpectrum] = []
+        seen: set[int] = set()
+        for fov in self.fovs:
+            for ms in fov.point_spectra(include_sum=include_sum):
+                key = id(ms)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(ms)
+        return out
+
+    def find_fov_for_spectrum(self, ms: MapSpectrum) -> Optional[MappingFOV]:
+        for fov in self.fovs:
+            if ms in fov.spectra:
+                return fov
+            for ls in fov.line_scans:
+                if ms in ls.points:
+                    return fov
+        return None
 
 
 def _element_from_line_name(name: str) -> str:

@@ -25,16 +25,16 @@ class BatchProcessingWorker(QThread):
     finished = Signal(list)  # List of BatchFitResult
     error = Signal(str)
     
-    def __init__(self, processor, file_paths):
+    def __init__(self, processor, jobs):
         super().__init__()
         self.processor = processor
-        self.file_paths = file_paths
+        self.jobs = jobs
     
     def run(self):
         """Run batch processing in background"""
         try:
-            results = self.processor.process_file_list(
-                self.file_paths,
+            results = self.processor.process_jobs(
+                self.jobs,
                 progress_callback=self.progress.emit
             )
             self.finished.emit(results)
@@ -58,6 +58,7 @@ class BatchAnalysisPanel(QWidget):
         self.current_result = None
         self.element_panel = None  # Will be set from main window
         self._instrument_state = None
+        self._memory_spectra = {}  # display name -> Spectrum (IPJ / Mapping)
         
         self._init_ui()
 
@@ -258,7 +259,8 @@ class BatchAnalysisPanel(QWidget):
         self.file_list = QListWidget()
         self.file_list.setMinimumHeight(140)
         self.file_list.setToolTip(
-            "Spectra to process with the Analysis-tab settings"
+            "Spectra to process with the Analysis-tab settings.\n"
+            "Add files here, or send a line scan / site subset from Mapping."
         )
         layout.addWidget(self.file_list, stretch=1)
 
@@ -289,6 +291,7 @@ class BatchAnalysisPanel(QWidget):
 
     def _clear_files(self):
         self.file_list.clear()
+        self._memory_spectra.clear()
         self._update_file_count()
 
     def _create_processing_controls_group(self):
@@ -511,6 +514,42 @@ class BatchAnalysisPanel(QWidget):
         
         return widget
     
+    def add_spectra(self, items, *, replace=False):
+        """Queue in-memory spectra (from Mapping / IPJ).
+
+        ``items`` is an iterable of Spectrum or (display_name, Spectrum).
+        """
+        if replace:
+            self._clear_files()
+        existing = {
+            self.file_list.item(i).text() for i in range(self.file_list.count())
+        }
+        added = 0
+        for item in items or []:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                name, spec = item[0], item[1]
+            else:
+                spec = item
+                name = None
+            if spec is None:
+                continue
+            display = str(name or getattr(spec, "metadata", {}).get("name") or "spectrum")
+            if display in existing:
+                continue
+            meta = getattr(spec, "metadata", None)
+            if isinstance(meta, dict):
+                meta["name"] = display
+                meta.setdefault("source_label", display)
+            self._memory_spectra[display] = spec
+            list_item = QListWidgetItem(display)
+            list_item.setToolTip("In-memory spectrum (from Mapping / IPJ)")
+            self.file_list.addItem(list_item)
+            existing.add(display)
+            added += 1
+        if added:
+            self._update_file_count()
+        return added
+
     def _add_files(self):
         """Add spectrum files"""
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -543,7 +582,16 @@ class BatchAnalysisPanel(QWidget):
     def _update_file_count(self):
         """Update file count label"""
         count = self.file_list.count()
-        self.file_count_label.setText(f"{count} file{'s' if count != 1 else ''}")
+        n_mem = len(self._memory_spectra)
+        if n_mem and n_mem == count:
+            noun = "spectrum" if count == 1 else "spectra"
+            self.file_count_label.setText(f"{count} {noun}")
+        elif n_mem:
+            self.file_count_label.setText(
+                f"{count} item{'s' if count != 1 else ''} ({n_mem} from Mapping)"
+            )
+        else:
+            self.file_count_label.setText(f"{count} file{'s' if count != 1 else ''}")
         # Update settings to check if elements are selected
         self._update_settings_summary()
         self.process_btn.setEnabled(count > 0 and len(self.config.elements) > 0)
@@ -558,16 +606,21 @@ class BatchAnalysisPanel(QWidget):
             QMessageBox.warning(self, "No Elements", "Please select elements to fit.")
             return
         
-        # Get file paths
-        file_paths = []
+        jobs = []
         for i in range(self.file_list.count()):
-            file_paths.append(Path(self.file_list.item(i).text()))
+            item = self.file_list.item(i)
+            name = item.text()
+            spec = self._memory_spectra.get(name)
+            if spec is not None:
+                jobs.append(spec)
+            else:
+                jobs.append(Path(name))
         
         # Create processor
         self.processor = BatchProcessor(self.config)
         
         # Create worker
-        self.worker = BatchProcessingWorker(self.processor, file_paths)
+        self.worker = BatchProcessingWorker(self.processor, jobs)
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_processing_complete)
         self.worker.error.connect(self._on_processing_error)

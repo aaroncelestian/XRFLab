@@ -48,6 +48,7 @@ class MapCanvas(QWidget):
     line_drawn = Signal(float, float, float, float)  # x0, y0, x1, y1
     cursor_moved = Signal(float, float, float)  # x, y, value
     pixel_clicked = Signal(float, float)  # x, y (map coords)
+    view_clicked = Signal(float, float)  # idle click (not line/pick/region)
     region_drawn = Signal(str, object)  # kind, params
 
     def __init__(self, parent=None):
@@ -72,6 +73,8 @@ class MapCanvas(QWidget):
         self._rgb_mode = False
         self._click_proxy = None
         self._move_proxy = None
+        self._series_xy: Optional[Tuple[list, list]] = None
+        self._series_highlight: Optional[int] = None
 
         self._build_single_panel()
         self._connect_scene()
@@ -136,6 +139,57 @@ class MapCanvas(QWidget):
                 p["spot"].setData([])
             else:
                 p["spot"].setData(x=list(xs), y=list(ys))
+
+    def set_series_markers(
+        self,
+        xs,
+        ys,
+        *,
+        highlight: Optional[int] = None,
+        connect: bool = True,
+    ) -> None:
+        """Overlay a collected line / multipoint series in image coordinates."""
+        if xs is None or ys is None or len(xs) == 0:
+            self.clear_series_markers()
+            return
+        self._series_xy = (list(xs), list(ys))
+        self._series_highlight = highlight
+        self._apply_series_markers(connect=connect)
+
+    def set_series_highlight(self, index: Optional[int]) -> None:
+        self._series_highlight = None if index is None else int(index)
+        self._apply_series_markers()
+
+    def clear_series_markers(self) -> None:
+        self._series_xy = None
+        self._series_highlight = None
+        for p in self._panels:
+            if "series" in p:
+                p["series"].setData([])
+            if "series_path" in p:
+                p["series_path"].setData([], [])
+            if "series_hi" in p:
+                p["series_hi"].setData([])
+
+    def _apply_series_markers(self, *, connect: bool = True) -> None:
+        if self._series_xy is None:
+            self.clear_series_markers()
+            return
+        xs, ys = self._series_xy
+        hi = self._series_highlight
+        for p in self._panels:
+            if "series_path" in p:
+                if connect and len(xs) >= 2:
+                    p["series_path"].setData(xs, ys)
+                else:
+                    p["series_path"].setData([], [])
+            if "series" in p:
+                p["series"].setData(x=xs, y=ys)
+            if "series_hi" in p:
+                if hi is not None and 0 <= hi < len(xs):
+                    p["series_hi"].setData(x=[xs[hi]], y=[ys[hi]])
+                else:
+                    p["series_hi"].setData([])
 
     def set_line(
         self,
@@ -309,6 +363,23 @@ class MapCanvas(QWidget):
             pen=pg.mkPen(None),
         )
         view.addItem(spot)
+        series_path = pg.PlotDataItem(pen=pg.mkPen("#00e5ff", width=1.5))
+        series_path.setZValue(20)
+        view.addItem(series_path)
+        series = pg.ScatterPlotItem(
+            size=8,
+            brush=pg.mkBrush(0, 220, 255, 210),
+            pen=pg.mkPen("#003344", width=0.8),
+        )
+        series.setZValue(21)
+        view.addItem(series)
+        series_hi = pg.ScatterPlotItem(
+            size=18,
+            brush=pg.mkBrush(255, 220, 40, 240),
+            pen=pg.mkPen("#ffffff", width=2),
+        )
+        series_hi.setZValue(22)
+        view.addItem(series_hi)
         region = pg.PlotDataItem(
             pen=pg.mkPen("#00e5ff", width=2),
             fillLevel=None,
@@ -323,6 +394,9 @@ class MapCanvas(QWidget):
             "band_b": band_b,
             "band_poly": band_poly,
             "spot": spot,
+            "series": series,
+            "series_path": series_path,
+            "series_hi": series_hi,
             "region": region,
             "data": None,
             "title": "",
@@ -405,6 +479,8 @@ class MapCanvas(QWidget):
                 self._set_panel_band(p, None)
         if self._region_outline is not None:
             self.set_region_outline(*self._region_outline)
+        if self._series_xy is not None:
+            self._apply_series_markers()
 
     def _local_to_data(self, panel: dict, x: float, y: float) -> Tuple[float, float]:
         """Convert ImageItem local pixels to original map coordinates."""
@@ -472,6 +548,7 @@ class MapCanvas(QWidget):
             return
 
         if not self._line_mode:
+            self.view_clicked.emit(x, y)
             return
         if not self._drawing or self._start is None:
             self._start = (x, y)

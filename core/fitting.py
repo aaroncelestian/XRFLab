@@ -50,6 +50,34 @@ class SpectrumFitter:
             return
         instrument_state.apply_to_fitter(self)
         self.peak_fitter.activate()
+
+    @staticmethod
+    def _element_dicts(elements) -> List[Dict]:
+        """Accept Analysis dicts or bare symbols; return [{'symbol', 'z'}, ...]."""
+        from core.advanced_peak_fitting import get_element_z
+
+        out: List[Dict] = []
+        seen = set()
+        for item in elements or []:
+            if isinstance(item, dict):
+                symbol = str(item.get("symbol") or "").strip()
+                z = item.get("z") or 0
+            else:
+                symbol = str(item or "").strip()
+                z = 0
+            if not symbol:
+                continue
+            try:
+                z = int(z or 0)
+            except (TypeError, ValueError):
+                z = 0
+            if z <= 0:
+                z = int(get_element_z(symbol) or 0)
+            if z <= 0 or symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append({"symbol": symbol, "z": z})
+        return out
     
     def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
                              auto_find_peaks=True, tube_element='Rh',
@@ -64,8 +92,9 @@ class SpectrumFitter:
             (optional fixed_fwhm / exclusion_half_width_kev for Compton)
         """
         peak_positions = []
+        elements = self._element_dicts(elements)
 
-        if elements and len(elements) > 0:
+        if elements:
             print(f"Using emission lines from {len(elements)} elements...")
             for elem in elements:
                 symbol = elem.get('symbol', '')
@@ -249,6 +278,10 @@ class SpectrumFitter:
         if not elements:
             if n_cleared:
                 print(f"Cleared {n_cleared} sample peak label(s) (no elements selected)")
+            return positions
+
+        elements = self._element_dicts(elements)
+        if not elements:
             return positions
 
         major_lines = {

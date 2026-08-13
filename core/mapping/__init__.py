@@ -17,8 +17,9 @@ from core.mapping.profiles import (
     extract_multi_element_profiles,
     line_distances,
 )
+from core.mapping.camera import StageCamera, camera_from_image
 from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.display import enhance_map, format_acquisition, upsample_map, overlay_on_photo, colorize_map, resize_to
+from core.mapping.display import enhance_map, format_acquisition, upsample_map, overlay_on_photo, overlay_alpha, colorize_map, resize_to
 from core.mapping.regions import circle_mask, polygon_mask, rect_mask, region_mask
 
 __all__ = [
@@ -32,6 +33,8 @@ __all__ = [
     "coerce_element_symbols",
     "SpectrumCube",
     "decode_listdata",
+    "StageCamera",
+    "camera_from_image",
     "extract_line_profile",
     "extract_multi_element_profiles",
     "extract_cube_element_profiles",
@@ -43,6 +46,7 @@ __all__ = [
     "upsample_map",
     "resize_to",
     "colorize_map",
+    "overlay_alpha",
     "overlay_on_photo",
     "rect_mask",
     "circle_mask",
