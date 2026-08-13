@@ -22,12 +22,15 @@ class ElementPanel(QWidget):
     peak_find_requested = Signal()  # Preview auto peak detection only
     element_clicked = Signal(str, int)  # Emitted when element clicked (symbol, Z)
     peak_list_changed = Signal()  # Emitted when peak list is edited (delete/clear)
+    identify_on_plot_toggled = Signal(bool)  # Click-spectrum identify mode
+    identify_add_element = Signal(str)  # Add candidate element from identify list
     
     def __init__(self, parent=None):
         super().__init__(parent)
         
         self.selected_elements = []
         self._peak_list_data = []  # List of peak dicts shown in the UI
+        self._identify_candidates = []
         self._setup_ui()
     
     def _setup_ui(self):
@@ -163,7 +166,7 @@ class ElementPanel(QWidget):
         return group
     
     def _create_element_selection_group(self):
-        """Create element selection with periodic table"""
+        """Create element selection with periodic table + plot identify tool."""
         group = QGroupBox("Element Selection")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(3, 6, 3, 3)
@@ -175,8 +178,134 @@ class ElementPanel(QWidget):
         self.periodic_table.element_clicked.connect(self.element_clicked.emit)
         self.periodic_table.element_info_requested.connect(self._show_element_info)
         layout.addWidget(self.periodic_table)
+
+        identify_group = QGroupBox("Identify on Plot")
+        identify_layout = QVBoxLayout(identify_group)
+        identify_layout.setContentsMargins(5, 8, 5, 5)
+        identify_layout.setSpacing(4)
+
+        self.identify_on_plot_btn = QPushButton("Click Spectrum to Identify")
+        self.identify_on_plot_btn.setCheckable(True)
+        self.identify_on_plot_btn.setToolTip(
+            "When on, click the spectrum plot to list the most likely\n"
+            "emission-line candidates at that energy. Double-click a\n"
+            "candidate (or use Add) to select it on the periodic table."
+        )
+        self.identify_on_plot_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:checked {
+                background-color: #c62828;
+                color: white;
+            }
+        """)
+        self.identify_on_plot_btn.toggled.connect(self._on_identify_on_plot_toggled)
+        identify_layout.addWidget(self.identify_on_plot_btn)
+
+        self.identify_energy_label = QLabel("Click energy: —")
+        self.identify_energy_label.setStyleSheet("color: #555;")
+        identify_layout.addWidget(self.identify_energy_label)
+
+        self.identify_candidates_list = QListWidget()
+        self.identify_candidates_list.setMinimumHeight(100)
+        self.identify_candidates_list.setToolTip(
+            "Candidates ranked by |ΔE| from the clicked energy.\n"
+            "Double-click to add the element to the selection."
+        )
+        self.identify_candidates_list.itemDoubleClicked.connect(
+            self._on_identify_candidate_activated
+        )
+        identify_layout.addWidget(self.identify_candidates_list)
+
+        add_row = QHBoxLayout()
+        self.identify_add_btn = QPushButton("Add Selected Element")
+        self.identify_add_btn.setEnabled(False)
+        self.identify_add_btn.setToolTip(
+            "Add the highlighted candidate’s element to the periodic-table selection"
+        )
+        self.identify_add_btn.clicked.connect(self._on_identify_add_clicked)
+        add_row.addWidget(self.identify_add_btn)
+        identify_layout.addLayout(add_row)
+
+        self.identify_candidates_list.itemSelectionChanged.connect(
+            lambda: self.identify_add_btn.setEnabled(
+                self.identify_candidates_list.currentItem() is not None
+            )
+        )
+
+        layout.addWidget(identify_group)
         
         return group
+
+    def _on_identify_on_plot_toggled(self, checked):
+        self.identify_on_plot_toggled.emit(bool(checked))
+        if checked:
+            self.identify_energy_label.setText(
+                "Click energy: click a point on the spectrum…"
+            )
+        else:
+            self.identify_energy_label.setText("Click energy: —")
+            self.identify_candidates_list.clear()
+            self.identify_add_btn.setEnabled(False)
+
+    def set_identify_candidates(self, energy_kev, candidates):
+        """
+        Populate the identify-on-plot candidate list.
+
+        Args:
+            energy_kev: Clicked energy
+            candidates: List of dicts from candidates_at_energy()
+        """
+        self._identify_candidates = list(candidates or [])
+        self.identify_energy_label.setText(f"Click energy: {float(energy_kev):.3f} keV")
+        self.identify_candidates_list.clear()
+        if not self._identify_candidates:
+            item = QListWidgetItem("No common-XRF lines within tolerance")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.identify_candidates_list.addItem(item)
+            self.identify_add_btn.setEnabled(False)
+            return
+
+        for hit in self._identify_candidates:
+            delta_ev = hit.get('delta_ev', 0.0)
+            sign = "+" if delta_ev >= 0 else "−"
+            text = (
+                f"{hit['symbol']}-{hit['line']}  "
+                f"{hit['line_energy']:.3f} keV  "
+                f"(Δ {sign}{abs(delta_ev):.0f} eV)"
+            )
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, hit)
+            self.identify_candidates_list.addItem(item)
+        self.identify_candidates_list.setCurrentRow(0)
+        self.identify_add_btn.setEnabled(True)
+
+    def _on_identify_candidate_activated(self, item):
+        hit = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not hit:
+            return
+        self.identify_add_element.emit(hit['symbol'])
+
+    def _on_identify_add_clicked(self):
+        item = self.identify_candidates_list.currentItem()
+        if item is None:
+            return
+        self._on_identify_candidate_activated(item)
+
+    def add_selected_element(self, symbol):
+        """Add one element to the current periodic-table selection."""
+        if not symbol or not hasattr(self, 'periodic_table'):
+            return
+        current = [
+            e.get('symbol') for e in (self.get_selected_elements() or [])
+            if e.get('symbol')
+        ]
+        if symbol not in current:
+            current.append(symbol)
+        self.set_selected_elements(current)
     
     def _create_peak_find_group(self):
         """Peak detection controls, find button, and editable peak list."""

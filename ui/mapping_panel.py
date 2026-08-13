@@ -17,9 +17,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -27,8 +29,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -36,8 +40,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.models import LineScan, MappingFOV, MappingProject, MapSpectrum
-from core.mapping.profiles import extract_multi_element_profiles
+from core.mapping.display import enhance_map, format_acquisition
+from core.mapping.models import ElementMap, LineScan, MappingFOV, MappingProject, MapSpectrum
+from core.mapping.profiles import (
+    extract_cube_element_profiles,
+    extract_multi_element_profiles,
+)
 from ui.collapsible_section import CollapsibleSection
 from ui.map_canvas import MapCanvas
 from ui.pixel_spectrum_popup import PixelSpectrumPopup
@@ -63,7 +71,12 @@ class MappingPanel(QWidget):
         self._checked_map_names: set[str] = set()
         self._checked_roi_symbols: set[str] = set()
         self._active_line_scan: Optional[LineScan] = None
+        self._drawn_line_scan: Optional[LineScan] = None
+        self._drawn_cache_key = None
+        self._profile_source: Optional[str] = None  # "drawn" | "ipj"
         self._tree_updating = False
+        self._last_pick_xy: Optional[tuple] = None
+        self._sample_form_updating = False
 
         self._build_ui()
 
@@ -153,6 +166,8 @@ class MappingPanel(QWidget):
         data_layout.addLayout(data_btn_row)
         self.nav_tabs.addTab(data_page, "Data")
 
+        self.nav_tabs.addTab(self._build_sample_tab(), "Sample")
+
         left_layout.addWidget(self.nav_tabs, stretch=1)
 
         # Scrollable collapsible tool sections
@@ -189,6 +204,81 @@ class MappingPanel(QWidget):
             row.addWidget(combo)
             display_sec.addLayout(row)
             combo.currentIndexChanged.connect(self._refresh_canvas)
+
+        self.acq_label = QLabel("")
+        self.acq_label.setWordWrap(True)
+        self.acq_label.setStyleSheet("color: #444; font-size: 11px;")
+        display_sec.addWidget(self.acq_label)
+
+        enhance_hint = QLabel("Map enhancement (display only — does not change the cube)")
+        enhance_hint.setWordWrap(True)
+        enhance_hint.setStyleSheet("color: #666; font-size: 11px;")
+        display_sec.addWidget(enhance_hint)
+
+        self.neighborhood_combo = QComboBox()
+        for size, label in (
+            (1, "1×1 (single pixel)"),
+            (3, "3×3 neighbors"),
+            (5, "5×5 neighbors"),
+            (7, "7×7 neighbors"),
+        ):
+            self.neighborhood_combo.addItem(label, size)
+        self.neighborhood_combo.setToolTip(
+            "Neighborhood used for Pick pixel spectrum (sum of neighbors) "
+            "and for Mean / Median / Gaussian map smoothing."
+        )
+        self.neighborhood_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        self.smooth_combo = QComboBox()
+        for key, label in (
+            ("none", "None (raw counts)"),
+            ("mean", "Mean (boxcar)"),
+            ("median", "Median (despeckle)"),
+            ("gaussian", "Gaussian"),
+        ):
+            self.smooth_combo.addItem(label, key)
+        self.smooth_combo.setToolTip(
+            "Spatial filter on element maps and RGB.\n"
+            "Median is best for sparse photon noise; Gaussian is smoother for figures."
+        )
+        self.smooth_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        self.bin_combo = QComboBox()
+        for factor, label in (
+            (1, "None"),
+            (2, "2×2 blocks"),
+            (4, "4×4 blocks"),
+        ):
+            self.bin_combo.addItem(label, factor)
+        self.bin_combo.setToolTip(
+            "Average each N×N block, then expand back so click coordinates stay aligned."
+        )
+        self.bin_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        self.scale_combo = QComboBox()
+        for key, label in (
+            ("linear", "Linear"),
+            ("sqrt", "Square root"),
+            ("asinh", "Asinh"),
+            ("log", "Log"),
+        ):
+            self.scale_combo.addItem(label, key)
+        self.scale_combo.setToolTip(
+            "Compress hot pixels so weak features show up in publication figures."
+        )
+        self.scale_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        for label, widget in (
+            ("Neighborhood", self.neighborhood_combo),
+            ("Smooth", self.smooth_combo),
+            ("Spatial bin", self.bin_combo),
+            ("Intensity", self.scale_combo),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            row.addWidget(widget, stretch=1)
+            display_sec.addLayout(row)
+
         scroll_layout.addWidget(display_sec)
 
         # ---- Tools ----
@@ -197,14 +287,56 @@ class MappingPanel(QWidget):
         self.line_mode_btn.setCheckable(True)
         self.line_mode_btn.toggled.connect(self._on_line_mode)
         tools_sec.addWidget(self.line_mode_btn)
+        width_row = QHBoxLayout()
+        width_row.addWidget(QLabel("Line width"))
+        self.line_width_spin = QSpinBox()
+        self.line_width_spin.setRange(1, 51)
+        self.line_width_spin.setValue(1)
+        self.line_width_spin.setSuffix(" px")
+        self.line_width_spin.setToolTip(
+            "Average this many neighboring pixels perpendicular to the line "
+            "for a smoother profile. 1 = center line only."
+        )
+        self.line_width_spin.valueChanged.connect(self._on_line_width_changed)
+        width_row.addWidget(self.line_width_spin)
+        tools_sec.addLayout(width_row)
         self.pick_btn = QPushButton("Pick pixel spectrum")
         self.pick_btn.setCheckable(True)
         self.pick_btn.setToolTip(
             "Click map pixels to extract spectra into a popup viewer "
-            "(stays open and updates on each click)"
+            "(stays open and updates on each click).\n"
+            "Neighborhood under Display sums neighboring pixels — "
+            "needed on fast, low-count maps."
         )
         self.pick_btn.toggled.connect(self._on_pick_mode)
         tools_sec.addWidget(self.pick_btn)
+
+        tools_sec.addWidget(QLabel("Area sum spectrum"))
+        area_row = QHBoxLayout()
+        self.rect_btn = QPushButton("Rectangle")
+        self.circle_btn = QPushButton("Circle")
+        self.poly_btn = QPushButton("Polygon")
+        for btn, tip in (
+            (self.rect_btn, "Click two opposite corners. Hold Shift for a square."),
+            (self.circle_btn, "Click center, then a point on the rim."),
+            (
+                self.poly_btn,
+                "Click vertices. Double-click, click the first point, "
+                "or right-click to close (3+ points).",
+            ),
+        ):
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            area_row.addWidget(btn)
+        self.rect_btn.toggled.connect(lambda on: self._on_region_mode("rect", on))
+        self.circle_btn.toggled.connect(lambda on: self._on_region_mode("circle", on))
+        self.poly_btn.toggled.connect(lambda on: self._on_region_mode("poly", on))
+        tools_sec.addLayout(area_row)
+        self.clear_region_btn = QPushButton("Clear area")
+        self.clear_region_btn.setToolTip("Remove the area outline (the summed spectrum is kept)")
+        self.clear_region_btn.clicked.connect(self._clear_region)
+        tools_sec.addWidget(self.clear_region_btn)
+
         self.clear_line_btn = QPushButton("Clear line")
         self.clear_line_btn.clicked.connect(self._clear_line)
         tools_sec.addWidget(self.clear_line_btn)
@@ -216,9 +348,10 @@ class MappingPanel(QWidget):
         self.profile_map_list.setToolTip(
             "Checked items drive the Line profile chart:\n"
             "• Map names → drawn map transect intensities\n"
-            "• Element ROIs → XGT line-scan point spectra (energy windows)\n\n"
-            "Use From Analysis after selecting elements in Analysis → Elements "
-            "(Send Sum Spectrum or a line point first to find peaks)."
+            "• Element ROIs → counts in that energy window along the line "
+            "(drawn transect or XGT line-scan points)\n\n"
+            "Elements selected in Analysis are included automatically. "
+            "Use From Analysis to sync this list."
         )
         self.profile_map_list.itemChanged.connect(self._on_profile_map_check_changed)
         tools_sec.addWidget(self.profile_map_list)
@@ -309,8 +442,9 @@ class MappingPanel(QWidget):
         quant_sec.addWidget(self.send_btn)
         self.fit_line_btn = QPushButton("Fit / semi-quant line scan")
         self.fit_line_btn.setToolTip(
-            "Fit each point on the selected IPJ line scan using "
-            "current Analysis element & fitting settings"
+            "Fit each point along a line using current Analysis elements.\n"
+            "If you just drew a transect (and the site has a cube), you can "
+            "use that line; otherwise an IPJ/XGT point series is used."
         )
         self.fit_line_btn.clicked.connect(self._fit_line_scan)
         quant_sec.addWidget(self.fit_line_btn)
@@ -333,6 +467,7 @@ class MappingPanel(QWidget):
         self.canvas.line_drawn.connect(self._on_line_drawn)
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.pixel_clicked.connect(self._on_pixel_clicked)
+        self.canvas.region_drawn.connect(self._on_region_drawn)
         center_layout.addWidget(self.canvas)
         self.cursor_label = QLabel("Cursor: —")
         center_layout.addWidget(self.cursor_label)
@@ -411,6 +546,234 @@ class MappingPanel(QWidget):
             f"{len(self.project.all_spectra())} spectra"
             + (f", {n_cubes} cube(s)" if n_cubes else "")
         )
+        self._fill_sample_tab()
+
+    def _build_sample_tab(self) -> QWidget:
+        """Form of project / sample / site text fields from the IPJ."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        hint = QLabel(
+            "Text entered on the instrument (name, comment, type) plus "
+            "acquisition settings read from the project file."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setContentsMargins(0, 0, 4, 0)
+        form.setSpacing(4)
+
+        self.proj_title_edit = QLineEdit()
+        self.proj_title_edit.setReadOnly(True)
+        self.proj_instrument_edit = QLineEdit()
+        self.proj_instrument_edit.setReadOnly(True)
+        self.proj_path_edit = QLineEdit()
+        self.proj_path_edit.setReadOnly(True)
+        self.proj_comment_edit = QTextEdit()
+        self.proj_comment_edit.setReadOnly(True)
+        self.proj_comment_edit.setMaximumHeight(48)
+        form.addRow("Project", self.proj_title_edit)
+        form.addRow("Instrument", self.proj_instrument_edit)
+        form.addRow("File", self.proj_path_edit)
+        form.addRow("Project note", self.proj_comment_edit)
+
+        self.sample_name_edit = QLineEdit()
+        self.sample_name_edit.setPlaceholderText("Sample name")
+        self.sample_name_edit.editingFinished.connect(self._on_sample_name_edited)
+        self.sample_type_edit = QLineEdit()
+        self.sample_type_edit.setPlaceholderText("Type / material")
+        self.sample_type_edit.editingFinished.connect(self._on_sample_type_edited)
+        self.sample_comment_edit = QTextEdit()
+        self.sample_comment_edit.setPlaceholderText("Sample comment")
+        self.sample_comment_edit.setMaximumHeight(72)
+        self.sample_comment_edit.textChanged.connect(self._on_sample_comment_changed)
+        form.addRow("Sample", self.sample_name_edit)
+        form.addRow("Type", self.sample_type_edit)
+        form.addRow("Comment", self.sample_comment_edit)
+
+        self.site_name_edit = QLineEdit()
+        self.site_name_edit.setPlaceholderText("Site of Interest")
+        self.site_name_edit.editingFinished.connect(self._on_site_name_edited)
+        self.site_comment_edit = QTextEdit()
+        self.site_comment_edit.setPlaceholderText("Site comment")
+        self.site_comment_edit.setMaximumHeight(72)
+        self.site_comment_edit.textChanged.connect(self._on_site_comment_changed)
+        form.addRow("Site", self.site_name_edit)
+        form.addRow("Site comment", self.site_comment_edit)
+
+        self.sample_acq_label = QLabel("No project loaded")
+        self.sample_acq_label.setWordWrap(True)
+        self.sample_acq_label.setStyleSheet("color: #333; font-size: 11px;")
+        form.addRow("Acquisition", self.sample_acq_label)
+
+        scroll.setWidget(body)
+        layout.addWidget(scroll, stretch=1)
+
+        self.copy_sample_btn = QPushButton("Copy to Analysis → Sample/Exp")
+        self.copy_sample_btn.setToolTip(
+            "Fill Analysis sample name, type, kV, and current from this site"
+        )
+        self.copy_sample_btn.clicked.connect(self._copy_sample_to_analysis)
+        layout.addWidget(self.copy_sample_btn)
+        return page
+
+    def _current_sample(self):
+        if self.project is None:
+            return None
+        if self.current_fov is not None:
+            sid = self.current_fov.metadata.get("sample_id")
+            if sid:
+                found = self.project.find_sample(sid)
+                if found is not None:
+                    return found
+        if self.project.samples:
+            return self.project.samples[0]
+        return None
+
+    def _fill_sample_tab(self) -> None:
+        self._sample_form_updating = True
+        proj = self.project
+        sample = self._current_sample()
+        site = self.current_fov
+        if proj is None:
+            for w in (
+                self.proj_title_edit,
+                self.proj_instrument_edit,
+                self.proj_path_edit,
+                self.sample_name_edit,
+                self.sample_type_edit,
+                self.site_name_edit,
+            ):
+                w.clear()
+            self.proj_comment_edit.clear()
+            self.sample_comment_edit.clear()
+            self.site_comment_edit.clear()
+            self.sample_acq_label.setText("No project loaded")
+            self._sample_form_updating = False
+            return
+
+        meta = proj.metadata or {}
+        self.proj_title_edit.setText(str(meta.get("project_title") or proj.name))
+        self.proj_instrument_edit.setText(str(meta.get("instrument") or ""))
+        self.proj_path_edit.setText(proj.path)
+        self.proj_comment_edit.setPlainText(str(meta.get("comment") or ""))
+
+        if sample is not None:
+            self.sample_name_edit.setText(sample.name)
+            self.sample_type_edit.setText(str(sample.metadata.get("sample_type") or ""))
+            self.sample_comment_edit.setPlainText(str(sample.metadata.get("comment") or ""))
+        else:
+            self.sample_name_edit.clear()
+            self.sample_type_edit.clear()
+            self.sample_comment_edit.clear()
+
+        if site is not None:
+            self.site_name_edit.setText(site.name)
+            self.site_comment_edit.setPlainText(str(site.metadata.get("comment") or ""))
+            acq = format_acquisition(site.metadata)
+            extra = []
+            if site.width and site.height:
+                extra.append(f"{site.width} × {site.height} px")
+            if site.cube is not None:
+                extra.append(f"{site.cube.n_channels} channels")
+            block = acq
+            if extra:
+                block = (block + "\n" if block else "") + " · ".join(extra)
+            self.sample_acq_label.setText(block or "No acquisition metadata")
+        else:
+            self.site_name_edit.clear()
+            self.site_comment_edit.clear()
+            self.sample_acq_label.setText("Activate a site to see acquisition info")
+        self._sample_form_updating = False
+
+    def _on_sample_name_edited(self) -> None:
+        if self._sample_form_updating:
+            return
+        sample = self._current_sample()
+        if sample is None:
+            return
+        name = self.sample_name_edit.text().strip()
+        if not name or name == sample.name:
+            return
+        sample.name = name
+        self._sync_labels_after_rename()
+        self.status_message.emit(f"Renamed sample → {name}")
+
+    def _on_sample_type_edited(self) -> None:
+        if self._sample_form_updating:
+            return
+        sample = self._current_sample()
+        if sample is None:
+            return
+        sample.metadata["sample_type"] = self.sample_type_edit.text().strip()
+
+    def _on_sample_comment_changed(self) -> None:
+        if self._sample_form_updating:
+            return
+        sample = self._current_sample()
+        if sample is not None:
+            sample.metadata["comment"] = self.sample_comment_edit.toPlainText()
+
+    def _on_site_name_edited(self) -> None:
+        if self._sample_form_updating:
+            return
+        site = self.current_fov
+        if site is None:
+            return
+        name = self.site_name_edit.text().strip()
+        if not name or name == site.name:
+            return
+        site.name = name
+        site.metadata["site_name"] = name
+        self._sync_labels_after_rename()
+        self.status_message.emit(f"Renamed site → {name}")
+
+    def _on_site_comment_changed(self) -> None:
+        if self._sample_form_updating:
+            return
+        site = self.current_fov
+        if site is not None:
+            site.metadata["comment"] = self.site_comment_edit.toPlainText()
+
+    def _copy_sample_to_analysis(self) -> None:
+        panel = self._element_panel
+        if panel is None:
+            QMessageBox.information(
+                self,
+                "Analysis",
+                "Analysis sample fields are not connected.",
+            )
+            return
+        sample = self._current_sample()
+        site = self.current_fov
+        if sample is not None and hasattr(panel, "sample_name_edit"):
+            panel.sample_name_edit.setText(sample.name)
+        if sample is not None and hasattr(panel, "sample_type_combo"):
+            typ = str(sample.metadata.get("sample_type") or "")
+            idx = panel.sample_type_combo.findText(typ)
+            if idx >= 0:
+                panel.sample_type_combo.setCurrentIndex(idx)
+        if site is not None:
+            kv = site.metadata.get("kv")
+            ma = site.metadata.get("ma")
+            if kv and hasattr(panel, "excitation_spin"):
+                panel.excitation_spin.setValue(float(kv))
+            if ma and hasattr(panel, "current_spin"):
+                # Analysis current spinner max is 10 mA; XGT often uses 15 mA
+                spin = panel.current_spin
+                if float(ma) > spin.maximum():
+                    spin.setMaximum(max(float(ma), 50.0))
+                spin.setValue(float(ma))
+        self.status_message.emit("Copied sample / tube settings to Analysis → Sample/Exp")
 
     def _populate_trees(self) -> None:
         self._populate_sites_tree()
@@ -730,6 +1093,7 @@ class MappingPanel(QWidget):
                 self._tree_updating = True
                 root.setText(0, self.current_fov.name)
                 self._tree_updating = False
+        self._fill_sample_tab()
 
     def _prompt_rename(self, item: QTreeWidgetItem, title: str) -> None:
         payload = item.data(0, Qt.UserRole)
@@ -943,6 +1307,7 @@ class MappingPanel(QWidget):
         self._select_site_in_sites_tree(site.id)
         if switch_to_data:
             self.nav_tabs.setCurrentIndex(1)
+        self._fill_sample_tab()
         self.status_message.emit(f"Active site: {site.name}")
 
     def _select_site_in_sites_tree(self, site_id: str) -> None:
@@ -967,10 +1332,15 @@ class MappingPanel(QWidget):
     def _set_fov(self, fov: MappingFOV) -> None:
         self.current_fov = fov
         self._picked_spectrum = None
+        self._last_pick_xy = None
         self._last_line = None
         self._active_line_scan = None
+        self._drawn_line_scan = None
+        self._drawn_cache_key = None
+        self._profile_source = None
         # Reset checked maps for new site (repopulated with defaults in data tree)
         self._checked_map_names = set()
+        self.canvas.clear_region()
         self._fill_map_combos()
         self._fill_profile_map_list()
         self._refresh_canvas()
@@ -1005,13 +1375,17 @@ class MappingPanel(QWidget):
             item.setData(Qt.UserRole, ("map", m.name))
             self.profile_map_list.addItem(item)
 
-        # --- Spectral ROI series (XGT line-scan points) ---
-        if fov.line_scans:
+        # --- Spectral ROI series (drawn transect cube windows + XGT line-scan points) ---
+        if fov.line_scans or fov.cube is not None:
             rois = self._line_scan_roi_candidates(fov)
+            analysis_syms = {s for s, _ in self._analysis_element_energies()}
             for sym, e_kev in rois:
                 item = QListWidgetItem(f"ROI: {sym} ({e_kev:.2f} keV)")
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                checked = sym in self._checked_roi_symbols
+                if self._checked_roi_symbols:
+                    checked = sym in self._checked_roi_symbols
+                else:
+                    checked = sym in analysis_syms
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
                 item.setData(Qt.UserRole, ("roi", sym, float(e_kev)))
                 self.profile_map_list.addItem(item)
@@ -1137,6 +1511,32 @@ class MappingPanel(QWidget):
     def _remember_checked_rois(self) -> None:
         self._checked_roi_symbols = {sym for sym, _ in self._checked_line_scan_rois()}
 
+    def _effective_element_rois(self):
+        """ROIs to plot: checked list items plus Analysis-selected elements."""
+        out = []
+        seen = set()
+        for sym, e_kev in self._checked_line_scan_rois():
+            if sym in seen:
+                continue
+            out.append((sym, e_kev))
+            seen.add(sym)
+        for sym, e_kev in self._analysis_element_energies():
+            if sym in seen:
+                continue
+            out.append((sym, e_kev))
+            seen.add(sym)
+        return out
+
+    def _line_width(self) -> int:
+        return max(1, int(self.line_width_spin.value()))
+
+    def _on_line_width_changed(self, value: int) -> None:
+        self.canvas.set_band_width(int(value))
+        self._drawn_line_scan = None
+        self._drawn_cache_key = None
+        if self._last_line is not None and self._profile_source != "ipj":
+            self._replot_last_line()
+
     def _set_all_profile_maps(self, checked: bool) -> None:
         state = Qt.Checked if checked else Qt.Unchecked
         self.profile_map_list.blockSignals(True)
@@ -1215,25 +1615,45 @@ class MappingPanel(QWidget):
 
     def _replot_profile(self) -> None:
         """Refresh drawn-transect and/or active XGT line-scan profile chart."""
+        if self._profile_source == "drawn" and self._last_line is not None:
+            self._replot_last_line()
+            return
+        if self._profile_source == "ipj" and self._active_line_scan is not None:
+            self._plot_ipj_line_scan(self._active_line_scan)
+            return
         if self._last_line is not None:
             self._replot_last_line()
-        if self._active_line_scan is not None:
+        elif self._active_line_scan is not None:
             self._plot_ipj_line_scan(self._active_line_scan)
+
     def _update_cube_controls(self) -> None:
         fov = self.current_fov
         has = fov is not None and fov.cube is not None
         self.roi_btn.setEnabled(has)
         self.roi_from_analysis_btn.setEnabled(has)
         self.pick_btn.setEnabled(has)
+        for btn in (self.rect_btn, self.circle_btn, self.poly_btn):
+            btn.setEnabled(has)
+        acq = format_acquisition(fov.metadata if fov is not None else None)
+        if fov is not None:
+            self.acq_label.setText(acq)
+        else:
+            self.acq_label.setText("")
         if not has:
             self.pick_btn.setChecked(False)
-            self.cube_info.setText("No hyperspectral cube in this FOV")
+            for btn in (self.rect_btn, self.circle_btn, self.poly_btn):
+                btn.setChecked(False)
+            self.cube_info.setText(
+                "No hyperspectral cube in this FOV"
+                + (f"\n{acq}" if acq else "")
+            )
             return
         c = fov.cube
-        self.cube_info.setText(
+        cube_line = (
             f"Cube {c.n_channels} ch × {c.height}×{c.width} "
             f"({c.ev_per_channel:.0f} eV/ch)"
         )
+        self.cube_info.setText(cube_line + (f"\n{acq}" if acq else ""))
 
     def _fill_map_combos(self) -> None:
         fov = self.current_fov
@@ -1295,6 +1715,37 @@ class MappingPanel(QWidget):
             combo.blockSignals(False)
 
     # ----------------------------------------------------------- display
+    def _neighborhood_size(self) -> int:
+        val = self.neighborhood_combo.currentData()
+        return int(val) if val else 1
+
+    def _enhance_kwargs(self) -> dict:
+        return {
+            "smooth": self.smooth_combo.currentData() or "none",
+            "neighborhood": self._neighborhood_size(),
+            "bin_factor": int(self.bin_combo.currentData() or 1),
+            "scale": self.scale_combo.currentData() or "linear",
+        }
+
+    def _process_map_array(self, data: np.ndarray) -> np.ndarray:
+        return enhance_map(data, **self._enhance_kwargs())
+
+    def _enhanced_element_map(self, em: Optional[ElementMap]) -> Optional[ElementMap]:
+        if em is None:
+            return None
+        return ElementMap(
+            name=em.name,
+            data=self._process_map_array(em.data),
+            line=em.line,
+            element=em.element,
+            metadata=dict(em.metadata),
+        )
+
+    def _on_enhance_changed(self) -> None:
+        self._refresh_canvas()
+        if self._last_pick_xy is not None and self.pick_btn.isChecked():
+            self._on_pixel_clicked(*self._last_pick_xy)
+
     def _refresh_canvas(self) -> None:
         fov = self.current_fov
         if fov is None:
@@ -1302,7 +1753,7 @@ class MappingPanel(QWidget):
 
         checked = self._checked_display_maps()
         if checked and not self.rgb_check.isChecked():
-            panels = [(m.name, m.data) for m in checked]
+            panels = [(m.name, self._process_map_array(m.data)) for m in checked]
             try:
                 self.canvas.set_images(panels)
             except Exception as exc:
@@ -1310,9 +1761,9 @@ class MappingPanel(QWidget):
             return
 
         if self.rgb_check.isChecked() and fov.element_maps:
-            r = fov.find_map(self.r_combo.currentData() or "")
-            g = fov.find_map(self.g_combo.currentData() or "")
-            b = fov.find_map(self.b_combo.currentData() or "")
+            r = self._enhanced_element_map(fov.find_map(self.r_combo.currentData() or ""))
+            g = self._enhanced_element_map(fov.find_map(self.g_combo.currentData() or ""))
+            b = self._enhanced_element_map(fov.find_map(self.b_combo.currentData() or ""))
             try:
                 rgb = rgb_composite(r, g, b)
                 self.canvas.set_image(rgb, rgb=True, title="RGB")
@@ -1340,7 +1791,9 @@ class MappingPanel(QWidget):
         elif data[0] == "map":
             m = fov.find_map(data[1])
             if m is not None:
-                self.canvas.set_image(m.data, rgb=False, title=m.name)
+                self.canvas.set_image(
+                    self._process_map_array(m.data), rgb=False, title=m.name
+                )
 
     def _show_photo(self, image) -> None:
         arr = image.data
@@ -1435,33 +1888,108 @@ class MappingPanel(QWidget):
                         break
 
     # -------------------------------------------------------- line tools
+    def _uncheck_draw_buttons(self, except_btn=None) -> None:
+        for btn in (
+            self.line_mode_btn,
+            self.pick_btn,
+            self.rect_btn,
+            self.circle_btn,
+            self.poly_btn,
+        ):
+            if btn is except_btn:
+                continue
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self.canvas.set_line_mode(False)
+        self.canvas.set_pick_mode(False)
+        if except_btn not in (self.rect_btn, self.circle_btn, self.poly_btn):
+            self.canvas.set_region_mode(None)
+
     def _on_line_mode(self, checked: bool) -> None:
         if checked:
-            self.pick_btn.blockSignals(True)
-            self.pick_btn.setChecked(False)
-            self.pick_btn.blockSignals(False)
-            self.canvas.set_pick_mode(False)
+            self._uncheck_draw_buttons(self.line_mode_btn)
         self.canvas.set_line_mode(checked)
         if checked:
             self.status_message.emit("Line mode: click start, then end point on the map")
 
     def _on_pick_mode(self, checked: bool) -> None:
         if checked:
-            self.line_mode_btn.blockSignals(True)
-            self.line_mode_btn.setChecked(False)
-            self.line_mode_btn.blockSignals(False)
-            self.canvas.set_line_mode(False)
+            self._uncheck_draw_buttons(self.pick_btn)
         self.canvas.set_pick_mode(checked)
         if checked:
+            n = self._neighborhood_size()
+            extra = f" ({n}×{n} sum)" if n > 1 else ""
             self.status_message.emit(
-                "Pick mode: click a map pixel to extract its cube spectrum"
+                f"Pick mode: click a map pixel to extract its cube spectrum{extra}"
             )
+
+    def _on_region_mode(self, kind: str, checked: bool) -> None:
+        btn = {"rect": self.rect_btn, "circle": self.circle_btn, "poly": self.poly_btn}[
+            kind
+        ]
+        if checked:
+            self._uncheck_draw_buttons(btn)
+            self.canvas.set_region_mode(kind)
+            tips = {
+                "rect": "Rectangle: click two opposite corners (Shift = square)",
+                "circle": "Circle: click center, then a point on the rim",
+                "poly": "Polygon: click vertices; double-click or right-click to close",
+            }
+            self.status_message.emit(tips[kind])
+        else:
+            self.canvas.set_region_mode(None)
+
+    def _clear_region(self) -> None:
+        self.canvas.clear_region()
+        for btn in (self.rect_btn, self.circle_btn, self.poly_btn):
+            btn.setChecked(False)
+
+    def _on_region_drawn(self, kind: str, params) -> None:
+        fov = self.current_fov
+        if fov is None or fov.cube is None:
+            self.status_message.emit("No cube available for area sum")
+            return
+        ms = fov.spectrum_in_region(kind, params)
+        for btn in (self.rect_btn, self.circle_btn, self.poly_btn):
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self.canvas.set_region_mode(None)
+        if ms is None:
+            self.status_message.emit("Area is empty — draw a larger region")
+            return
+        # Keep in the site so it appears under Data
+        existing = {s.name for s in fov.spectra}
+        name = ms.name
+        n = 2
+        while name in existing:
+            name = f"{ms.name} ({n})"
+            n += 1
+        ms.name = name
+        ms.spectrum.metadata["name"] = name
+        fov.spectra.append(ms)
+        self._picked_spectrum = ms
+        self._show_pixel_spectrum(ms)
+        self._populate_data_tree()
+        n_used = ms.metadata.get("n_pixels", 0)
+        self.info_label.setText(
+            f"{ms.name}: {ms.spectrum.total_counts:.0f} counts from {n_used} pixels "
+            "— Send → Analysis, or draw another area"
+        )
+        self.status_message.emit(
+            f"Area sum {ms.name}: {ms.spectrum.total_counts:.0f} counts"
+        )
 
     def _clear_line(self) -> None:
         self.canvas.clear_line()
         self.profile_plot.clear()
         self._last_profiles = None
         self._last_line = None
+        self._drawn_line_scan = None
+        self._drawn_cache_key = None
+        if self._profile_source == "drawn":
+            self._profile_source = None
 
     def _replot_last_line(self) -> None:
         if self._last_line is None:
@@ -1471,6 +1999,10 @@ class MappingPanel(QWidget):
 
     def _on_line_drawn(self, x0, y0, x1, y1) -> None:
         self._last_line = (float(x0), float(y0), float(x1), float(y1))
+        self._profile_source = "drawn"
+        self._drawn_line_scan = None
+        self._drawn_cache_key = None
+        self.canvas.set_band_width(self._line_width())
         self._extract_and_plot_line(x0, y0, x1, y1, finish_mode=True)
 
     def _extract_and_plot_line(
@@ -1479,61 +2011,112 @@ class MappingPanel(QWidget):
         fov = self.current_fov
         if fov is None:
             return
+        start = (float(x0), float(y0))
+        end = (float(x1), float(y1))
+        width = self._line_width()
         maps = self._checked_profile_maps()
-        if maps:
-            profiles = extract_multi_element_profiles(maps, (x0, y0), (x1, y1))
+        element_maps = [
+            m for m in maps if m.metadata.get("source") != "cube_total"
+        ]
+        analysis_syms = {s for s, _ in self._analysis_element_energies()}
+        if analysis_syms:
+            matched = [
+                m
+                for m in element_maps
+                if (m.element or "").strip() in analysis_syms
+                or any(
+                    str(m.name).lower().startswith(sym.lower())
+                    or f" {sym.lower()} " in f" {str(m.name).lower()} "
+                    for sym in analysis_syms
+                )
+            ]
+            element_maps = matched
+        profiles = {}
+        if element_maps:
+            profiles.update(
+                extract_multi_element_profiles(
+                    element_maps, start, end, width=width
+                )
+            )
+
+        rois = self._effective_element_rois()
+        if fov.cube is not None and rois:
+            half = 0.10  # keV, matches ROI maps from Analysis
+            have_el = {(m.element or "").strip() for m in element_maps}
+            cube_rois = []
+            for sym, e_kev in rois:
+                if sym in have_el:
+                    continue
+                cube_rois.append((sym, float(e_kev) - half, float(e_kev) + half))
+            if cube_rois:
+                profiles.update(
+                    extract_cube_element_profiles(
+                        fov.cube, cube_rois, start, end, width=width
+                    )
+                )
+
+        n = len(profiles)
+        if profiles:
+            self._last_profiles = profiles
+            self._plot_profiles(profiles)
+        elif not analysis_syms and maps:
+            profiles = extract_multi_element_profiles(
+                maps, start, end, width=width
+            )
             self._last_profiles = profiles
             self._plot_profiles(profiles)
             n = len(profiles)
-        elif fov.cube is not None:
-            # Fallback: total counts along line from cube
-            length = float(np.hypot(x1 - x0, y1 - y0))
-            n_pts = max(2, int(np.ceil(length)) + 1)
-            xs = np.linspace(x0, x1, n_pts)
-            ys = np.linspace(y0, y1, n_pts)
-            dist = np.linspace(0.0, length, n_pts)
-            totals = np.array(
-                [
-                    float(fov.cube.spectrum_at(int(round(x)), int(round(y))).sum())
-                    for x, y in zip(xs, ys)
-                ]
+        elif fov.cube is not None and not analysis_syms:
+            dist, _xs, _ys, counts = fov.cube.spectra_along_line(
+                x0, y0, x1, y1, width=width
             )
+            totals = counts.sum(axis=1)
             self._last_profiles = {"Total counts": (dist, totals)}
             self._plot_profiles(self._last_profiles)
             n = 1
-            if finish_mode:
-                _, mean_counts = fov.cube.mean_spectrum_line(x0, y0, x1, y1, n_pts)
-                ms = fov.spectrum_at_pixel(
-                    int(round(0.5 * (x0 + x1))), int(round(0.5 * (y0 + y1)))
-                )
-                if ms is not None:
-                    if ms.spectrum.num_channels == mean_counts.size:
-                        ms.spectrum.counts = mean_counts
-                    elif ms.spectrum.num_channels == mean_counts.size * 2:
-                        fine = np.zeros(mean_counts.size * 2, dtype=np.float64)
-                        fine[0::2] = mean_counts * 0.5
-                        fine[1::2] = mean_counts * 0.5
-                        ms.spectrum.counts = fine
-                    else:
-                        ms.spectrum.counts = mean_counts
-                    ms.name = f"Line mean ({x0:.0f},{y0:.0f})→({x1:.0f},{y1:.0f})"
-                    ms.spectrum.metadata["name"] = ms.name
-                    ms.kind = "roi"
-                    self._picked_spectrum = ms
         else:
             self.profile_plot.clear()
             self._last_profiles = None
             self.status_message.emit(
-                "No maps checked for transect — check elements above, "
-                "or Send Sum Spectrum → Analysis to choose elements"
+                "No per-element series for this transect — select elements in "
+                "Analysis, check maps under Tools, or add ROI maps from Analysis"
             )
             return
+
+        if finish_mode and fov.cube is not None:
+            _, mean_counts = fov.cube.mean_spectrum_line(
+                x0, y0, x1, y1, width=width
+            )
+            ms = fov.spectrum_at_pixel(
+                int(round(0.5 * (x0 + x1))), int(round(0.5 * (y0 + y1)))
+            )
+            if ms is not None:
+                if ms.spectrum.num_channels == mean_counts.size:
+                    ms.spectrum.counts = mean_counts
+                elif ms.spectrum.num_channels == mean_counts.size * 2:
+                    fine = np.zeros(mean_counts.size * 2, dtype=np.float64)
+                    fine[0::2] = mean_counts * 0.5
+                    fine[1::2] = mean_counts * 0.5
+                    ms.spectrum.counts = fine
+                else:
+                    ms.spectrum.counts = mean_counts
+                wtag = f", {width} px wide" if width > 1 else ""
+                ms.name = (
+                    f"Line mean ({x0:.0f},{y0:.0f})→({x1:.0f},{y1:.0f}){wtag}"
+                )
+                ms.spectrum.metadata["name"] = ms.name
+                ms.kind = "roi"
+                self._picked_spectrum = ms
 
         if finish_mode:
             self.line_mode_btn.setChecked(False)
             self.canvas.set_line_mode(False)
+        names = ", ".join(self._last_profiles.keys()) if self._last_profiles else ""
+        extra = f", {width} px wide" if width > 1 else ""
         self.status_message.emit(
-            f"Line profile ({x0:.0f},{y0:.0f}) → ({x1:.0f},{y1:.0f}): {n} series"
+            f"Line profile ({x0:.0f},{y0:.0f}) → ({x1:.0f},{y1:.0f}): "
+            f"{n} series{extra}"
+            + (f" ({names})" if names else "")
         )
 
     def _on_pixel_clicked(self, x: float, y: float) -> None:
@@ -1541,16 +2124,20 @@ class MappingPanel(QWidget):
         if fov is None or fov.cube is None:
             self.status_message.emit("No cube available for pixel spectrum")
             return
-        ms = fov.spectrum_at_pixel(int(round(x)), int(round(y)))
+        self._last_pick_xy = (x, y)
+        nhood = self._neighborhood_size()
+        ms = fov.spectrum_at_pixel(int(round(x)), int(round(y)), neighborhood=nhood)
         if ms is None:
             return
         self._picked_spectrum = ms
         # Keep pick mode on so the next click updates the popup
         self.canvas.set_spot_markers([x], [y])
         self._show_pixel_spectrum(ms)
+        n_used = ms.metadata.get("n_pixels", 1)
         self.info_label.setText(
-            f"{ms.name}: {ms.spectrum.total_counts:.0f} counts — "
-            f"click another pixel to update, or Send → Analysis"
+            f"{ms.name}: {ms.spectrum.total_counts:.0f} counts"
+            + (f" from {n_used} pixels" if nhood > 1 else "")
+            + " — click another pixel to update, or Send → Analysis"
         )
         self.status_message.emit(f"Pixel spectrum {ms.name}")
 
@@ -1594,7 +2181,13 @@ class MappingPanel(QWidget):
         self.profile_map_list.blockSignals(True)
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            if (item.data(Qt.UserRole) or item.text()) == em.name:
+            data = item.data(Qt.UserRole)
+            name = (
+                data[1]
+                if isinstance(data, tuple) and data and data[0] == "map"
+                else (data if isinstance(data, str) else item.text())
+            )
+            if name == em.name:
                 item.setCheckState(Qt.Checked)
         self.profile_map_list.blockSignals(False)
         self._replot_last_line()
@@ -1678,7 +2271,12 @@ class MappingPanel(QWidget):
         self.profile_map_list.blockSignals(True)
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            name = item.data(Qt.UserRole) or item.text()
+            data = item.data(Qt.UserRole)
+            name = (
+                data[1]
+                if isinstance(data, tuple) and data and data[0] == "map"
+                else (data if isinstance(data, str) else item.text())
+            )
             item.setCheckState(
                 Qt.Checked if name in created else Qt.Unchecked
             )
@@ -1734,8 +2332,9 @@ class MappingPanel(QWidget):
             self.profile_plot.plot(dist, vals, pen=pen, name=name)
 
     def _plot_ipj_line_scan(self, line_scan: LineScan) -> None:
-        """Plot total counts + checked element ROIs vs point index for XGT line."""
+        """Plot total counts + element ROIs vs distance for an XGT line."""
         self._active_line_scan = line_scan
+        self._profile_source = "ipj"
         self.profile_plot.clear()
         if line_scan.n_points == 0:
             return
@@ -1747,7 +2346,7 @@ class MappingPanel(QWidget):
         )
 
         colors = ["#e41a1c", "#4daf4a", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
-        rois = self._checked_line_scan_rois()
+        rois = self._effective_element_rois()
         half = 0.15  # keV
         for ci, (sym, e_kev) in enumerate(rois):
             series = []
@@ -1771,8 +2370,7 @@ class MappingPanel(QWidget):
         self.info_label.setText(
             f"{line_scan.name}: total"
             + (f" + {n_roi} element ROI(s)" if n_roi else "")
-            + ". Check ROI elements under Tools (From Analysis), "
-            "or Send a point → Analysis."
+            + ". Check ROI elements under Tools, or select elements in Analysis."
         )
         if n_roi == 0:
             self.status_message.emit(
@@ -1861,14 +2459,8 @@ class MappingPanel(QWidget):
         self.spectrum_send_requested.emit(ms.spectrum, ms.peak_labels)
         self.status_message.emit(f"Sent “{ms.name}” to Analysis")
 
-    def _fit_line_scan(self) -> None:
-        if self._fitter is None or self._element_panel is None:
-            QMessageBox.warning(
-                self, "Fit line scan", "Analysis fitter is not connected."
-            )
-            return
-        # Prefer selected linescan, else first in current FOV / project
-        line_scan = None
+    def _ipj_line_scan_for_fit(self, *, current_fov_only: bool = False):
+        """Resolve an IPJ/XGT LineScan from the tree selection or FOV."""
         items = self.tree.selectedItems()
         if items:
             payload = items[0].data(0, Qt.UserRole)
@@ -1877,18 +2469,74 @@ class MappingPanel(QWidget):
                 if fov:
                     for ls in fov.line_scans:
                         if ls.name == payload[2]:
-                            line_scan = ls
-                            break
-        if line_scan is None and self.current_fov and self.current_fov.line_scans:
-            line_scan = self.current_fov.line_scans[0]
-        if line_scan is None and self.project:
-            for fov in self.project.fovs:
-                if fov.line_scans:
-                    line_scan = fov.line_scans[0]
-                    break
+                            return ls
+        if self.current_fov and self.current_fov.line_scans:
+            return self.current_fov.line_scans[0]
+        if current_fov_only or self.project is None:
+            return None
+        for fov in self.project.fovs:
+            if fov.line_scans:
+                return fov.line_scans[0]
+        return None
+
+    def _ensure_drawn_line_scan(self) -> Optional[LineScan]:
+        """Sample the cube along the current drawn transect (cached)."""
+        fov = self.current_fov
+        if self._last_line is None or fov is None or fov.cube is None:
+            return None
+        width = self._line_width()
+        key = (*self._last_line, width)
+        if self._drawn_line_scan is not None and self._drawn_cache_key == key:
+            return self._drawn_line_scan
+        x0, y0, x1, y1 = self._last_line
+        ls = fov.line_scan_from_drawn(x0, y0, x1, y1, width=width)
+        self._drawn_line_scan = ls
+        self._drawn_cache_key = key
+        return ls
+
+    def _resolve_line_scan_for_fit(self) -> Optional[LineScan]:
+        """Choose drawn transect vs IPJ series, asking when both exist."""
+        drawn = self._ensure_drawn_line_scan()
+        ipj = self._ipj_line_scan_for_fit(current_fov_only=drawn is not None)
+        if drawn is not None and ipj is not None:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Fit line scan")
+            msg.setText(
+                "Use the transect you just drew, or the IPJ/XGT point series?"
+            )
+            w = self._line_width()
+            drawn_info = drawn.name
+            if w > 1:
+                drawn_info += f"\n(averaging a {w} px-wide band)"
+            msg.setInformativeText(f"Drawn: {drawn_info}\nIPJ: {ipj.name}")
+            drawn_btn = msg.addButton("Drawn transect", QMessageBox.AcceptRole)
+            ipj_btn = msg.addButton("IPJ line scan", QMessageBox.AcceptRole)
+            msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(drawn_btn)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == drawn_btn:
+                return drawn
+            if clicked == ipj_btn:
+                return ipj
+            return None
+        if drawn is not None:
+            return drawn
+        return ipj
+
+    def _fit_line_scan(self) -> None:
+        if self._fitter is None or self._element_panel is None:
+            QMessageBox.warning(
+                self, "Fit line scan", "Analysis fitter is not connected."
+            )
+            return
+        line_scan = self._resolve_line_scan_for_fit()
         if line_scan is None or line_scan.n_points == 0:
             QMessageBox.information(
-                self, "Fit line scan", "No IPJ line-scan series found in this project."
+                self,
+                "Fit line scan",
+                "Draw a line on a site with a hyperspectral cube, "
+                "or select an IPJ/XGT line-scan series.",
             )
             return
 

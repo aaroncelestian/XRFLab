@@ -59,9 +59,43 @@ class SpectrumCube:
 
     def spectrum_at(self, x: int, y: int) -> np.ndarray:
         """Counts spectrum at pixel (x=col, y=row)."""
+        counts, _n = self.spectrum_neighborhood(x, y, size=1)
+        return counts
+
+    def spectrum_neighborhood(
+        self, x: int, y: int, size: int = 1
+    ) -> Tuple[np.ndarray, int]:
+        """Sum spectra in an odd size×size window centered at (x, y).
+
+        Pixels that fall off the map edge are omitted. Returns
+        ``(counts, n_pixels_used)``.
+        """
+        size = max(1, int(size))
+        if size % 2 == 0:
+            size += 1
         x = int(np.clip(x, 0, self.width - 1))
         y = int(np.clip(y, 0, self.height - 1))
-        return self.data[:, y, x].astype(np.float64)
+        half = size // 2
+        x0 = max(0, x - half)
+        x1 = min(self.width, x + half + 1)
+        y0 = max(0, y - half)
+        y1 = min(self.height, y + half + 1)
+        block = self.data[:, y0:y1, x0:x1]
+        n_used = int(block.shape[1] * block.shape[2])
+        return block.sum(axis=(1, 2)).astype(np.float64), n_used
+
+    def spectrum_in_mask(self, mask: np.ndarray) -> Tuple[np.ndarray, int]:
+        """Sum spectra where ``mask`` is True. Returns (counts, n_pixels)."""
+        m = np.asarray(mask, dtype=bool)
+        if m.shape != (self.height, self.width):
+            raise ValueError(
+                f"mask shape {m.shape} does not match map "
+                f"({self.height}, {self.width})"
+            )
+        n_used = int(m.sum())
+        if n_used == 0:
+            return np.zeros(self.n_channels, dtype=np.float64), 0
+        return self.data[:, m].sum(axis=1).astype(np.float64), n_used
 
     def sum_spectrum(self) -> np.ndarray:
         return self.data.sum(axis=(1, 2)).astype(np.float64)
@@ -83,6 +117,40 @@ class SpectrumCube:
             return self.data[ch].astype(np.float64)
         return self.data[mask].sum(axis=0).astype(np.float64)
 
+    def spectra_along_line(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        n_points: Optional[int] = None,
+        width: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Sample spectra along a transect, averaging a perpendicular band.
+
+        Returns:
+            distances, xs, ys, counts with shape (n_points, n_channels)
+        """
+        from core.mapping.profiles import band_offsets, line_distances, perpendicular_unit
+
+        length = float(np.hypot(x1 - x0, y1 - y0))
+        if n_points is None:
+            n_points = max(2, int(np.ceil(length)) + 1)
+        n_points = max(2, int(n_points))
+        xs = np.linspace(x0, x1, n_points)
+        ys = np.linspace(y0, y1, n_points)
+        dist = line_distances((x0, y0), (x1, y1), n_points)
+        px, py = perpendicular_unit((x0, y0), (x1, y1))
+        offsets = band_offsets(width)
+        acc = np.zeros((n_points, self.n_channels), dtype=np.float64)
+        for i, (x, y) in enumerate(zip(xs, ys)):
+            for off in offsets:
+                acc[i] += self.spectrum_at(
+                    int(round(x + px * off)), int(round(y + py * off))
+                )
+            acc[i] /= max(offsets.size, 1)
+        return dist, xs, ys, acc
+
     def mean_spectrum_line(
         self,
         x0: float,
@@ -90,19 +158,13 @@ class SpectrumCube:
         x1: float,
         y1: float,
         n_points: Optional[int] = None,
+        width: int = 1,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Sample spectra along a line; return (distances, mean spectrum)."""
-        length = float(np.hypot(x1 - x0, y1 - y0))
-        if n_points is None:
-            n_points = max(2, int(np.ceil(length)) + 1)
-        xs = np.linspace(x0, x1, n_points)
-        ys = np.linspace(y0, y1, n_points)
-        acc = np.zeros(self.n_channels, dtype=np.float64)
-        for x, y in zip(xs, ys):
-            acc += self.spectrum_at(int(round(x)), int(round(y)))
-        acc /= max(n_points, 1)
-        dist = np.linspace(0.0, length, n_points)
-        return dist, acc
+        dist, _xs, _ys, counts = self.spectra_along_line(
+            x0, y0, x1, y1, n_points=n_points, width=width
+        )
+        return dist, counts.mean(axis=0)
 
 
 def decode_listdata(

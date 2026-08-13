@@ -21,7 +21,10 @@ def get_element_lines(symbol, z):
         z: Atomic number
         
     Returns:
-        dict: Dictionary with line series (K, L, M, N) and their energies
+        dict: Dictionary with line series (K, L, M, N). Each entry is
+        {'name', 'energy', 'intensity', 'relative_intensity'} where
+        intensity is the xraylib radiative rate (or fallback approx) and
+        relative_intensity is normalized to the strongest line in that series (0–1).
     """
     if not XRAYLIB_AVAILABLE:
         return _get_fallback_lines(symbol, z)
@@ -47,8 +50,13 @@ def get_element_lines(symbol, z):
             try:
                 energy = xrl.LineEnergy(z, line_code)
                 if energy > 0:
-                    lines['K'].append({'name': name, 'energy': energy})
-            except:
+                    intensity = _line_radiative_rate(z, line_code)
+                    lines['K'].append({
+                        'name': name,
+                        'energy': energy,
+                        'intensity': intensity,
+                    })
+            except Exception:
                 pass
         
         # L lines
@@ -68,8 +76,13 @@ def get_element_lines(symbol, z):
             try:
                 energy = xrl.LineEnergy(z, line_code)
                 if energy > 0:
-                    lines['L'].append({'name': name, 'energy': energy})
-            except:
+                    intensity = _line_radiative_rate(z, line_code)
+                    lines['L'].append({
+                        'name': name,
+                        'energy': energy,
+                        'intensity': intensity,
+                    })
+            except Exception:
                 pass
         
         # M lines
@@ -84,14 +97,55 @@ def get_element_lines(symbol, z):
             try:
                 energy = xrl.LineEnergy(z, line_code)
                 if energy > 0:
-                    lines['M'].append({'name': name, 'energy': energy})
-            except:
+                    intensity = _line_radiative_rate(z, line_code)
+                    lines['M'].append({
+                        'name': name,
+                        'energy': energy,
+                        'intensity': intensity,
+                    })
+            except Exception:
                 pass
         
     except Exception as e:
         print(f"Error getting lines for {symbol}: {e}")
-    
+
+    _normalize_series_intensities(lines)
     return lines
+
+
+def _line_radiative_rate(z, line_code):
+    """Return xraylib radiative rate, or 0 if unavailable."""
+    try:
+        rate = float(xrl.RadRate(z, line_code))
+        return rate if rate > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _normalize_series_intensities(lines):
+    """
+    Attach relative_intensity (0–1) within each series.
+
+    If all radiative rates are missing, fall back to approximate branching ratios.
+    """
+    approx = {
+        'Kα1': 1.00, 'Kα': 1.00, 'Kα2': 0.50,
+        'Kβ1': 0.17, 'Kβ': 0.17, 'Kβ2': 0.05, 'Kβ3': 0.09,
+        'Lα1': 1.00, 'Lα': 1.00, 'Lα2': 0.11,
+        'Lβ1': 0.60, 'Lβ': 0.60, 'Lβ2': 0.25, 'Lβ3': 0.10, 'Lβ4': 0.08,
+        'Lγ1': 0.12, 'Lγ2': 0.04, 'Lγ3': 0.03,
+        'Mα1': 1.00, 'Mα': 1.00, 'Mα2': 0.50, 'Mβ': 0.60, 'Mγ': 0.15,
+    }
+
+    for series, entries in lines.items():
+        if not entries:
+            continue
+        for entry in entries:
+            if entry.get('intensity', 0) <= 0:
+                entry['intensity'] = float(approx.get(entry.get('name'), 0.1))
+        max_i = max(float(e.get('intensity', 0.0)) for e in entries) or 1.0
+        for entry in entries:
+            entry['relative_intensity'] = float(entry.get('intensity', 0.0)) / max_i
 
 
 def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
@@ -267,14 +321,16 @@ def _get_fallback_lines(symbol, z):
         k_alpha = 10.2 * (z - 1.5)**2 / 1000  # Convert to keV
         k_beta = 10.2 * (z - 1.3)**2 / 1000
         
-        lines['K'].append({'name': 'Kα', 'energy': k_alpha})
-        lines['K'].append({'name': 'Kβ', 'energy': k_beta})
+        lines['K'].append({'name': 'Kα1', 'energy': k_alpha, 'intensity': 1.0})
+        lines['K'].append({'name': 'Kα2', 'energy': k_alpha * 0.998, 'intensity': 0.5})
+        lines['K'].append({'name': 'Kβ1', 'energy': k_beta, 'intensity': 0.17})
     
     if z >= 21:  # Sc and above have measurable L lines
         l_alpha = 10.2 * (z - 7.4)**2 / 1000 * 0.15  # Rough approximation
         l_beta = 10.2 * (z - 7.2)**2 / 1000 * 0.15
         
-        lines['L'].append({'name': 'Lα', 'energy': l_alpha})
-        lines['L'].append({'name': 'Lβ', 'energy': l_beta})
-    
+        lines['L'].append({'name': 'Lα1', 'energy': l_alpha, 'intensity': 1.0})
+        lines['L'].append({'name': 'Lβ1', 'energy': l_beta, 'intensity': 0.6})
+
+    _normalize_series_intensities(lines)
     return lines

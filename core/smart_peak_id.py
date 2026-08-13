@@ -502,6 +502,47 @@ def common_xrf_elements() -> List[Dict]:
     return out
 
 
+def candidates_at_energy(
+    energy_kev: float,
+    candidate_elements: Optional[Sequence[Dict]] = None,
+    energy_tol_kev: float = 0.150,
+    max_results: int = 12,
+) -> List[Dict]:
+    """
+    Rank emission-line candidates near a clicked energy.
+
+    Returns list of dicts sorted by |ΔE|:
+      symbol, z, line, line_energy, delta_kev, delta_ev
+    """
+    e0 = float(energy_kev)
+    candidates = list(candidate_elements) if candidate_elements else common_xrf_elements()
+    hits: List[Dict] = []
+
+    for elem in candidates:
+        symbol = elem.get('symbol')
+        z = elem.get('z')
+        if not symbol or not z:
+            continue
+        z = int(z)
+        line_map = _line_lookup(symbol, z)
+        for line_name, line_e in _primary_lines(line_map):
+            dist = abs(e0 - float(line_e))
+            if dist > energy_tol_kev:
+                continue
+            hits.append({
+                'symbol': symbol,
+                'z': z,
+                'line': line_name,
+                'line_energy': float(line_e),
+                'delta_kev': float(e0 - line_e),
+                'delta_ev': float((e0 - line_e) * 1000.0),
+                'abs_delta_kev': dist,
+            })
+
+    hits.sort(key=lambda h: (h['abs_delta_kev'], h['symbol'], h['line']))
+    return hits[: max(1, int(max_results))]
+
+
 def auto_id_peak_positions(
     peak_positions: Sequence[dict],
     candidate_elements: Optional[Sequence[Dict]] = None,

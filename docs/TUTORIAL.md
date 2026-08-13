@@ -161,7 +161,7 @@ Work in the **Analysis** tab. Left sub-tabs in order:
 3. Tune prominence / min height / separation if needed.
 4. Click **Find Peaks + Auto-ID**.
 
-Peaks are marked on the spectrum, listed for editing, and matched to common XRF lines. The app then opens **Elements** with suggested selections.
+Peaks are marked on the spectrum, listed for editing, and matched to common XRF lines. Suggested elements are selected on the **Elements** tab (you switch there when ready to review).
 
 5. Delete obvious false peaks from the Found Peaks list before fitting.
 

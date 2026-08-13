@@ -29,6 +29,7 @@ from core.smart_peak_id import (
     analyze_fitted_peaks,
     apply_smart_id_suggestions,
     auto_id_peak_positions,
+    candidates_at_energy,
 )
 
 
@@ -334,6 +335,7 @@ class MainWindow(QMainWindow):
         # Right side - Spectrum display (keep as is)
         self.spectrum_widget = SpectrumWidget()
         self.spectrum_widget.log_scale_changed.connect(self._on_plot_log_scale_changed)
+        self.spectrum_widget.energy_selected.connect(self.on_spectrum_energy_picked)
         main_splitter.addWidget(self.spectrum_widget)
         
         # Set initial sizes for horizontal splitter (50% left, 50% right)
@@ -347,6 +349,8 @@ class MainWindow(QMainWindow):
         self.element_panel.peak_find_requested.connect(self.preview_peak_find)
         self.element_panel.peak_list_changed.connect(self.on_peak_list_changed)
         self.element_panel.element_clicked.connect(self.on_element_clicked)
+        self.element_panel.identify_on_plot_toggled.connect(self.on_identify_on_plot_toggled)
+        self.element_panel.identify_add_element.connect(self.on_identify_add_element)
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
         self.results_panel.export_button.clicked.connect(self.export_results)
@@ -393,8 +397,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(5, 5, 5, 5)
 
         hint = QLabel(
-            "Review auto-ID selections from Peak Find. Uncheck false IDs, "
-            "add missing elements, then continue to Fitting."
+            "Review auto-ID selections from Peak Find, or use "
+            "“Click Spectrum to Identify” to pick peaks on the plot. "
+            "Then continue to Fitting."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #555; padding: 4px;")
@@ -881,15 +886,12 @@ class MainWindow(QMainWindow):
                     "Try lowering Prominence or Min height."
                 )
 
-            # Guide user to Elements → Fitting
-            if hasattr(self, 'analysis_left_tabs'):
-                self.analysis_left_tabs.setCurrentIndex(self.TAB_ELEMENTS)
-
+            # Stay on Peak Find so the user can edit the found-peak list first
             if identified:
                 msg = (
                     f"Peak find: {len(preview_peaks)} peaks; "
                     f"auto-ID selected {len(identified)} element(s). "
-                    f"Review Elements, then Fitting → Fit Spectrum."
+                    f"Review the peak list, then Elements → Fitting."
                 )
             else:
                 msg = (
@@ -1070,6 +1072,47 @@ class MainWindow(QMainWindow):
     def on_elements_changed(self, elements):
         """Handle element selection changes"""
         self.session.set_elements(elements)
+
+    def on_identify_on_plot_toggled(self, enabled):
+        """Enable/disable click-to-identify on the spectrum plot."""
+        self.spectrum_widget.set_energy_pick_mode(bool(enabled))
+        if enabled:
+            self.status_bar.showMessage(
+                "Identify mode on — click the spectrum for line candidates",
+                5000,
+            )
+        else:
+            self.status_bar.showMessage("Identify mode off", 3000)
+
+    def on_spectrum_energy_picked(self, energy_kev):
+        """Show ranked emission-line candidates for a clicked energy."""
+        hits = candidates_at_energy(float(energy_kev), energy_tol_kev=0.150)
+        self.element_panel.set_identify_candidates(energy_kev, hits)
+        if hits:
+            top = hits[0]
+            self.status_bar.showMessage(
+                f"{energy_kev:.3f} keV → top: {top['symbol']}-{top['line']} "
+                f"(Δ {abs(top['delta_ev']):.0f} eV); "
+                f"{len(hits)} candidate(s)",
+                8000,
+            )
+        else:
+            self.status_bar.showMessage(
+                f"{energy_kev:.3f} keV — no common-XRF lines within ±150 eV",
+                5000,
+            )
+
+    def on_identify_add_element(self, symbol):
+        """Add an identify-candidate element to the periodic-table selection."""
+        self.element_panel.add_selected_element(symbol)
+        self.session.set_elements(self.element_panel.get_selected_elements())
+        self.status_bar.showMessage(f"Added {symbol} to element selection", 4000)
+        # Overlay that element's lines for confirmation
+        from core.advanced_peak_fitting import get_element_z
+        z = get_element_z(symbol)
+        if z:
+            self._displayed_element_lines = None
+            self.on_element_clicked(symbol, z)
     
     def on_element_clicked(self, symbol, z):
         """Handle element click — show emission lines, or clear if already shown"""

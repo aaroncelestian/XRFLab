@@ -6,8 +6,11 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, Signal
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+
+from core.mapping.profiles import line_band_edges
+from core.mapping.regions import circle_outline, polygon_outline, rect_outline
 
 
 def _grid_shape(n: int) -> Tuple[int, int]:
@@ -39,6 +42,7 @@ class MapCanvas(QWidget):
     line_drawn = Signal(float, float, float, float)  # x0, y0, x1, y1
     cursor_moved = Signal(float, float, float)  # x, y, value
     pixel_clicked = Signal(float, float)  # x, y (map coords)
+    region_drawn = Signal(str, object)  # kind, params
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,8 +57,12 @@ class MapCanvas(QWidget):
         self._drawing = False
         self._line_mode = False
         self._pick_mode = False
+        self._region_mode: Optional[str] = None  # rect | circle | poly
+        self._region_points: List[Tuple[float, float]] = []
+        self._region_outline: Optional[Tuple[list, list]] = None
         self._start: Optional[Tuple[float, float]] = None
         self._end: Optional[Tuple[float, float]] = None
+        self._band_width: int = 1
         self._rgb_mode = False
         self._click_proxy = None
         self._move_proxy = None
@@ -67,6 +75,8 @@ class MapCanvas(QWidget):
         self._line_mode = bool(enabled)
         if enabled:
             self._pick_mode = False
+            self._region_mode = None
+            self._region_points = []
         if not enabled:
             self._drawing = False
             self._start = None
@@ -75,13 +85,44 @@ class MapCanvas(QWidget):
         self._pick_mode = bool(enabled)
         if enabled:
             self._line_mode = False
+            self._region_mode = None
+            self._region_points = []
             self._drawing = False
+
+    def set_region_mode(self, mode: Optional[str]) -> None:
+        """mode is 'rect', 'circle', 'poly', or None to stop drawing."""
+        self._region_mode = mode if mode else None
+        self._region_points = []
+        self._drawing = False
+        if self._region_mode:
+            self._line_mode = False
+            self._pick_mode = False
+
+    def clear_region(self) -> None:
+        self._region_points = []
+        self._region_outline = None
+        self._drawing = False
+        for p in self._panels:
+            if "region" in p:
+                p["region"].setData([], [])
+
+    def set_region_outline(self, xs, ys) -> None:
+        self._region_outline = (list(xs), list(ys))
+        for p in self._panels:
+            if "region" in p:
+                p["region"].setData(list(xs), list(ys))
 
     def clear_line(self) -> None:
         self._start = None
         self._end = None
         for p in self._panels:
             p["line"].setData([], [])
+            self._set_panel_band(p, None)
+
+    def set_band_width(self, width: int) -> None:
+        """Perpendicular averaging width in pixels (1 = center line only)."""
+        self._band_width = max(1, int(width))
+        self._restore_overlays()
 
     def set_spot_markers(self, xs, ys) -> None:
         for p in self._panels:
@@ -90,11 +131,21 @@ class MapCanvas(QWidget):
             else:
                 p["spot"].setData(x=list(xs), y=list(ys))
 
-    def set_line(self, x0: float, y0: float, x1: float, y1: float) -> None:
+    def set_line(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        width: Optional[int] = None,
+    ) -> None:
         self._start = (x0, y0)
         self._end = (x1, y1)
+        if width is not None:
+            self._band_width = max(1, int(width))
         for p in self._panels:
             p["line"].setData([x0, x1], [y0, y1])
+            self._set_panel_band(p, (x0, y0, x1, y1))
 
     def current_line(self) -> Optional[Tuple[float, float, float, float]]:
         if self._start is None or self._end is None:
@@ -208,18 +259,36 @@ class MapCanvas(QWidget):
         view.addItem(image)
         line = pg.PlotDataItem(pen=pg.mkPen("#ffcc00", width=2))
         view.addItem(line)
+        dash = pg.mkPen("#ffcc00", width=1, style=Qt.DashLine)
+        band_a = pg.PlotDataItem(pen=dash)
+        band_b = pg.PlotDataItem(pen=dash)
+        view.addItem(band_a)
+        view.addItem(band_b)
+        band_fill = pg.FillBetweenItem(
+            band_a, band_b, brush=pg.mkBrush(255, 204, 0, 55)
+        )
+        view.addItem(band_fill)
         spot = pg.ScatterPlotItem(
             size=8,
             brush=pg.mkBrush(0, 200, 255, 180),
             pen=pg.mkPen(None),
         )
         view.addItem(spot)
+        region = pg.PlotDataItem(
+            pen=pg.mkPen("#00e5ff", width=2),
+            fillLevel=None,
+        )
+        view.addItem(region)
         return {
             "view": view,
             "image": image,
             "label": label,
             "line": line,
+            "band_a": band_a,
+            "band_b": band_b,
+            "band_fill": band_fill,
             "spot": spot,
+            "region": region,
             "data": None,
             "title": "",
         }
@@ -253,12 +322,32 @@ class MapCanvas(QWidget):
             scene.sigMouseMoved, rateLimit=40, slot=self._on_move
         )
 
+    def _set_panel_band(
+        self, panel: dict, line: Optional[Tuple[float, float, float, float]]
+    ) -> None:
+        if (
+            line is None
+            or self._band_width <= 1
+            or "band_a" not in panel
+        ):
+            if "band_a" in panel:
+                panel["band_a"].setData([], [])
+                panel["band_b"].setData([], [])
+            return
+        x0, y0, x1, y1 = line
+        a0, a1, b0, b1 = line_band_edges((x0, y0), (x1, y1), self._band_width)
+        panel["band_a"].setData([a0[0], a1[0]], [a0[1], a1[1]])
+        panel["band_b"].setData([b0[0], b1[0]], [b0[1], b1[1]])
+
     def _restore_overlays(self) -> None:
         if self._start is not None and self._end is not None:
             self.set_line(*self._start, *self._end)
         elif self._start is not None:
             for p in self._panels:
                 p["line"].setData([self._start[0]], [self._start[1]])
+                self._set_panel_band(p, None)
+        if self._region_outline is not None:
+            self.set_region_outline(*self._region_outline)
 
     def _panel_at(self, scene_pos) -> Optional[dict]:
         for panel in self._panels:
@@ -308,6 +397,10 @@ class MapCanvas(QWidget):
             self.set_spot_markers([x], [y])
             return
 
+        if self._region_mode:
+            self._on_region_click(ev, x, y)
+            return
+
         if not self._line_mode:
             return
         if not self._drawing or self._start is None:
@@ -321,6 +414,7 @@ class MapCanvas(QWidget):
             self._drawing = False
             for p in self._panels:
                 p["line"].setData([self._start[0], x], [self._start[1], y])
+                self._set_panel_band(p, (self._start[0], self._start[1], x, y))
             self.line_drawn.emit(self._start[0], self._start[1], x, y)
 
     def _on_move(self, event):
@@ -337,3 +431,104 @@ class MapCanvas(QWidget):
         if self._line_mode and self._drawing and self._start is not None:
             for p in self._panels:
                 p["line"].setData([self._start[0], x], [self._start[1], y])
+                self._set_panel_band(p, (self._start[0], self._start[1], x, y))
+        if self._region_mode:
+            self._preview_region(x, y)
+
+    def _shift_held(self, ev=None) -> bool:
+        if ev is not None and hasattr(ev, "modifiers"):
+            return bool(ev.modifiers() & Qt.ShiftModifier)
+        app = QApplication.instance()
+        if app is not None:
+            return bool(app.keyboardModifiers() & Qt.ShiftModifier)
+        return False
+
+    def _square_corner(
+        self, x0: float, y0: float, x: float, y: float, ev=None
+    ) -> Tuple[float, float]:
+        if not self._shift_held(ev):
+            return x, y
+        dx, dy = x - x0, y - y0
+        side = max(abs(dx), abs(dy))
+        if side <= 0:
+            return x, y
+        return x0 + (side if dx >= 0 else -side), y0 + (side if dy >= 0 else -side)
+
+    def _on_region_click(self, ev, x: float, y: float) -> None:
+        button = ev.button() if hasattr(ev, "button") else Qt.LeftButton
+        double = bool(ev.double()) if hasattr(ev, "double") else False
+        mode = self._region_mode
+        if button == Qt.RightButton:
+            if mode == "poly" and len(self._region_points) >= 3:
+                self._finish_region("poly", list(self._region_points))
+            else:
+                self._region_points = []
+                self._drawing = False
+                if self._region_outline is not None:
+                    self.set_region_outline(*self._region_outline)
+                else:
+                    self.set_region_outline([], [])
+            return
+
+        if button != Qt.LeftButton:
+            return
+
+        if mode == "poly":
+            if double and len(self._region_points) >= 3:
+                self._finish_region("poly", list(self._region_points))
+                return
+            if (
+                len(self._region_points) >= 3
+                and abs(x - self._region_points[0][0]) <= 1.5
+                and abs(y - self._region_points[0][1]) <= 1.5
+            ):
+                self._finish_region("poly", list(self._region_points))
+                return
+            if not double:
+                self._region_points.append((x, y))
+                self._drawing = True
+                self._preview_region(x, y, ev)
+            return
+
+        # rect / circle: two clicks
+        if not self._region_points:
+            self._region_points = [(x, y)]
+            self._drawing = True
+            self._preview_region(x, y, ev)
+            return
+        x0, y0 = self._region_points[0]
+        if mode == "rect":
+            x, y = self._square_corner(x0, y0, x, y, ev)
+            self._finish_region("rect", (x0, y0, x, y))
+        else:
+            radius = float(np.hypot(x - x0, y - y0))
+            self._finish_region("circle", (x0, y0, radius))
+
+    def _preview_region(self, x: float, y: float, ev=None) -> None:
+        mode = self._region_mode
+        if not mode or not self._region_points:
+            return
+        if mode == "rect":
+            x0, y0 = self._region_points[0]
+            x, y = self._square_corner(x0, y0, x, y, ev)
+            xs, ys = rect_outline(x0, y0, x, y)
+        elif mode == "circle":
+            x0, y0 = self._region_points[0]
+            radius = float(np.hypot(x - x0, y - y0))
+            xs, ys = circle_outline(x0, y0, radius)
+        else:
+            pts = list(self._region_points) + [(x, y)]
+            xs, ys = polygon_outline(pts)
+        for p in self._panels:
+            if "region" in p:
+                p["region"].setData(list(xs), list(ys))
+
+    def _finish_region(self, kind: str, params) -> None:
+        from core.mapping.regions import region_outline
+
+        xs, ys = region_outline(kind, params)
+        self._region_outline = (list(xs), list(ys))
+        self._region_points = []
+        self._drawing = False
+        self.set_region_outline(xs, ys)
+        self.region_drawn.emit(kind, params)

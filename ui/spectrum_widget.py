@@ -26,6 +26,8 @@ class SpectrumWidget(QWidget):
         self.background_data = None
         self.peak_markers = []
         self._peak_marker_specs = []  # list of dicts to redraw after plot clear
+        self._energy_pick_mode = False
+        self._pick_marker = None
         
         self._setup_ui()
         self._configure_plot()
@@ -97,9 +99,19 @@ class SpectrumWidget(QWidget):
         self.hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('k', width=1, style=Qt.DashLine))
         plot_item.addItem(self.vLine, ignoreBounds=True)
         plot_item.addItem(self.hLine, ignoreBounds=True)
+
+        # Click-to-identify marker (hidden until pick mode uses it)
+        self._pick_marker = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen('#c62828', width=2, style=Qt.SolidLine),
+        )
+        self._pick_marker.setVisible(False)
+        plot_item.addItem(self._pick_marker, ignoreBounds=True)
         
-        # Connect mouse movement
+        # Connect mouse movement and clicks
         self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_clicked)
         
         # Residuals plot configuration
         residuals_item = self.residuals_widget.getPlotItem()
@@ -132,7 +144,7 @@ class SpectrumWidget(QWidget):
         self._update_plot()
     
     def add_peak_marker(self, energy, element=None, line=None, color=None, label=None,
-                        redraw=True):
+                        redraw=True, relative_intensity=None):
         """
         Add a peak marker at specified energy
         
@@ -143,6 +155,7 @@ class SpectrumWidget(QWidget):
             color: Optional pen/label color
             label: Optional explicit label text
             redraw: If False, defer redraw (caller should call _redraw_peak_markers)
+            relative_intensity: Optional 0–1 strength (scales stick height / opacity)
         """
         if label is None:
             if element and line:
@@ -164,6 +177,9 @@ class SpectrumWidget(QWidget):
             'energy': float(energy),
             'label': label,
             'color': color,
+            'relative_intensity': (
+                None if relative_intensity is None else float(relative_intensity)
+            ),
         }
         self._peak_marker_specs.append(spec)
         if redraw:
@@ -227,12 +243,63 @@ class SpectrumWidget(QWidget):
         positions = (0.96, 0.82, 0.68, 0.88, 0.74, 0.60)
         ordered = sorted(self._peak_marker_specs, key=lambda s: s['energy'])
         for i, spec in enumerate(ordered):
-            spec['position'] = positions[i % len(positions)]
+            # Intensity-scaled sticks place labels near stick tip instead
+            if spec.get('relative_intensity') is not None:
+                rel = max(0.05, min(1.0, float(spec['relative_intensity'])))
+                spec['position'] = 0.12 + 0.82 * rel
+            else:
+                spec['position'] = positions[i % len(positions)]
     
+    def _intensity_stick_scale(self):
+        """Counts scale for relative-intensity sticks (fraction of spectrum max)."""
+        if self.spectrum_data is not None and len(self.spectrum_data.counts):
+            peak = float(np.nanmax(self.spectrum_data.counts))
+            if peak > 0:
+                return 0.85 * peak
+        # No spectrum loaded — arbitrary display units
+        return 1000.0
+
     def _draw_peak_marker(self, spec):
         """Draw one stored peak marker onto the current plot"""
         plot_item = self.plot_widget.getPlotItem()
         color = spec['color']
+        rel = spec.get('relative_intensity')
+
+        if rel is not None:
+            # Vertical stick whose height tracks relative radiative intensity
+            rel = max(0.05, min(1.0, float(rel)))
+            y_top = rel * self._intensity_stick_scale()
+            width = 1.0 + 1.5 * rel
+            alpha = int(80 + 175 * rel)
+            pen = pg.mkPen(color, width=width)
+            # Parse color for alpha if possible
+            try:
+                qcolor = QColor(color)
+                qcolor.setAlpha(alpha)
+                pen = pg.mkPen(qcolor, width=width)
+            except Exception:
+                pass
+
+            e = float(spec['energy'])
+            stick = plot_item.plot(
+                [e, e],
+                [0.0, y_top],
+                pen=pen,
+            )
+            self.peak_markers.append(stick)
+
+            # Text label near stick tip with intensity percent
+            text = pg.TextItem(
+                text=spec['label'],
+                color=color,
+                anchor=(0.5, 1.0),
+                fill=pg.mkBrush(255, 255, 255, 210),
+            )
+            text.setPos(e, y_top)
+            plot_item.addItem(text)
+            self.peak_markers.append(text)
+            return
+
         line_item = pg.InfiniteLine(
             pos=spec['energy'],
             angle=90,
@@ -273,39 +340,42 @@ class SpectrumWidget(QWidget):
     
     def show_element_lines(self, symbol, z):
         """
-        Show emission lines for an element
+        Show emission lines for an element, scaled by relative radiative intensity.
+
+        Stick height / opacity and the label percent are normalized within each
+        series (K, L, M) so the strongest line in that series is 100%.
         
         Args:
             symbol: Element symbol
             z: Atomic number
         """
-        # Get emission lines
         lines = get_element_lines(symbol, z)
         
-        # Define colors for different series
         series_colors = {
-            'K': 'r',      # Red for K lines
-            'L': 'g',      # Green for L lines
-            'M': 'b',      # Blue for M lines
-            'N': 'm'       # Magenta for N lines
+            'K': 'r',
+            'L': 'g',
+            'M': 'b',
+            'N': 'm',
         }
         
         self.clear_peak_markers()
         
-        # Add markers for each line
         for series, color in series_colors.items():
-            if lines[series]:
-                for line_data in lines[series]:
-                    energy = line_data['energy']
-                    name = line_data['name']
-                    self.add_peak_marker(
-                        energy,
-                        element=symbol,
-                        line=name,
-                        color=color,
-                        label=f"{symbol}-{name}",
-                        redraw=False,
-                    )
+            for line_data in lines.get(series, []) or []:
+                energy = line_data['energy']
+                name = line_data['name']
+                rel = float(line_data.get('relative_intensity', 1.0) or 1.0)
+                pct = int(round(100.0 * rel))
+                label = f"{symbol}-{name} {pct}%"
+                self.add_peak_marker(
+                    energy,
+                    element=symbol,
+                    line=name,
+                    color=color,
+                    label=label,
+                    relative_intensity=rel,
+                    redraw=False,
+                )
         self._redraw_peak_markers()
     
     def set_log_scale(self, enabled):
@@ -345,6 +415,8 @@ class SpectrumWidget(QWidget):
         # Re-add crosshair and legend after clear
         plot_item.addItem(self.vLine, ignoreBounds=True)
         plot_item.addItem(self.hLine, ignoreBounds=True)
+        if self._pick_marker is not None:
+            plot_item.addItem(self._pick_marker, ignoreBounds=True)
         self._ensure_legend(plot_item)
         
         if self.spectrum_data is None:
@@ -400,6 +472,49 @@ class SpectrumWidget(QWidget):
             symbolBrush='b'
         )
     
+    def set_energy_pick_mode(self, enabled: bool):
+        """Enable/disable click-to-identify energy picking on the main plot."""
+        self._energy_pick_mode = bool(enabled)
+        if self._pick_marker is not None and not enabled:
+            self._pick_marker.setVisible(False)
+        if enabled:
+            self.info_label.setText(
+                "Identify mode: click the spectrum to list line candidates"
+            )
+            self.plot_widget.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.plot_widget.unsetCursor()
+            if self.spectrum_data is None:
+                self.info_label.setText("Energy: -- keV | Counts: --")
+
+    def mark_picked_energy(self, energy_kev: float):
+        """Show a solid marker at the last picked energy."""
+        if self._pick_marker is None:
+            return
+        self._pick_marker.setPos(float(energy_kev))
+        self._pick_marker.setVisible(True)
+
+    def _on_mouse_clicked(self, event):
+        """Emit energy_selected when identify/pick mode is active."""
+        if not self._energy_pick_mode:
+            return
+        if getattr(event, "button", lambda: None)() not in (
+            Qt.MouseButton.LeftButton,
+            1,  # Qt.LeftButton numeric fallback
+        ):
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        scene_pos = event.scenePos()
+        if not plot_item.sceneBoundingRect().contains(scene_pos):
+            return
+        mouse_point = plot_item.vb.mapSceneToView(scene_pos)
+        energy = float(mouse_point.x())
+        if self.spectrum_data is not None and len(self.spectrum_data.energy):
+            idx = int(np.argmin(np.abs(self.spectrum_data.energy - energy)))
+            energy = float(self.spectrum_data.energy[idx])
+        self.mark_picked_energy(energy)
+        self.energy_selected.emit(energy)
+
     def _on_mouse_moved(self, pos):
         """Handle mouse movement for crosshair and info display"""
         plot_item = self.plot_widget.getPlotItem()
@@ -412,6 +527,7 @@ class SpectrumWidget(QWidget):
         # Update info label
         energy = mouse_point.x()
         counts = mouse_point.y()
+        prefix = "Identify · " if self._energy_pick_mode else ""
         
         if self.spectrum_data is not None:
             # Find nearest data point
@@ -420,15 +536,15 @@ class SpectrumWidget(QWidget):
                 actual_energy = self.spectrum_data.energy[idx]
                 actual_counts = self.spectrum_data.counts[idx]
                 self.info_label.setText(
-                    f"Energy: {actual_energy:.3f} keV | Counts: {actual_counts:.0f}"
+                    f"{prefix}Energy: {actual_energy:.3f} keV | Counts: {actual_counts:.0f}"
                 )
             else:
                 self.info_label.setText(
-                    f"Energy: {energy:.3f} keV | Counts: {counts:.0f}"
+                    f"{prefix}Energy: {energy:.3f} keV | Counts: {counts:.0f}"
                 )
         else:
             self.info_label.setText(
-                f"Energy: {energy:.3f} keV | Counts: {counts:.0f}"
+                f"{prefix}Energy: {energy:.3f} keV | Counts: {counts:.0f}"
             )
     
     def export_plot(self, file_path):

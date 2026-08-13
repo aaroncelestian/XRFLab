@@ -185,7 +185,10 @@ class MappingFOV:
 
     def sum_spectrum(self) -> Optional[MapSpectrum]:
         for s in self.spectra:
-            if s.kind == "sum" or "sum" in s.name.lower():
+            if s.kind == "sum":
+                return s
+        for s in self.spectra:
+            if s.kind != "roi" and "sum" in s.name.lower():
                 return s
         return None
 
@@ -217,12 +220,50 @@ class MappingFOV:
         self.element_maps.sort(key=lambda m: m.name)
         return em
 
-    def spectrum_at_pixel(self, x: int, y: int) -> Optional[MapSpectrum]:
-        """Extract a MapSpectrum from the hyperspectral cube at pixel (x, y)."""
+    def pixel_count(self) -> int:
+        if self.width and self.height:
+            return int(self.width) * int(self.height)
+        if self.cube is not None:
+            return int(self.cube.width) * int(self.cube.height)
+        return 0
+
+    def estimated_dwell_s(self) -> Optional[float]:
+        """Seconds per pixel from map live time / pixel count, if known."""
+        dwell = self.metadata.get("dwell_s")
+        if dwell is not None:
+            try:
+                val = float(dwell)
+            except (TypeError, ValueError):
+                val = 0.0
+            if val > 0:
+                return val
+        sum_ms = self.sum_spectrum()
+        n = self.pixel_count()
+        if sum_ms is not None and n > 0:
+            live = float(sum_ms.spectrum.live_time)
+            if live > 0:
+                return live / n
+        return None
+
+    def acquisition_summary(self) -> str:
+        from core.mapping.display import format_acquisition
+
+        return format_acquisition(self.metadata)
+
+    def spectrum_at_pixel(
+        self,
+        x: int,
+        y: int,
+        neighborhood: int = 1,
+    ) -> Optional[MapSpectrum]:
+        """Extract a MapSpectrum from the cube at (x, y), optionally summing neighbors."""
         if self.cube is None:
             return None
 
-        counts = self.cube.spectrum_at(x, y)
+        size = max(1, int(neighborhood))
+        if size % 2 == 0:
+            size += 1
+        counts, n_used = self.cube.spectrum_neighborhood(x, y, size=size)
         energy = self.cube.energy_axis_kev()
         # Align energy scale with FOV sum spectrum when available
         sum_ms = self.sum_spectrum()
@@ -236,17 +277,32 @@ class MappingFOV:
             counts = fine
             energy = sum_ms.spectrum.energy.copy()
 
-        name = f"Pixel ({int(x)}, {int(y)})"
+        if size > 1:
+            name = f"Pixel ({int(x)}, {int(y)}) {size}×{size} sum"
+        else:
+            name = f"Pixel ({int(x)}, {int(y)})"
+        dwell = self.estimated_dwell_s()
+        if dwell is not None:
+            live_time = float(dwell) * n_used
+            real_time = live_time
+        elif sum_ms is not None:
+            live_time = float(sum_ms.spectrum.live_time)
+            real_time = float(sum_ms.spectrum.real_time)
+        else:
+            live_time = 100.0
+            real_time = 100.0
         sp = Spectrum(
             energy=energy,
             counts=counts,
-            live_time=float(sum_ms.spectrum.live_time) if sum_ms else 100.0,
-            real_time=float(sum_ms.spectrum.real_time) if sum_ms else 100.0,
+            live_time=live_time,
+            real_time=real_time,
             metadata={
                 "name": name,
                 "source": "cube_pixel",
                 "x": int(x),
                 "y": int(y),
+                "neighborhood": size,
+                "n_pixels": n_used,
             },
         )
         return MapSpectrum(
@@ -256,7 +312,149 @@ class MappingFOV:
             y=float(y),
             kind="roi",
             peak_labels=list(sum_ms.peak_labels) if sum_ms else [],
-            metadata={"source": "cube_pixel"},
+            metadata={
+                "source": "cube_pixel",
+                "neighborhood": size,
+                "n_pixels": n_used,
+            },
+        )
+
+    def spectrum_in_region(
+        self,
+        kind: str,
+        params,
+        name: Optional[str] = None,
+    ) -> Optional[MapSpectrum]:
+        """Sum the cube over a rectangle, circle, or polygon ROI."""
+        if self.cube is None:
+            return None
+        from core.mapping.regions import region_label, region_mask
+
+        mask = region_mask(self.cube.height, self.cube.width, kind, params)
+        counts, n_used = self.cube.spectrum_in_mask(mask)
+        if n_used == 0:
+            return None
+        energy = self.cube.energy_axis_kev()
+        sum_ms = self.sum_spectrum()
+        if sum_ms is not None and sum_ms.spectrum.num_channels == counts.size:
+            energy = sum_ms.spectrum.energy.copy()
+        elif sum_ms is not None and sum_ms.spectrum.num_channels == counts.size * 2:
+            fine = np.zeros(counts.size * 2, dtype=np.float64)
+            fine[0::2] = counts * 0.5
+            fine[1::2] = counts * 0.5
+            counts = fine
+            energy = sum_ms.spectrum.energy.copy()
+
+        label = name or region_label(kind, params, n_used)
+        dwell = self.estimated_dwell_s()
+        if dwell is not None:
+            live_time = float(dwell) * n_used
+            real_time = live_time
+        elif sum_ms is not None:
+            live_time = float(sum_ms.spectrum.live_time)
+            real_time = float(sum_ms.spectrum.real_time)
+        else:
+            live_time = 100.0
+            real_time = 100.0
+        sp = Spectrum(
+            energy=energy,
+            counts=counts,
+            live_time=live_time,
+            real_time=real_time,
+            metadata={
+                "name": label,
+                "source": "cube_region",
+                "region_kind": kind,
+                "n_pixels": n_used,
+            },
+        )
+        return MapSpectrum(
+            spectrum=sp,
+            name=label,
+            kind="roi",
+            peak_labels=list(sum_ms.peak_labels) if sum_ms else [],
+            metadata={
+                "source": "cube_region",
+                "region_kind": kind,
+                "n_pixels": n_used,
+            },
+        )
+
+    def line_scan_from_drawn(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        n_points: Optional[int] = None,
+        width: int = 1,
+    ) -> Optional[LineScan]:
+        """Build a LineScan by sampling the cube along a drawn transect."""
+        if self.cube is None:
+            return None
+        dist, xs, ys, counts = self.cube.spectra_along_line(
+            x0, y0, x1, y1, n_points=n_points, width=width
+        )
+        sum_ms = self.sum_spectrum()
+        energy = self.cube.energy_axis_kev()
+        live_time = 100.0
+        real_time = 100.0
+        peak_labels: List[Dict[str, Any]] = []
+        if sum_ms is not None:
+            live_time = float(sum_ms.spectrum.live_time)
+            real_time = float(sum_ms.spectrum.real_time)
+            peak_labels = list(sum_ms.peak_labels)
+            if sum_ms.spectrum.num_channels == counts.shape[1]:
+                energy = sum_ms.spectrum.energy.copy()
+            elif sum_ms.spectrum.num_channels == counts.shape[1] * 2:
+                fine = np.zeros((counts.shape[0], counts.shape[1] * 2), dtype=np.float64)
+                fine[:, 0::2] = counts * 0.5
+                fine[:, 1::2] = counts * 0.5
+                counts = fine
+                energy = sum_ms.spectrum.energy.copy()
+
+        w = max(1, int(width))
+        points: List[MapSpectrum] = []
+        for i, (x, y, row) in enumerate(zip(xs, ys, counts)):
+            name = f"Line pt {i + 1} ({x:.0f},{y:.0f})"
+            sp = Spectrum(
+                energy=energy,
+                counts=row,
+                live_time=live_time,
+                real_time=real_time,
+                metadata={
+                    "name": name,
+                    "source": "drawn_line",
+                    "x": float(x),
+                    "y": float(y),
+                    "index": i,
+                    "width_px": w,
+                },
+            )
+            points.append(
+                MapSpectrum(
+                    spectrum=sp,
+                    name=name,
+                    x=float(x),
+                    y=float(y),
+                    index=i,
+                    kind="line_point",
+                    peak_labels=list(peak_labels),
+                    metadata={"source": "drawn_line", "width_px": w},
+                )
+            )
+        label = f"Drawn transect ({len(points)} pts"
+        if w > 1:
+            label += f", {w} px wide"
+        label += ")"
+        return LineScan(
+            name=label,
+            points=points,
+            start_xy=(float(x0), float(y0)),
+            end_xy=(float(x1), float(y1)),
+            source="drawn",
+            kind="line_scan",
+            metadata={"width_px": w, "distances": dist},
         )
 
 

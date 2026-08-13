@@ -209,6 +209,16 @@ def test_analysis_session_holds_state():
     assert session.elements[0]["symbol"] == "Fe"
 
 
+def test_candidates_at_energy():
+    from core.smart_peak_id import candidates_at_energy
+
+    hits = candidates_at_energy(6.40, energy_tol_kev=0.10)
+    assert hits
+    assert hits[0]["symbol"] == "Fe"
+    assert "K" in hits[0]["line"]
+    assert abs(hits[0]["abs_delta_kev"]) < 0.05
+
+
 def test_auto_id_peak_positions():
     from core.smart_peak_id import auto_id_peak_positions
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import struct
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -49,6 +50,8 @@ _XGT2_STAGE_X_OFF = 154
 _XGT2_STAGE_Y_OFF = 162
 # Max relative deviation from median step for "equal spacing" line scans
 _LINE_SCAN_STEP_REL_TOL = 0.15
+# OLE Automation date epoch (same as Excel)
+_OLE_EPOCH = datetime(1899, 12, 30)
 
 
 def load_ipj(file_path: str | Path) -> MappingProject:
@@ -78,11 +81,15 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
     all_fovs: List[MappingFOV] = []
 
     for sample_idx, sample_id in enumerate(sample_ids, start=1):
-        sample_name = _read_display_name(
-            ole,
-            ["Samples", sample_id, "ISampleInfo"],
-            preferred_prefixes=("Sample",),
-            default=f"Sample {sample_idx}",
+        sample_info = _read_inca_info(ole, ["Samples", sample_id, "ISampleInfo"])
+        sample_name = (
+            sample_info.get("name")
+            or _read_display_name(
+                ole,
+                ["Samples", sample_id, "ISampleInfo"],
+                preferred_prefixes=("Sample",),
+                default=f"Sample {sample_idx}",
+            )
         )
         whole_image = _parse_xgt_bmp(
             ole,
@@ -98,13 +105,18 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
             sites.append(fov)
             all_fovs.append(fov)
 
+        sample_meta = {
+            "path": f"Samples/{sample_id}",
+            "comment": sample_info.get("comment", ""),
+            "sample_type": sample_info.get("sample_type", ""),
+        }
         samples.append(
             MappingSample(
                 id=sample_id,
                 name=sample_name,
                 sites=sites,
                 whole_image=whole_image,
-                metadata={"path": f"Samples/{sample_id}"},
+                metadata=sample_meta,
             )
         )
 
@@ -113,6 +125,7 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
         _maybe_attach_line_scan(fov)
 
     n_cubes = sum(1 for f in all_fovs if f.cube is not None)
+    proj_info = _read_inca_info(ole, ["IIncaProjectInfo"])
     project = MappingProject(
         path=str(path),
         name=path.stem,
@@ -124,6 +137,9 @@ def _parse_ole(ole: "olefile.OleFileIO", path: Path) -> MappingProject:
             "n_fovs": len(all_fovs),
             "n_cubes": n_cubes,
             "smartmap_cube": "decoded" if n_cubes else "absent",
+            "project_title": proj_info.get("name") or path.stem,
+            "instrument": proj_info.get("instrument", ""),
+            "comment": proj_info.get("comment", ""),
         },
     )
     return project
@@ -136,11 +152,15 @@ def _parse_fov(
     site_index: int = 1,
 ) -> MappingFOV:
     base = ["Samples", sample_id, "FOVs", fov_id]
-    site_name = _read_display_name(
-        ole,
-        base + ["IFOVInfo"],
-        preferred_prefixes=("Site of Interest", "Site"),
-        default=f"Site of Interest {site_index}",
+    site_info = _read_inca_info(ole, base + ["IFOVInfo"])
+    site_name = (
+        site_info.get("name")
+        or _read_display_name(
+            ole,
+            base + ["IFOVInfo"],
+            preferred_prefixes=("Site of Interest", "Site"),
+            default=f"Site of Interest {site_index}",
+        )
     )
     element_maps = _parse_element_maps(ole, base)
     overview = _parse_overview(ole, base)
@@ -181,6 +201,13 @@ def _parse_fov(
         )
 
     has_smartmap = ole.exists(base + ["SmartMap"])
+    acq = _acquisition_metadata(
+        ole,
+        base,
+        spectra,
+        width=int(width),
+        height=int(height),
+    )
     return MappingFOV(
         id=fov_id,
         name=site_name,
@@ -199,8 +226,104 @@ def _parse_fov(
             "has_optical": optical is not None,
             "cube_shape": tuple(cube.shape) if cube is not None else None,
             "path": "/".join(base),
+            "comment": site_info.get("comment", ""),
+            **acq,
         },
     )
+
+
+_INFO_PLACEHOLDERS = {
+    "",
+    "comment:",
+    "comment",
+    "default",
+    "empty",
+}
+
+
+def _read_counted_strings(raw: bytes, start: int = 5) -> List[str]:
+    """Parse INCA I*Info streams: [u32 ver][u8 tag] then (u32 n, n bytes)*."""
+    out: List[str] = []
+    off = start if len(raw) >= start else 0
+    while off + 4 <= len(raw):
+        n = struct.unpack_from("<I", raw, off)[0]
+        off += 4
+        if n == 0:
+            out.append("")
+            continue
+        if n > 400 or off + n > len(raw):
+            break
+        out.append(raw[off : off + n].decode("latin1", errors="replace"))
+        off += n
+    return out
+
+
+def _clean_info_text(value: str) -> str:
+    text = (value or "").strip()
+    if text.lower() in _INFO_PLACEHOLDERS:
+        return ""
+    return text
+
+
+def _read_inca_info(
+    ole: "olefile.OleFileIO",
+    path: Sequence[str],
+) -> Dict[str, Any]:
+    """Read name / comment / type / instrument from an I*Info stream."""
+    out: Dict[str, Any] = {}
+    if not ole.exists(list(path)):
+        return out
+    raw = ole.openstream(list(path)).read()
+    strings = _read_counted_strings(raw)
+    out["strings"] = strings
+    kind = path[-1] if path else ""
+
+    if kind == "IIncaProjectInfo":
+        if strings:
+            out["name"] = _clean_info_text(strings[0])
+        if len(strings) > 1:
+            out["instrument"] = _clean_info_text(strings[1])
+        if len(strings) > 2:
+            out["comment"] = _clean_info_text(strings[2])
+        return out
+
+    if kind == "ISampleInfo":
+        if strings:
+            out["name"] = _clean_info_text(strings[0]) or strings[0].strip()
+        if len(strings) > 1:
+            out["comment"] = _clean_info_text(strings[1])
+        if len(strings) > 2:
+            typ = strings[2].strip()
+            out["sample_type"] = "" if typ.lower() in ("0",) else typ
+        return out
+
+    if kind == "IFOVInfo":
+        # Typical: [comment, site name]. Sometimes only the site name.
+        name = ""
+        comment = ""
+        for s in strings:
+            cleaned = _clean_info_text(s)
+            if not cleaned:
+                continue
+            if re.match(r"^(Site of Interest|Site)\b", cleaned, flags=re.I):
+                name = cleaned
+            elif not comment:
+                comment = cleaned
+            elif not name:
+                name = cleaned
+        if not name:
+            for s in reversed(strings):
+                cleaned = _clean_info_text(s) or s.strip()
+                if cleaned:
+                    name = cleaned
+                    break
+        out["name"] = name
+        out["comment"] = comment
+        return out
+
+    if strings:
+        out["name"] = _clean_info_text(strings[0]) or strings[0].strip()
+    return out
 
 
 def _read_display_name(
@@ -459,18 +582,21 @@ def _parse_spectra(
         if re.fullmatch(r"Spectrum\s+\d+", name, flags=re.I):
             kind = "line_point"
 
+        spec_meta = {
+            "name": name,
+            "spe_id": spe_id,
+            "ev_per_channel": ev_per_ch,
+            "energy_calibration": "ipj_default_or_peak_inferred",
+            "source": "ipj",
+        }
+        if info.get("acquired_at"):
+            spec_meta["acquired_at"] = info["acquired_at"]
         spectrum = Spectrum(
             energy=energy,
             counts=counts.astype(np.float64),
             live_time=live_time,
             real_time=real_time,
-            metadata={
-                "name": name,
-                "spe_id": spe_id,
-                "ev_per_channel": ev_per_ch,
-                "energy_calibration": "ipj_default_or_peak_inferred",
-                "source": "ipj",
-            },
+            metadata=spec_meta,
         )
         index = None
         m = re.search(r"(\d+)\s*$", name)
@@ -690,11 +816,23 @@ def _read_information(
             if 0.1 < val < 1e7:
                 info.setdefault("live_time", float(val))
                 break
-    # Real time sometimes later
-    for off in (50, 58, 56, 64):
+    # OLE date at offset 58 (observed ~44025 → 2020-07)
+    if len(raw) >= 66:
+        ole_days = struct.unpack_from("<d", raw, 58)[0]
+        iso = _ole_date_to_iso(ole_days)
+        if iso:
+            info["acquired_at"] = iso
+            info["acquired_ole"] = float(ole_days)
+    # Real time sometimes later; skip OLE-date-sized values
+    live = float(info.get("live_time", -1))
+    for off in (46, 50, 56, 64):
         if off + 8 <= len(raw):
             val = struct.unpack_from("<d", raw, off)[0]
-            if 0.1 < val < 1e7 and abs(val - info.get("live_time", -1)) > 0.01:
+            if not (0.1 < val < 1e6):
+                continue
+            if _ole_date_to_iso(val):
+                continue
+            if abs(val - live) > 0.01:
                 info["real_time"] = float(val)
                 break
     # ASCII name (e.g. "Sum Spectrum", "Spectrum 12")
@@ -710,6 +848,84 @@ def _read_information(
     if preferred:
         info["name"] = preferred
     return info
+
+
+def _ole_date_to_iso(ole_days: float) -> Optional[str]:
+    """Convert an OLE Automation date to ISO-8601, or None if implausible."""
+    try:
+        val = float(ole_days)
+    except (TypeError, ValueError):
+        return None
+    # ~1982–2064; XGT/INCA files in this project are 2016–2020
+    if not (30000.0 < val < 60000.0) or not np.isfinite(val):
+        return None
+    try:
+        dt = _OLE_EPOCH + timedelta(days=val)
+    except (OverflowError, ValueError):
+        return None
+    if dt.year < 1990 or dt.year > 2100:
+        return None
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _read_em_conditions(
+    ole: "olefile.OleFileIO",
+    path: Sequence[str],
+) -> Dict[str, Any]:
+    """Tube kV / mA from SmartMap EMConditions (float32 @ 44 / 52)."""
+    out: Dict[str, Any] = {}
+    if not ole.exists(list(path)):
+        return out
+    raw = ole.openstream(list(path)).read()
+    if len(raw) < 56:
+        return out
+    kv = struct.unpack_from("<f", raw, 44)[0]
+    ma = struct.unpack_from("<f", raw, 52)[0]
+    if np.isfinite(kv) and 5.0 <= kv <= 100.0:
+        out["kv"] = float(kv)
+    if np.isfinite(ma) and 0.1 <= ma <= 1000.0:
+        out["ma"] = float(ma)
+    return out
+
+
+def _acquisition_metadata(
+    ole: "olefile.OleFileIO",
+    fov_base: Sequence[str],
+    spectra: Sequence[MapSpectrum],
+    *,
+    width: int,
+    height: int,
+) -> Dict[str, Any]:
+    """Map live time, estimated dwell, tube settings, and acquisition stamp."""
+    meta: Dict[str, Any] = {}
+    sum_ms = next(
+        (s for s in spectra if s.kind == "sum" or "sum" in s.name.lower()),
+        None,
+    )
+    if sum_ms is not None:
+        live = float(sum_ms.spectrum.live_time)
+        if live > 0:
+            meta["map_live_time_s"] = live
+        real = float(sum_ms.spectrum.real_time)
+        if real > 0:
+            meta["map_real_time_s"] = real
+        acquired = sum_ms.spectrum.metadata.get("acquired_at")
+        if acquired:
+            meta["acquired_at"] = acquired
+    em = _read_em_conditions(
+        ole, list(fov_base) + ["SmartMap", "EMConditions", "EMConditions"]
+    )
+    meta.update(em)
+    n = int(width) * int(height) if width and height else 0
+    if n > 0:
+        meta["n_pixels"] = n
+    live = meta.get("map_live_time_s")
+    if live and n > 0:
+        dwell = float(live) / n
+        meta["dwell_s"] = dwell
+        meta["dwell_ms"] = dwell * 1000.0
+        meta["dwell_source"] = "map_live_time / n_pixels"
+    return meta
 
 
 def _read_peak_labels(
