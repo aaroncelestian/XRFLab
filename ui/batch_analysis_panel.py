@@ -45,6 +45,9 @@ class BatchProcessingWorker(QThread):
 class BatchAnalysisPanel(QWidget):
     """Panel for batch spectral fitting and quantification"""
     
+    results_ready = Signal()
+    send_to_composition_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -388,6 +391,13 @@ class BatchAnalysisPanel(QWidget):
         export_excel_btn.clicked.connect(lambda: self._export_results("excel"))
         layout.addWidget(export_excel_btn)
 
+        send_btn = QPushButton("Send to Composition")
+        send_btn.setToolTip(
+            "Group replicates and plot sample means (ternary, correlate, ratios)"
+        )
+        send_btn.clicked.connect(self.send_to_composition_requested.emit)
+        layout.addWidget(send_btn)
+
         layout.addStretch()
         return group
 
@@ -588,12 +598,15 @@ class BatchAnalysisPanel(QWidget):
         
         # Populate element checkboxes for trends
         self._populate_element_checkboxes()
+
+        self.results_ready.emit()
         
         QMessageBox.information(
             self,
             "Processing Complete",
             f"Processed {len(results)} spectra.\n"
-            "Open Results to review fits and Trends.",
+            "Open Results to review fits, or Composition to group "
+            "replicates and plot sample means.",
         )
     
     def _on_processing_error(self, error_message):
@@ -650,6 +663,17 @@ class BatchAnalysisPanel(QWidget):
         
         self.summary_text.setPlainText(summary)
     
+    def select_spectra(self, names):
+        """Select the first matching spectrum so its fit is shown."""
+        if not names or not self.results:
+            return
+        wanted = {str(n) for n in names}
+        for i, result in enumerate(self.results):
+            if result.spectrum_name in wanted or Path(result.spectrum_path).name in wanted:
+                self.results_table.selectRow(i)
+                self._display_fit_result(result)
+                return
+
     def _on_spectrum_selected(self):
         """Handle spectrum selection from results table"""
         selected_rows = self.results_table.selectedIndexes()

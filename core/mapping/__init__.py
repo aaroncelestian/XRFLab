@@ -17,7 +17,7 @@ from core.mapping.profiles import (
     line_distances,
 )
 from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.display import enhance_map, format_acquisition
+from core.mapping.display import enhance_map, format_acquisition, upsample_map
 from core.mapping.regions import circle_mask, polygon_mask, rect_mask, region_mask
 
 __all__ = [
@@ -38,6 +38,7 @@ __all__ = [
     "rgb_composite",
     "enhance_map",
     "format_acquisition",
+    "upsample_map",
     "rect_mask",
     "circle_mask",
     "polygon_mask",

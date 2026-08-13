@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.display import enhance_map, format_acquisition
+from core.mapping.display import enhance_map, format_acquisition, upsample_map
 from core.mapping.models import ElementMap, LineScan, MappingFOV, MappingProject, MapSpectrum
 from core.mapping.profiles import (
     extract_cube_element_profiles,
@@ -268,11 +268,44 @@ class MappingPanel(QWidget):
         )
         self.scale_combo.currentIndexChanged.connect(self._on_enhance_changed)
 
+        self.interp_combo = QComboBox()
+        for key, label in (
+            ("none", "None (blocky pixels)"),
+            ("nearest", "Nearest (sharp blocks)"),
+            ("bilinear", "Bilinear"),
+            ("cubic", "Cubic spline"),
+            ("quintic", "Quintic spline"),
+        ):
+            self.interp_combo.addItem(label, key)
+        self.interp_combo.setCurrentIndex(3)  # cubic
+        self.interp_combo.setToolTip(
+            "Upsample interpolation for publication-style maps.\n"
+            "Cubic spline is usually the best trade-off. "
+            "Pick / line / area tools stay on the original pixel grid."
+        )
+        self.interp_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        self.upsample_combo = QComboBox()
+        for factor, label in (
+            (1, "1× (native)"),
+            (2, "2×"),
+            (4, "4×"),
+            (8, "8×"),
+        ):
+            self.upsample_combo.addItem(label, factor)
+        self.upsample_combo.setCurrentIndex(1)  # 2×
+        self.upsample_combo.setToolTip(
+            "Render the map on a finer grid. 4× cubic looks smooth on typical XGT maps."
+        )
+        self.upsample_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
         for label, widget in (
             ("Neighborhood", self.neighborhood_combo),
             ("Smooth", self.smooth_combo),
             ("Spatial bin", self.bin_combo),
             ("Intensity", self.scale_combo),
+            ("Interpolate", self.interp_combo),
+            ("Upsample", self.upsample_combo),
         ):
             row = QHBoxLayout()
             row.addWidget(QLabel(label))
@@ -1730,6 +1763,11 @@ class MappingPanel(QWidget):
     def _process_map_array(self, data: np.ndarray) -> np.ndarray:
         return enhance_map(data, **self._enhance_kwargs())
 
+    def _display_array(self, data: np.ndarray) -> np.ndarray:
+        method = self.interp_combo.currentData() or "none"
+        factor = int(self.upsample_combo.currentData() or 1)
+        return upsample_map(data, factor=factor, method=method)
+
     def _enhanced_element_map(self, em: Optional[ElementMap]) -> Optional[ElementMap]:
         if em is None:
             return None
@@ -1753,7 +1791,10 @@ class MappingPanel(QWidget):
 
         checked = self._checked_display_maps()
         if checked and not self.rgb_check.isChecked():
-            panels = [(m.name, self._process_map_array(m.data)) for m in checked]
+            panels = []
+            for m in checked:
+                processed = self._process_map_array(m.data)
+                panels.append((m.name, processed, self._display_array(processed)))
             try:
                 self.canvas.set_images(panels)
             except Exception as exc:
@@ -1766,7 +1807,9 @@ class MappingPanel(QWidget):
             b = self._enhanced_element_map(fov.find_map(self.b_combo.currentData() or ""))
             try:
                 rgb = rgb_composite(r, g, b)
-                self.canvas.set_image(rgb, rgb=True, title="RGB")
+                self.canvas.set_image(
+                    rgb, display=self._display_array(rgb), rgb=True, title="RGB"
+                )
             except Exception as exc:
                 self.status_message.emit(f"RGB composite failed: {exc}")
             return
@@ -1791,8 +1834,12 @@ class MappingPanel(QWidget):
         elif data[0] == "map":
             m = fov.find_map(data[1])
             if m is not None:
+                processed = self._process_map_array(m.data)
                 self.canvas.set_image(
-                    self._process_map_array(m.data), rgb=False, title=m.name
+                    processed,
+                    display=self._display_array(processed),
+                    rgb=False,
+                    title=m.name,
                 )
 
     def _show_photo(self, image) -> None:

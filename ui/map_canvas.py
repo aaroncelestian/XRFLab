@@ -160,16 +160,22 @@ class MapCanvas(QWidget):
         rgb: bool = False,
         title: str = "",
         auto_levels: bool = True,
+        display: Optional[np.ndarray] = None,
     ) -> None:
-        """Single-panel mode (overview, RGB, or one map)."""
+        """Single-panel mode (overview, RGB, or one map).
+
+        ``data`` defines the click/line coordinate grid. ``display`` may be a
+        finer interpolated image; it is stretched to the original map size.
+        """
         self._rgb_mode = rgb
         self._ensure_panel_count(1)
         panel = self._panels[0]
         arr = np.asarray(data)
+        shown = np.asarray(display) if display is not None else arr
         if rgb:
-            if arr.ndim != 3 or arr.shape[2] < 3:
+            if shown.ndim != 3 or shown.shape[2] < 3:
                 raise ValueError("RGB image must be HxWx3")
-            disp = arr[:, :, :3]
+            disp = shown[:, :, :3]
             maxv = float(np.nanmax(disp)) if disp.size else 1.0
             if maxv > 1.5:
                 disp = disp.astype(np.float64) / 255.0
@@ -187,9 +193,10 @@ class MapCanvas(QWidget):
         else:
             self._primary_data = np.asarray(arr, dtype=np.float64)
             panel["data"] = self._primary_data
+            shown2 = np.asarray(shown, dtype=np.float64)
             levels = _auto_levels(self._primary_data) if auto_levels else None
             panel["image"].setImage(
-                np.ascontiguousarray(self._primary_data),
+                np.ascontiguousarray(shown2),
                 autoLevels=levels is None,
                 levels=levels,
                 axisOrder="row-major",
@@ -197,12 +204,13 @@ class MapCanvas(QWidget):
         panel["title"] = title or ""
         panel["label"].setText(panel["title"])
         h, w = self._primary_data.shape[:2]
+        self._fit_image_rect(panel, w, h)
         panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
         self._restore_overlays()
 
     def set_images(
         self,
-        panels: Sequence[Tuple[str, np.ndarray]],
+        panels: Sequence[tuple],
         *,
         auto_levels: bool = True,
     ) -> None:
@@ -210,27 +218,35 @@ class MapCanvas(QWidget):
         Multi-panel subplot mode.
 
         Args:
-            panels: sequence of (title, HxW array)
+            panels: (title, HxW array) or (title, data, display)
         """
-        items = [(str(t), np.asarray(d, dtype=np.float64)) for t, d in panels if d is not None]
+        items = []
+        for item in panels:
+            if item is None:
+                continue
+            title = str(item[0])
+            data = np.asarray(item[1], dtype=np.float64)
+            shown = np.asarray(item[2], dtype=np.float64) if len(item) > 2 else data
+            items.append((title, data, shown))
         if not items:
             return
         self._rgb_mode = False
         self._ensure_panel_count(len(items))
         self._primary_data = items[0][1]
 
-        for panel, (title, data) in zip(self._panels, items):
+        for panel, (title, data, shown) in zip(self._panels, items):
             panel["title"] = title
             panel["data"] = data
             panel["label"].setText(title)
             levels = _auto_levels(data) if auto_levels else None
             panel["image"].setImage(
-                np.ascontiguousarray(data),
+                np.ascontiguousarray(shown),
                 autoLevels=levels is None,
                 levels=levels,
                 axisOrder="row-major",
             )
             h, w = data.shape[:2]
+            self._fit_image_rect(panel, w, h)
             panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
 
         # Link all viewboxes to the first
@@ -240,6 +256,13 @@ class MapCanvas(QWidget):
             panel["view"].setYLink(master)
 
         self._restore_overlays()
+
+    def _fit_image_rect(self, panel: dict, width: int, height: int) -> None:
+        """Stretch the (possibly upsampled) image to original map coordinates."""
+        img = panel["image"]
+        img.resetTransform()
+        if hasattr(img, "setRect"):
+            img.setRect(QRectF(0.0, 0.0, float(width), float(height)))
 
     # --------------------------------------------------------------- build
     def _clear_layout(self) -> None:
@@ -349,11 +372,24 @@ class MapCanvas(QWidget):
         if self._region_outline is not None:
             self.set_region_outline(*self._region_outline)
 
+    def _local_to_data(self, panel: dict, x: float, y: float) -> Tuple[float, float]:
+        """Convert ImageItem local pixels to original map coordinates."""
+        data = panel.get("data")
+        image = panel["image"].image
+        if data is None or image is None:
+            return x, y
+        ih, iw = image.shape[:2]
+        dh, dw = data.shape[:2]
+        if iw > 0 and ih > 0 and (iw != dw or ih != dh):
+            x = x * dw / iw
+            y = y * dh / ih
+        return x, y
+
     def _panel_at(self, scene_pos) -> Optional[dict]:
         for panel in self._panels:
             try:
                 p = panel["image"].mapFromScene(scene_pos)
-                x, y = float(p.x()), float(p.y())
+                x, y = self._local_to_data(panel, float(p.x()), float(p.y()))
                 data = panel["data"]
                 if data is None:
                     continue
@@ -374,7 +410,7 @@ class MapCanvas(QWidget):
             return None
         try:
             p = panel["image"].mapFromScene(scene_pos)
-            return float(p.x()), float(p.y())
+            return self._local_to_data(panel, float(p.x()), float(p.y()))
         except Exception:
             return None
 

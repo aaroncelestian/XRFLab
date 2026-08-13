@@ -14,6 +14,7 @@ from ui.spectrum_widget import SpectrumWidget
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
 from ui.batch_analysis_panel import BatchAnalysisPanel
+from ui.composition_panel import CompositionPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from ui.tube_profile_panel import TubeProfilePanel
@@ -231,6 +232,25 @@ class MainWindow(QMainWindow):
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
+
+        # Composition: group batch replicates and plot sample means
+        self.composition_panel = CompositionPanel()
+        self.composition_panel.from_batch_requested.connect(
+            self.send_batch_to_composition
+        )
+        self.composition_panel.sample_activated.connect(
+            self.on_composition_sample_activated
+        )
+        self.composition_panel.open_in_batch_requested.connect(
+            self.on_composition_open_in_batch
+        )
+        self.batch_analysis_panel.results_ready.connect(
+            self.send_batch_to_composition
+        )
+        self.batch_analysis_panel.send_to_composition_requested.connect(
+            self.open_composition_from_batch
+        )
+        self.tab_widget.addTab(self.composition_panel, "Composition")
 
         # Mapping tab (IPJ element maps, line scans, correlations)
         self.mapping_panel = MappingPanel()
@@ -511,6 +531,38 @@ class MainWindow(QMainWindow):
         """Open an INCA/XGT .ipj mapping project in the Mapping tab."""
         self.tab_widget.setCurrentWidget(self.mapping_panel)
         self.mapping_panel.open_ipj()
+
+    def send_batch_to_composition(self):
+        """Load current batch fits into the Composition tab."""
+        results = self.batch_analysis_panel.results
+        if not results:
+            QMessageBox.information(
+                self,
+                "Composition",
+                "Process a batch first (Batch Analysis → Process All).",
+            )
+            return
+        self.composition_panel.load_batch_results(results)
+        n = len(self.composition_panel.summaries)
+        self.status_bar.showMessage(
+            f"Composition: {len(results)} spectra grouped into {n} samples",
+            8000,
+        )
+
+    def open_composition_from_batch(self):
+        """Send to Composition and switch to that tab."""
+        self.send_batch_to_composition()
+        if self.batch_analysis_panel.results:
+            self.tab_widget.setCurrentWidget(self.composition_panel)
+
+    def on_composition_sample_activated(self, _sample, names):
+        """Keep Batch selection in sync without switching tabs."""
+        self.batch_analysis_panel.select_spectra(names)
+
+    def on_composition_open_in_batch(self, _sample, names):
+        """Double-click a sample: jump to Batch and show one of its fits."""
+        self.batch_analysis_panel.select_spectra(names)
+        self.tab_widget.setCurrentWidget(self.batch_analysis_panel)
 
     def on_mapping_spectrum_sent(self, spectrum, peak_labels=None):
         """Receive a spectrum extracted from Mapping → load into Analysis."""

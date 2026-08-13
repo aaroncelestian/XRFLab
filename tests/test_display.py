@@ -8,6 +8,7 @@ from core.mapping.display import (
     block_bin,
     enhance_map,
     format_acquisition,
+    upsample_map,
 )
 from core.mapping.models import MappingFOV, MapSpectrum
 from core.spectrum import Spectrum
@@ -30,6 +31,22 @@ def test_enhance_mean_blurs_impulse():
     assert mean[3, 3] < 9.0
     assert mean[3, 2] > 0
     np.testing.assert_allclose(mean.sum(), data.sum(), rtol=1e-6)
+
+
+def test_upsample_cubic_is_smoother_than_nearest():
+    data = np.zeros((6, 6), dtype=np.float64)
+    data[2, 2] = 1.0
+    near = upsample_map(data, factor=4, method="nearest")
+    cubic = upsample_map(data, factor=4, method="cubic")
+    assert near.shape == (24, 24)
+    assert cubic.shape == (24, 24)
+    # Nearest is piecewise-constant; cubic has intermediate values
+    assert np.unique(near).size <= 2
+    assert np.unique(np.round(cubic, 6)).size > 2
+    rgb = np.zeros((5, 5, 3), dtype=np.float64)
+    rgb[2, 2, 0] = 1.0
+    out = upsample_map(rgb, factor=2, method="bilinear")
+    assert out.shape == (10, 10, 3)
 
 
 def test_intensity_scales_are_monotonic():

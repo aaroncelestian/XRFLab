@@ -7,16 +7,24 @@ from typing import Optional
 import numpy as np
 
 try:
-    from scipy.ndimage import gaussian_filter, median_filter, uniform_filter
+    from scipy.ndimage import gaussian_filter, median_filter, uniform_filter, zoom
 except ImportError:  # pragma: no cover
     gaussian_filter = None
     median_filter = None
     uniform_filter = None
+    zoom = None
 
 
 SMOOTH_METHODS = ("none", "mean", "median", "gaussian")
 INTENSITY_SCALES = ("linear", "sqrt", "asinh", "log")
 BIN_FACTORS = (1, 2, 4)
+INTERP_METHODS = ("none", "nearest", "bilinear", "cubic", "quintic")
+INTERP_ORDERS = {
+    "nearest": 0,
+    "bilinear": 1,
+    "cubic": 3,
+    "quintic": 5,
+}
 
 
 def odd_kernel(size: int) -> int:
@@ -60,6 +68,43 @@ def enhance_map(
     if scale_name != "linear":
         arr = apply_intensity_scale(arr, scale_name)
     return arr
+
+
+def upsample_map(
+    data: np.ndarray,
+    *,
+    factor: int = 1,
+    method: str = "cubic",
+) -> np.ndarray:
+    """
+    Magnify a map for display (2D or HxWxC).
+
+    Cubic / quintic use spline interpolation (scipy.ndimage.zoom).
+    Coordinates stay with the caller — this only changes pixel density.
+    """
+    arr = np.asarray(data, dtype=np.float64)
+    factor = max(1, int(factor))
+    name = (method or "none").lower()
+    if name not in INTERP_METHODS:
+        raise ValueError(f"Unknown interpolation method: {method}")
+    if factor == 1 or name == "none":
+        return arr
+    order = INTERP_ORDERS.get(name, 3)
+    if zoom is not None:
+        if arr.ndim == 2:
+            return zoom(arr, factor, order=order, mode="nearest")
+        if arr.ndim == 3:
+            z = (float(factor), float(factor)) + (1.0,) * (arr.ndim - 2)
+            return zoom(arr, z, order=order, mode="nearest")
+        raise ValueError("upsample_map expects 2D or 3D data")
+    return _upsample_numpy(arr, factor)
+
+
+def _upsample_numpy(arr: np.ndarray, factor: int) -> np.ndarray:
+    """Nearest-neighbor fallback when SciPy is unavailable."""
+    if arr.ndim == 2:
+        return np.repeat(np.repeat(arr, factor, axis=0), factor, axis=1)
+    return np.repeat(np.repeat(arr, factor, axis=0), factor, axis=1)
 
 
 def _smooth(arr: np.ndarray, method: str, kernel: int) -> np.ndarray:
