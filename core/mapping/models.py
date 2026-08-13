@@ -209,6 +209,10 @@ class MappingFOV:
     spectra: List[MapSpectrum] = field(default_factory=list)
     line_scans: List[LineScan] = field(default_factory=list)
     cube: Optional[Any] = None  # SpectrumCube when SmartMap ListData decoded
+    # Stage registration for area maps (mm). Center from sum-spectrum XGT2Data;
+    # pixel size from XGT2 MapExtraData.
+    pixel_size_mm: Optional[float] = None
+    stage_center_mm: Optional[Tuple[float, float]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -226,6 +230,37 @@ class MappingFOV:
         if self.overview is not None and self.overview.data.ndim >= 2:
             return self.overview.data.shape[:2]
         return None
+
+    @property
+    def stage_size_mm(self) -> Optional[Tuple[float, float]]:
+        """Physical map width × height in mm, if known."""
+        size = self.metadata.get("map_extra", {}).get("size_mm")
+        if (
+            isinstance(size, (tuple, list))
+            and len(size) == 2
+            and size[0]
+            and size[1]
+        ):
+            return (float(size[0]), float(size[1]))
+        if self.pixel_size_mm is None or self.pixel_size_mm <= 0:
+            return None
+        if not self.width or not self.height:
+            return None
+        return (
+            float(self.width) * float(self.pixel_size_mm),
+            float(self.height) * float(self.pixel_size_mm),
+        )
+
+    def stage_bounds_mm(self) -> Optional[Tuple[float, float, float, float]]:
+        """Axis-aligned map rectangle in stage mm: (x0, y0, x1, y1)."""
+        if self.stage_center_mm is None:
+            return None
+        size = self.stage_size_mm
+        if size is None:
+            return None
+        cx, cy = self.stage_center_mm
+        w, h = size
+        return (cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5)
 
     @property
     def has_cube(self) -> bool:

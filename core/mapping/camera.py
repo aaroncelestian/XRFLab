@@ -50,6 +50,16 @@ class StageCamera:
         py = (self.height_px - 1) * 0.5 - (np.asarray(ys, dtype=np.float64) - self.origin_y_mm) / self.mm_per_px_y
         return px, py
 
+    def stage_bounds_to_pixel_rect(
+        self, bounds_mm: Tuple[float, float, float, float]
+    ) -> Tuple[float, float, float, float]:
+        """Map stage (x0, y0, x1, y1) mm → photo pixel (x0, y0, x1, y1)."""
+        x0, y0, x1, y1 = bounds_mm
+        xs = np.array([x0, x1, x1, x0], dtype=np.float64)
+        ys = np.array([y0, y0, y1, y1], dtype=np.float64)
+        px, py = self.stages_to_pixels(xs, ys)
+        return float(px.min()), float(py.min()), float(px.max()), float(py.max())
+
 
 def camera_from_image(image, *, stage_travel_mm: float = XGT_STAGE_TRAVEL_MM) -> Optional[StageCamera]:
     """Build a StageCamera from a sample-camera OverviewImage (or HxW array)."""

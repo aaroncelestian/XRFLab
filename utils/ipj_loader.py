@@ -46,11 +46,16 @@ _SPECTRUM_HEADER = 10
 _DEFAULT_EV_PER_CHANNEL = 10.0
 _DEFAULT_N_CHANNELS = 4096
 _XGT_ZERO_CHANNEL = 40.0
-# XGT2Data stage X/Y (float32) — observed across numbered spectra
+# XGT2Data stage X/Y: float32 at these offsets (4-byte zero pad after each).
+# Empirically stage millimetres for spot / line / multipoint spectra and for
+# the map Sum Spectrum (map FOV centre). Nearby doubles at 150/158 are a
+# different field (often large encoder-like values on map FOVs) — do not use.
 _XGT2_STAGE_X_OFF = 154
 _XGT2_STAGE_Y_OFF = 162
 # Max relative deviation from median step for "equal spacing" line scans
 _LINE_SCAN_STEP_REL_TOL = 0.15
+# XGT-7200 stage travel is 100 mm; reject absurd stage readings
+_STAGE_XY_ABS_MAX_MM = 150.0
 # OLE Automation date epoch (same as Excel)
 _OLE_EPOCH = datetime(1899, 12, 30)
 
@@ -209,6 +214,16 @@ def _parse_fov(
         width=int(width),
         height=int(height),
     )
+    map_geom = _parse_map_extra_geometry(
+        ole, base, map_width=int(width), map_height=int(height)
+    )
+    pixel_size_mm = map_geom.get("pixel_size_mm")
+    stage_center = _stage_center_from_spectra(spectra)
+    # Prefer explicit µm size from MapExtra when present
+    size_mm = map_geom.get("size_mm")
+    if size_mm is not None and width > 0 and height > 0:
+        # Keep pixel_size consistent with C,D even if mean pitch already set
+        pixel_size_mm = float(size_mm[0]) / float(width)
     return MappingFOV(
         id=fov_id,
         name=site_name,
@@ -219,6 +234,8 @@ def _parse_fov(
         optical=optical,
         spectra=spectra,
         cube=cube,
+        pixel_size_mm=pixel_size_mm,
+        stage_center_mm=stage_center,
         metadata={
             "sample_id": sample_id,
             "site_name": site_name,
@@ -228,6 +245,7 @@ def _parse_fov(
             "cube_shape": tuple(cube.shape) if cube is not None else None,
             "path": "/".join(base),
             "comment": site_info.get("comment", ""),
+            "map_extra": map_geom,
             **acq,
         },
     )
@@ -642,7 +660,19 @@ def _read_xgt2_stage_xy(
     ole: "olefile.OleFileIO",
     spe_base: List[str],
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Read stage X/Y floats from the spectrum's XGT2Data stream, if present."""
+    """
+    Read stage X/Y (mm) from the spectrum's ``XGT2Data/XGT2Data`` stream.
+
+    Layout (little-endian), observed on XGT-7200 IPJs::
+
+        offset 154: float32 X (mm)
+        offset 158: 4 zero pad bytes
+        offset 162: float32 Y (mm)
+        offset 166: 4 zero pad bytes
+
+    The doubles that start at 150/158 on some map FOVs are a different
+    quantity (often thousands) and must not be used as stage millimetres.
+    """
     path = spe_base + ["XGT2Data", "XGT2Data"]
     if not ole.exists(path):
         return None, None
@@ -654,11 +684,85 @@ def _read_xgt2_stage_xy(
     y = struct.unpack_from("<f", raw, _XGT2_STAGE_Y_OFF)[0]
     if not (np.isfinite(x) and np.isfinite(y)):
         return None, None
-    if abs(x) > 1e5 or abs(y) > 1e5:
+    if abs(x) > _STAGE_XY_ABS_MAX_MM or abs(y) > _STAGE_XY_ABS_MAX_MM:
         return None, None
     if abs(x) < 1e-6 and abs(y) < 1e-6:
         return None, None
     return float(x), float(y)
+
+
+def _stage_center_from_spectra(
+    spectra: Sequence[MapSpectrum],
+) -> Optional[Tuple[float, float]]:
+    """Prefer the sum spectrum's stage XY as the map FOV centre."""
+    for s in spectra:
+        if s.kind == "sum" and s.x is not None and s.y is not None:
+            return (float(s.x), float(s.y))
+    for s in spectra:
+        if "sum" in (s.name or "").lower() and s.x is not None and s.y is not None:
+            return (float(s.x), float(s.y))
+    return None
+
+
+def _parse_map_extra_geometry(
+    ole: "olefile.OleFileIO",
+    fov_base: List[str],
+    *,
+    map_width: int = 0,
+    map_height: int = 0,
+) -> Dict[str, Any]:
+    """
+    Parse ``XGT2 MapExtraData`` for map stage size / pixel pitch.
+
+    Doubles are stored as ``05 00`` + float64. After a ~0.14 value (probe /
+    related, *not* the map step) and ``5.89`` / ``1.0``, the stream carries:
+
+        A, B, 0.0, C, D
+
+    where ``C`` and ``D`` are the map width and height in **micrometres**
+    (so ``C/width`` and ``D/height`` are an integer µm/pixel). Physical size
+    is therefore ``(C/1000, D/1000)`` mm — not ``dims × 0.14``.
+    """
+    path = fov_base + ["ExtraData", "MAPExDataKeyName", "XGT2 MapExtraData"]
+    if not ole.exists(path):
+        return {}
+    raw = ole.openstream(path).read()
+    doubles: List[float] = []
+    i = 0
+    while i < len(raw) - 9:
+        if raw[i] == 5 and raw[i + 1] == 0:
+            val = struct.unpack_from("<d", raw, i + 2)[0]
+            if np.isfinite(val):
+                doubles.append(float(val))
+            i += 10
+        else:
+            i += 1
+    out: Dict[str, Any] = {"doubles": doubles}
+
+    # Locate the A,B,0,C,D block: after the unique ~(0.05,0.5) value and 5.89, 1.0
+    probe = next((d for d in doubles if 0.05 < d < 0.5), None)
+    size_w_um = size_h_um = None
+    if probe is not None and probe in doubles:
+        idx = doubles.index(probe)
+        block = doubles[idx : idx + 8]
+        out["extra_block"] = block
+        out["probe_or_spot_mm"] = probe
+        if len(block) >= 8 and abs(block[5]) < 1e-9:
+            size_w_um, size_h_um = block[6], block[7]
+            out["size_w_um"] = size_w_um
+            out["size_h_um"] = size_h_um
+            out["stage_ab_raw"] = (block[3], block[4])
+
+    if size_w_um is not None and size_h_um is not None and size_w_um > 0 and size_h_um > 0:
+        out["size_mm"] = (size_w_um / 1000.0, size_h_um / 1000.0)
+        pitches = []
+        if map_width > 0:
+            pitches.append(size_w_um / map_width / 1000.0)
+        if map_height > 0:
+            pitches.append(size_h_um / map_height / 1000.0)
+        if pitches:
+            out["pixel_size_mm"] = float(np.mean(pitches))
+    return out
 
 
 def classify_point_series_kind(

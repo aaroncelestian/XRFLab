@@ -2610,16 +2610,48 @@ class MappingPanel(QWidget):
             title = f"{em.name} on {photo_label}"
 
         try:
+            dest_rect = None
+            target = self.overlay_target.currentData() or "optical"
+            if target == "whole_image":
+                dest_rect = self._map_dest_rect_on_sample_camera(photo)
             blended = overlay_on_photo(
-                photo, overlay_rgb, alpha=alpha, opacity=opacity
+                photo,
+                overlay_rgb,
+                alpha=alpha,
+                opacity=opacity,
+                dest_rect=dest_rect,
             )
+            note = ""
+            if target == "whole_image" and dest_rect is not None:
+                note = " (registered to map area)"
+            elif target == "whole_image":
+                note = " (no stage rect — stretched; check map geometry)"
             self.canvas.set_image(
-                coord, display=blended, rgb=True, title=title
+                coord, display=blended, rgb=True, title=title + note
             )
         except Exception as exc:
             self.status_message.emit(f"Photo overlay failed: {exc}")
             return False
         return True
+
+    def _map_dest_rect_on_sample_camera(self, photo) -> Optional[tuple]:
+        """Pixel rect for the active map FOV on the sample-camera photo."""
+        fov = self.current_fov
+        if fov is None:
+            return None
+        bounds = fov.stage_bounds_mm()
+        if bounds is None:
+            return None
+        cam = self._ls_camera_model
+        if cam is None or cam.width_px != int(np.asarray(photo).shape[1]):
+            cam = camera_from_image(photo)
+        if cam is None:
+            sample = self._sample_for_site(fov)
+            if sample is not None and sample.whole_image is not None:
+                cam = camera_from_image(sample.whole_image)
+        if cam is None:
+            return None
+        return cam.stage_bounds_to_pixel_rect(bounds)
 
     def _refresh_canvas(self) -> None:
         fov = self.current_fov

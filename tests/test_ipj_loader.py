@@ -108,6 +108,8 @@ def test_dylan_point_series_and_maps(dylan):
     assert ls.n_points >= 30
     assert ls.points[0].spectrum.num_channels == 4096
     assert ls.points[0].x is not None and ls.points[0].y is not None
+    # Stage XY from XGT2Data float32@154/162 — mm-scale on the 100 mm stage
+    assert abs(ls.points[0].x) < 150 and abs(ls.points[0].y) < 150
     # Dylan Site 2 has irregular stage steps → multipoint, not line scan
     assert ls.kind == "multipoint"
     assert ls.is_multipoint
@@ -130,6 +132,47 @@ def test_barstow_point_series_is_multipoint(barstow):
     assert ls.n_points >= 10
     assert ls.kind == "multipoint"
     assert all(p.x is not None and p.y is not None for p in ls.points)
+
+
+def test_map_fov_has_stage_bounds(dylan, barstow):
+    """Area maps expose stage centre + µm-derived size for camera registration."""
+    dylan_map = dylan.primary_fov
+    assert dylan_map is not None
+    assert dylan_map.pixel_size_mm is not None
+    # Real map pitch is ~14–18 µm, not the ~0.14 mm probe-related field
+    assert 0.010 < dylan_map.pixel_size_mm < 0.030
+    assert dylan_map.stage_center_mm is not None
+    bounds = dylan_map.stage_bounds_mm()
+    assert bounds is not None
+    x0, y0, x1, y1 = bounds
+    assert x1 > x0 and y1 > y0
+    w_mm, h_mm = dylan_map.stage_size_mm
+    np.testing.assert_allclose(x1 - x0, w_mm)
+    np.testing.assert_allclose(y1 - y0, h_mm)
+    # dylan map is a few mm across, not tens of mm
+    assert w_mm < 5.0 and h_mm < 5.0
+
+    barstow_map = next(f for f in barstow.fovs if f.element_maps or f.cube)
+    assert barstow_map.pixel_size_mm is not None
+    assert 0.010 < barstow_map.pixel_size_mm < 0.030
+    assert barstow_map.stage_center_mm is not None
+    bw, bh = barstow_map.stage_size_mm
+    # barstow SmartMap is still a small patch (~7×5 mm), not half the stage
+    assert bw < 12.0 and bh < 10.0
+    assert barstow_map.stage_bounds_mm() is not None
+
+
+def test_overlay_respects_dest_rect():
+    from core.mapping.display import overlay_on_photo
+
+    photo = np.zeros((100, 200, 3), dtype=np.float64)
+    photo[:] = 0.2
+    overlay = np.ones((10, 10, 3), dtype=np.float64)
+    out = overlay_on_photo(
+        photo, overlay, opacity=1.0, dest_rect=(50, 20, 80, 40)
+    )
+    np.testing.assert_allclose(out[0, 0], 0.2)
+    assert out[25, 60].mean() > 0.9
 
 
 def test_classify_equal_vs_irregular_steps():
