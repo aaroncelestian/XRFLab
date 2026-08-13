@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -40,7 +43,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.display import enhance_map, format_acquisition, upsample_map
+from core.mapping.display import (
+    colorize_map,
+    enhance_map,
+    format_acquisition,
+    overlay_on_photo,
+    upsample_map,
+)
 from core.mapping.models import ElementMap, LineScan, MappingFOV, MappingProject, MapSpectrum
 from core.mapping.profiles import (
     extract_cube_element_profiles,
@@ -98,6 +107,13 @@ class MappingPanel(QWidget):
         self.open_btn = QPushButton("Open IPJ…")
         self.open_btn.clicked.connect(self.open_ipj)
         btn_row.addWidget(self.open_btn)
+        self.sample_info_btn = QPushButton("Sample info…")
+        self.sample_info_btn.setToolTip(
+            "Project, sample, site, and acquisition metadata.\n"
+            "Kept off the main column so map tools stay visible."
+        )
+        self.sample_info_btn.clicked.connect(self._show_sample_info)
+        btn_row.addWidget(self.sample_info_btn)
         left_layout.addLayout(btn_row)
 
         self.active_site_label = QLabel("Active site: —")
@@ -166,16 +182,16 @@ class MappingPanel(QWidget):
         data_layout.addLayout(data_btn_row)
         self.nav_tabs.addTab(data_page, "Data")
 
-        self.nav_tabs.addTab(self._build_sample_tab(), "Sample")
-
         left_layout.addWidget(self.nav_tabs, stretch=1)
+
+        self.sample_dialog = self._build_sample_dialog()
 
         # Scrollable collapsible tool sections
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setMinimumHeight(180)
+        scroll.setMinimumHeight(240)
 
         scroll_body = QWidget()
         scroll_layout = QVBoxLayout(scroll_body)
@@ -195,6 +211,57 @@ class MappingPanel(QWidget):
         self.rgb_check = QCheckBox("RGB composite")
         self.rgb_check.toggled.connect(self._refresh_canvas)
         display_sec.addWidget(self.rgb_check)
+
+        self.overlay_check = QCheckBox("Overlay on Map Area Photo")
+        self.overlay_check.setToolTip(
+            "Blend the current element map (or RGB composite) onto the "
+            "optical Map Area Photo. Assumes the photo covers the same FOV "
+            "as the XRF map. Pick / line tools stay on the map pixel grid."
+        )
+        self.overlay_check.toggled.connect(self._refresh_canvas)
+        display_sec.addWidget(self.overlay_check)
+
+        overlay_row = QHBoxLayout()
+        overlay_row.addWidget(QLabel("Opacity"))
+        self.overlay_slider = QSlider(Qt.Horizontal)
+        self.overlay_slider.setRange(0, 100)
+        self.overlay_slider.setValue(45)
+        self.overlay_slider.setToolTip("How strongly the XRF map tints the photo")
+        self.overlay_slider.valueChanged.connect(self._on_overlay_opacity)
+        overlay_row.addWidget(self.overlay_slider, stretch=1)
+        self.overlay_pct = QLabel("45%")
+        self.overlay_pct.setMinimumWidth(36)
+        overlay_row.addWidget(self.overlay_pct)
+        display_sec.addLayout(overlay_row)
+
+        cmap_row = QHBoxLayout()
+        cmap_row.addWidget(QLabel("Overlay color"))
+        self.overlay_cmap = QComboBox()
+        for key, label in (
+            ("hot", "Hot"),
+            ("inferno", "Inferno"),
+            ("cyan", "Cyan"),
+        ):
+            self.overlay_cmap.addItem(label, key)
+        self.overlay_cmap.setToolTip(
+            "Colormap for a single-element overlay (RGB uses the composite)"
+        )
+        self.overlay_cmap.currentIndexChanged.connect(self._refresh_canvas)
+        cmap_row.addWidget(self.overlay_cmap, stretch=1)
+        display_sec.addLayout(cmap_row)
+
+        self.overlay_mask_check = QCheckBox("Transparent where counts are low")
+        self.overlay_mask_check.setChecked(True)
+        self.overlay_mask_check.setToolTip(
+            "Empty / background map pixels stay see-through so the photo shows through"
+        )
+        self.overlay_mask_check.toggled.connect(self._refresh_canvas)
+        display_sec.addWidget(self.overlay_mask_check)
+        self.overlay_check.setEnabled(False)
+        self.overlay_slider.setEnabled(False)
+        self.overlay_cmap.setEnabled(False)
+        self.overlay_mask_check.setEnabled(False)
+
         self.r_combo = QComboBox()
         self.g_combo = QComboBox()
         self.b_combo = QComboBox()
@@ -328,7 +395,8 @@ class MappingPanel(QWidget):
         self.line_width_spin.setSuffix(" px")
         self.line_width_spin.setToolTip(
             "Average this many neighboring pixels perpendicular to the line "
-            "for a smoother profile. 1 = center line only."
+            "for a smoother profile. The yellow band on the map is that width "
+            "in map pixels. 1 = center line only."
         )
         self.line_width_spin.valueChanged.connect(self._on_line_width_changed)
         width_row.addWidget(self.line_width_spin)
@@ -581,12 +649,21 @@ class MappingPanel(QWidget):
         )
         self._fill_sample_tab()
 
-    def _build_sample_tab(self) -> QWidget:
-        """Form of project / sample / site text fields from the IPJ."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(6)
+    def _show_sample_info(self) -> None:
+        self._fill_sample_tab()
+        self.sample_dialog.show()
+        self.sample_dialog.raise_()
+        self.sample_dialog.activateWindow()
+
+    def _build_sample_dialog(self) -> QDialog:
+        """Project / sample / site metadata — opened from Sample info…"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sample / acquisition")
+        dialog.setModal(False)
+        dialog.resize(420, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
         hint = QLabel(
             "Text entered on the instrument (name, comment, type) plus "
@@ -657,7 +734,11 @@ class MappingPanel(QWidget):
         )
         self.copy_sample_btn.clicked.connect(self._copy_sample_to_analysis)
         layout.addWidget(self.copy_sample_btn)
-        return page
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.close)
+        layout.addWidget(buttons)
+        return dialog
 
     def _current_sample(self):
         if self.project is None:
@@ -1376,6 +1457,15 @@ class MappingPanel(QWidget):
         self.canvas.clear_region()
         self._fill_map_combos()
         self._fill_profile_map_list()
+        has_photo = fov.optical is not None
+        self.overlay_check.setEnabled(has_photo)
+        self.overlay_slider.setEnabled(has_photo)
+        self.overlay_cmap.setEnabled(has_photo)
+        self.overlay_mask_check.setEnabled(has_photo)
+        if not has_photo:
+            self.overlay_check.blockSignals(True)
+            self.overlay_check.setChecked(False)
+            self.overlay_check.blockSignals(False)
         self._refresh_canvas()
         self._update_cube_controls()
         if fov.line_scans:
@@ -1564,7 +1654,10 @@ class MappingPanel(QWidget):
         return max(1, int(self.line_width_spin.value()))
 
     def _on_line_width_changed(self, value: int) -> None:
-        self.canvas.set_band_width(int(value))
+        width = max(1, int(value))
+        self.canvas.set_band_width(width)
+        if self._last_line is not None:
+            self.canvas.set_line(*self._last_line, width=width)
         self._drawn_line_scan = None
         self._drawn_cache_key = None
         if self._last_line is not None and self._profile_source != "ipj":
@@ -1784,10 +1877,84 @@ class MappingPanel(QWidget):
         if self._last_pick_xy is not None and self.pick_btn.isChecked():
             self._on_pixel_clicked(*self._last_pick_xy)
 
+    def _on_overlay_opacity(self, value: int) -> None:
+        self.overlay_pct.setText(f"{int(value)}%")
+        if self.overlay_check.isChecked():
+            self._refresh_canvas()
+
+    def _overlay_map_source(self):
+        """Element map or None; RGB overlay is handled separately."""
+        fov = self.current_fov
+        if fov is None:
+            return None
+        checked = self._checked_display_maps()
+        if len(checked) == 1:
+            return checked[0]
+        data = self.map_combo.currentData()
+        if data and data[0] == "map":
+            return fov.find_map(data[1])
+        if checked:
+            return checked[0]
+        if fov.element_maps:
+            return fov.element_maps[0]
+        return None
+
+    def _show_photo_overlay(self) -> bool:
+        fov = self.current_fov
+        if fov is None or fov.optical is None:
+            return False
+        photo = fov.optical.data
+        opacity = self.overlay_slider.value() / 100.0
+        cmap = self.overlay_cmap.currentData() or "hot"
+        mask_low = self.overlay_mask_check.isChecked()
+        title = "Map on photo"
+        coord = None
+        overlay_rgb = None
+        alpha = None
+
+        if self.rgb_check.isChecked() and fov.element_maps:
+            r = self._enhanced_element_map(fov.find_map(self.r_combo.currentData() or ""))
+            g = self._enhanced_element_map(fov.find_map(self.g_combo.currentData() or ""))
+            b = self._enhanced_element_map(fov.find_map(self.b_combo.currentData() or ""))
+            try:
+                overlay_rgb = rgb_composite(r, g, b)
+            except Exception as exc:
+                self.status_message.emit(f"RGB overlay failed: {exc}")
+                return False
+            coord = overlay_rgb[:, :, 0]
+            alpha = np.max(overlay_rgb, axis=2) if mask_low else None
+            title = "RGB on map area photo"
+        else:
+            em = self._overlay_map_source()
+            if em is None:
+                self.status_message.emit("No element map to overlay")
+                return False
+            processed = self._process_map_array(em.data)
+            overlay_rgb, scaled = colorize_map(processed, cmap=cmap)
+            coord = processed
+            alpha = scaled if mask_low else None
+            title = f"{em.name} on map area photo"
+
+        try:
+            blended = overlay_on_photo(
+                photo, overlay_rgb, alpha=alpha, opacity=opacity
+            )
+            self.canvas.set_image(
+                coord, display=blended, rgb=True, title=title
+            )
+        except Exception as exc:
+            self.status_message.emit(f"Photo overlay failed: {exc}")
+            return False
+        return True
+
     def _refresh_canvas(self) -> None:
         fov = self.current_fov
         if fov is None:
             return
+
+        if self.overlay_check.isChecked() and fov.optical is not None:
+            if self._show_photo_overlay():
+                return
 
         checked = self._checked_display_maps()
         if checked and not self.rgb_check.isChecked():

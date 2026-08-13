@@ -23,9 +23,12 @@ Do calibration first when you can. Analysis and Batch reuse whatever FWHM and tu
 |-------------|--------|---------|
 | Fit + peak list | Analysis → Results | Peak areas, energies, χ² / R² |
 | **Semi-Quant** | Analysis → Results | Relative intensities from peak areas, normalized to 100% |
-| FP / standards intensities | Calibration → Standards | Instrument / fundamental-parameters style path |
+| **FP Composition** | Analysis → Results | Standardless wt% using a matrix model + optional H₂O / OH / CO₂ |
+| FP / standards intensities | Calibration → Standards | Instrument / multi-standard intensity path |
 
-**Semi-Quant is not weight percent from fundamental parameters.** Treat it as a quick relative ranking of labeled sample peaks. Tube lines are excluded.
+**Semi-Quant is not weight percent.** Treat it as a quick relative ranking of labeled sample peaks. Tube lines are excluded.
+
+**FP Composition** converts those peak areas to wt% with a relative fundamental-parameters iteration. Unmeasurable light elements (H, C, O) come from the matrix model and the H₂O / OH / CO₂ knobs — they are not fitted from the spectrum. Galena (PbS) uses **Measured only** with knobs at 0. Hydrates: set H₂O (and OH if needed) and watch the composition update.
 
 ---
 
@@ -178,12 +181,13 @@ Peaks are marked on the spectrum, listed for editing, and matched to common XRF 
 
 Watch the main plot and residuals. Tube-overlap flags (if any) appear under Results.
 
-### Step E — Semi-Quant and export
+### Step E — Semi-Quant, FP composition, and export
 
 1. Open **Results**.
 2. Review fit statistics and the peak list.
 3. Click **Semi-Quant** for area-normalized relative intensities.
-4. Click **Export Results** when you want a table out.
+4. For wt%, choose a **matrix model** (Measured only / Oxide / Carbonate / Hydroxide), leave H₂O / OH / CO₂ at 0 unless the sample needs them, then click **FP Composition**. After that, the knobs recompute live so you can try water contents.
+5. Click **Export Results** when you want a table out.
 
 ### Checklist if Semi-Quant is empty
 

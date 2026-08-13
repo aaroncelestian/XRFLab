@@ -6,8 +6,14 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPen, QPolygonF
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsPolygonItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.mapping.profiles import line_band_edges
 from core.mapping.regions import circle_outline, polygon_outline, rect_outline
@@ -143,7 +149,9 @@ class MapCanvas(QWidget):
         self._end = (x1, y1)
         if width is not None:
             self._band_width = max(1, int(width))
+        pen = self._transect_pen()
         for p in self._panels:
+            p["line"].setPen(pen)
             p["line"].setData([x0, x1], [y0, y1])
             self._set_panel_band(p, (x0, y0, x1, y1))
 
@@ -182,7 +190,10 @@ class MapCanvas(QWidget):
             else:
                 disp = disp.astype(np.float64)
             disp = np.clip(disp, 0.0, 1.0)
-            self._primary_data = np.asarray(arr[:, :, 0], dtype=np.float64)
+            if arr.ndim >= 3:
+                self._primary_data = np.asarray(arr[:, :, 0], dtype=np.float64)
+            else:
+                self._primary_data = np.asarray(arr, dtype=np.float64)
             panel["data"] = self._primary_data
             panel["image"].setImage(
                 np.ascontiguousarray(disp),
@@ -282,15 +293,16 @@ class MapCanvas(QWidget):
         view.addItem(image)
         line = pg.PlotDataItem(pen=pg.mkPen("#ffcc00", width=2))
         view.addItem(line)
-        dash = pg.mkPen("#ffcc00", width=1, style=Qt.DashLine)
+        dash = pg.mkPen("#ffcc00", width=1.5, style=Qt.DashLine)
         band_a = pg.PlotDataItem(pen=dash)
         band_b = pg.PlotDataItem(pen=dash)
         view.addItem(band_a)
         view.addItem(band_b)
-        band_fill = pg.FillBetweenItem(
-            band_a, band_b, brush=pg.mkBrush(255, 204, 0, 55)
-        )
-        view.addItem(band_fill)
+        band_poly = QGraphicsPolygonItem()
+        band_poly.setBrush(QBrush(QColor(255, 204, 0, 70)))
+        band_poly.setPen(QPen(QColor(255, 180, 0, 210), 0))
+        band_poly.setZValue(10)
+        view.addItem(band_poly)
         spot = pg.ScatterPlotItem(
             size=8,
             brush=pg.mkBrush(0, 200, 255, 180),
@@ -309,7 +321,7 @@ class MapCanvas(QWidget):
             "line": line,
             "band_a": band_a,
             "band_b": band_b,
-            "band_fill": band_fill,
+            "band_poly": band_poly,
             "spot": spot,
             "region": region,
             "data": None,
@@ -345,9 +357,18 @@ class MapCanvas(QWidget):
             scene.sigMouseMoved, rateLimit=40, slot=self._on_move
         )
 
+    def _transect_pen(self) -> QPen:
+        """Center-line stroke; grows a little so width changes are obvious."""
+        if self._band_width <= 1:
+            w = 2.0
+        else:
+            w = min(2.0 + 0.4 * float(self._band_width), 12.0)
+        return pg.mkPen("#ffcc00", width=w)
+
     def _set_panel_band(
         self, panel: dict, line: Optional[Tuple[float, float, float, float]]
     ) -> None:
+        poly_item = panel.get("band_poly")
         if (
             line is None
             or self._band_width <= 1
@@ -356,11 +377,24 @@ class MapCanvas(QWidget):
             if "band_a" in panel:
                 panel["band_a"].setData([], [])
                 panel["band_b"].setData([], [])
+            if poly_item is not None:
+                poly_item.setPolygon(QPolygonF())
             return
         x0, y0, x1, y1 = line
         a0, a1, b0, b1 = line_band_edges((x0, y0), (x1, y1), self._band_width)
         panel["band_a"].setData([a0[0], a1[0]], [a0[1], a1[1]])
         panel["band_b"].setData([b0[0], b1[0]], [b0[1], b1[1]])
+        if poly_item is not None:
+            poly_item.setPolygon(
+                QPolygonF(
+                    [
+                        QPointF(a0[0], a0[1]),
+                        QPointF(a1[0], a1[1]),
+                        QPointF(b1[0], b1[1]),
+                        QPointF(b0[0], b0[1]),
+                    ]
+                )
+            )
 
     def _restore_overlays(self) -> None:
         if self._start is not None and self._end is not None:
@@ -443,12 +477,16 @@ class MapCanvas(QWidget):
             self._start = (x, y)
             self._end = None
             self._drawing = True
+            pen = self._transect_pen()
             for p in self._panels:
+                p["line"].setPen(pen)
                 p["line"].setData([x], [y])
         else:
             self._end = (x, y)
             self._drawing = False
+            pen = self._transect_pen()
             for p in self._panels:
+                p["line"].setPen(pen)
                 p["line"].setData([self._start[0], x], [self._start[1], y])
                 self._set_panel_band(p, (self._start[0], self._start[1], x, y))
             self.line_drawn.emit(self._start[0], self._start[1], x, y)
@@ -465,7 +503,9 @@ class MapCanvas(QWidget):
             val = float(panel["data"][int(y), int(x)])
             self.cursor_moved.emit(x, y, val)
         if self._line_mode and self._drawing and self._start is not None:
+            pen = self._transect_pen()
             for p in self._panels:
+                p["line"].setPen(pen)
                 p["line"].setData([self._start[0], x], [self._start[1], y])
                 self._set_panel_band(p, (self._start[0], self._start[1], x, y))
         if self._region_mode:

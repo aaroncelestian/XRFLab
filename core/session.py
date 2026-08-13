@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from core.instrument_state import InstrumentState
+from core.matrix_model import MatrixAssumptions
 
 
 @dataclass
@@ -24,10 +25,14 @@ class AnalysisSession:
     instrument: InstrumentState = field(default_factory=InstrumentState)
     spectrum_path: Optional[str] = None
     quantification_method: str = "semi_quant_area"
+    matrix: MatrixAssumptions = field(default_factory=MatrixAssumptions)
+    fp_result: Any = None  # Optional FPQuantResult
 
     def clear_fit(self) -> None:
         self.fit_result = None
         self.concentrations = {}
+        self.fp_result = None
+        self.fp_result = None
 
     def set_spectrum(self, spectrum, path: Optional[str] = None) -> None:
         self.spectrum = spectrum
@@ -40,11 +45,24 @@ class AnalysisSession:
     def set_fit_result(self, fit_result) -> None:
         self.fit_result = fit_result
         self.concentrations = {}
+        self.fp_result = None
 
     def set_concentrations(self, concentrations: Dict[str, Any], method: str = None) -> None:
         self.concentrations = dict(concentrations or {})
         if method:
             self.quantification_method = method
+        if method and method != "fp_matrix":
+            self.fp_result = None
+
+    def set_fp_result(self, fp_result) -> None:
+        self.fp_result = fp_result
+        if fp_result is None:
+            return
+        self.concentrations = dict(getattr(fp_result, "concentrations", None) or {})
+        self.quantification_method = "fp_matrix"
+        assumptions = getattr(fp_result, "assumptions", None)
+        if assumptions is not None:
+            self.matrix = assumptions
 
     def apply_instrument_to_fitter(self, fitter) -> None:
         """Push current instrument calibrations onto a fitter."""

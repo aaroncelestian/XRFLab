@@ -1,5 +1,12 @@
 # Changelog
 
+## Version 1.3.0 - Standardless FP composition (2026-08-12)
+
+- Analysis **FP Composition** converts one fitted spectrum to wt% using relative fundamental parameters
+- Matrix models: measured only (metal/sulfide), oxide/silicate, carbonate, hydroxide
+- Live H₂O, OH, and CO₂ knobs for unmeasurable light elements (default 0; galena needs nothing extra)
+- Semi-quant is unchanged (area-normalized relative intensities)
+
 ## Version 1.2.0 - Product integrity & session model (2026-08-10)
 
 ### Clarifications

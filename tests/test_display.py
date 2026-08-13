@@ -59,7 +59,33 @@ def test_intensity_scales_are_monotonic():
     assert log[0, 2] < 100.0
 
 
-def test_format_acquisition():
+def test_overlay_on_photo_blends_and_resizes():
+    from core.mapping.display import colorize_map, overlay_on_photo, resize_to
+
+    photo = np.zeros((20, 30, 3), dtype=np.uint8)
+    photo[:] = (40, 40, 40)
+    mmap = np.zeros((5, 6), dtype=np.float64)
+    mmap[2, 3] = 100.0
+    rgb, alpha = colorize_map(mmap, cmap="hot")
+    assert rgb.shape == (5, 6, 3)
+    assert alpha[2, 3] > alpha[0, 0]
+    blended = overlay_on_photo(photo, rgb, alpha=alpha, opacity=1.0)
+    assert blended.shape == (20, 30, 3)
+    # Hot peak should be brighter than the gray photo background
+    assert blended.max() > blended[0, 0, 0]
+    resized = resize_to(mmap, 20, 30)
+    assert resized.shape == (20, 30)
+    assert resized[8, 15] > 0  # peak maps near center of 5x6 → 20x30
+
+
+def test_overlay_opacity_zero_is_photo():
+    from core.mapping.display import overlay_on_photo
+
+    photo = np.full((8, 8, 3), 0.2, dtype=np.float64)
+    overlay = np.ones((8, 8, 3), dtype=np.float64)
+    out = overlay_on_photo(photo, overlay, opacity=0.0)
+    np.testing.assert_allclose(out, photo, atol=1e-6)
+
     text = format_acquisition(
         {
             "map_live_time_s": 300.0,

@@ -24,6 +24,7 @@ from utils.updater import check_for_updates
 from utils.desktop_shortcut import install_desktop_shortcut
 from utils.paths import icon_path, resource_path
 from core.fitting import SpectrumFitter
+from core.fp_quantification import quantify_from_peaks
 from core.session import AnalysisSession
 from core.smart_peak_id import (
     SmartIDConfig,
@@ -111,10 +112,17 @@ class MainWindow(QMainWindow):
         self.quantify_action = QAction("&Semi-Quant (Relative Intensities)", self)
         self.quantify_action.setShortcut("Ctrl+Q")
         self.quantify_action.setStatusTip(
-            "Area-normalized relative intensities (not FP wt%). "
-            "Use Calibration → Standards for instrument-calibrated results."
+            "Area-normalized relative intensities (not FP wt%)."
         )
         self.quantify_action.triggered.connect(self.quantify)
+
+        self.fp_quantify_action = QAction("&FP Composition (wt%)", self)
+        self.fp_quantify_action.setShortcut("Ctrl+Shift+Q")
+        self.fp_quantify_action.setStatusTip(
+            "Standardless fundamental-parameters wt% using the matrix model "
+            "and optional H2O / OH / CO2 assumptions."
+        )
+        self.fp_quantify_action.triggered.connect(self.quantify_fp)
         
         # View actions
         self.toggle_log_action = QAction("&Logarithmic Y-axis", self)
@@ -182,6 +190,7 @@ class MainWindow(QMainWindow):
         analysis_menu = menubar.addMenu("&Analysis")
         analysis_menu.addAction(self.fit_spectrum_action)
         analysis_menu.addAction(self.quantify_action)
+        analysis_menu.addAction(self.fp_quantify_action)
         
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -373,6 +382,10 @@ class MainWindow(QMainWindow):
         self.element_panel.identify_add_element.connect(self.on_identify_add_element)
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
+        self.results_panel.fp_quantify_requested.connect(self.quantify_fp)
+        self.results_panel.matrix_assumptions_changed.connect(
+            lambda: self.quantify_fp(live=True)
+        )
         self.results_panel.export_button.clicked.connect(self.export_results)
         
         return analysis_widget
@@ -783,6 +796,8 @@ class MainWindow(QMainWindow):
                 self.fit_result.peaks, exp_params
             )
             self.session.set_concentrations(concentrations, method="semi_quant_area")
+            self.results_panel.set_fp_live(False)
+            self.results_panel.set_formula_summary("")
             self.results_panel.set_quantification(concentrations)
 
             # Sync identified sample elements onto Elements tab for review.
@@ -994,6 +1009,8 @@ class MainWindow(QMainWindow):
                 self.fit_result.peaks, exp_params
             )
             self.session.set_concentrations(concentrations, method="semi_quant_area")
+            self.results_panel.set_fp_live(False)
+            self.results_panel.set_formula_summary("")
             self.results_panel.set_quantification(concentrations)
             n = len(concentrations)
             
@@ -1032,6 +1049,73 @@ class MainWindow(QMainWindow):
             )
             self.status_bar.showMessage("Semi-quant failed", 5000)
     
+    def quantify_fp(self, live=False):
+        """Standardless FP wt% using the current matrix assumptions."""
+        live = live is True
+        if self.fit_result is None or not getattr(self.fit_result, "peaks", None):
+            if live:
+                return
+            QMessageBox.warning(
+                self,
+                "No Fit Results",
+                "Please fit a spectrum first before running FP composition.",
+            )
+            return
+
+        if hasattr(self, "analysis_left_tabs"):
+            self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
+
+        assumptions = self.results_panel.get_matrix_assumptions()
+        self.session.matrix = assumptions
+        if not live:
+            self.status_bar.showMessage("Computing FP composition...", 0)
+        try:
+            exp_params = self.element_panel.get_experimental_params()
+            result = quantify_from_peaks(
+                self.fit_result.peaks, assumptions, exp_params
+            )
+            if not result.success:
+                if live:
+                    return
+                self.results_panel.set_fp_live(False)
+                QMessageBox.warning(
+                    self,
+                    "FP Composition",
+                    result.message or "FP quantification failed.",
+                )
+                self.status_bar.showMessage("FP composition failed", 5000)
+                return
+
+            self.session.set_fp_result(result)
+            self.results_panel.set_fp_live(True)
+            self.results_panel.set_quantification(result.concentrations)
+            bits = [f"As formulas: {result.formula_summary()}"]
+            if result.residual < float("inf"):
+                bits.append(
+                    f"intensity residual {result.residual:.4f} "
+                    f"({result.iterations} iter)"
+                )
+            bits.append(f"measured cations {result.measured_cation_pct:.1f} %")
+            self.results_panel.set_formula_summary("    |  ".join(bits))
+            n = len([k for k, v in result.concentrations.items()
+                     if v.get("role") == "measured"])
+            self.status_bar.showMessage(
+                f"FP composition: {n} measured element{'s' if n != 1 else ''} "
+                f"({assumptions.kind.value}; "
+                f"H2O {assumptions.h2o_wt:g}%, OH {assumptions.oh_wt:g}%, "
+                f"CO2 {assumptions.co2_wt:g}%)",
+                5000,
+            )
+        except Exception as e:
+            if live:
+                return
+            QMessageBox.critical(
+                self,
+                "FP Composition Error",
+                f"An error occurred during FP quantification:\n{str(e)}",
+            )
+            self.status_bar.showMessage("FP composition failed", 5000)
+
     def toggle_log_scale(self, checked):
         """Toggle logarithmic Y-axis from the View menu"""
         self.spectrum_widget.set_log_scale(checked)
@@ -1115,8 +1199,9 @@ class MainWindow(QMainWindow):
             "<h3>XRFLab</h3>"
             "<p>Version 1.0.0</p>"
             "<p>Desktop XRF spectrum analysis: fitting, detector/tube calibration, "
-            "and area-normalized semi-quant. Fundamental-parameters / fisx tools are "
-            "available under Calibration → Standards.</p>"
+            "area-normalized semi-quant, and standardless FP composition "
+            "(matrix model with optional H₂O / OH / CO₂). "
+            "Standards / fisx tools are under Calibration → Standards.</p>"
             "<p>Built with PySide6, PyQtGraph, xraylib, and fisx.</p>"
             "<p>Use <b>Help → Install Desktop Shortcut</b> to add a Desktop launcher.</p>"
         )

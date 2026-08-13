@@ -174,6 +174,148 @@ def apply_intensity_scale(data: np.ndarray, scale: str) -> np.ndarray:
     raise ValueError(f"Unknown intensity scale: {scale}")
 
 
+def resize_to(
+    data: np.ndarray,
+    height: int,
+    width: int,
+    *,
+    order: int = 1,
+) -> np.ndarray:
+    """Resize 2D or HxWxC array to (height, width) keeping channels."""
+    arr = np.asarray(data, dtype=np.float64)
+    height, width = int(height), int(width)
+    if height <= 0 or width <= 0:
+        raise ValueError("resize_to requires positive height and width")
+    if arr.ndim == 2:
+        if arr.shape == (height, width):
+            return arr.copy()
+        zh, zw = height / arr.shape[0], width / arr.shape[1]
+        if zoom is not None:
+            return zoom(arr, (zh, zw), order=order, mode="nearest")
+        return _resize_numpy(arr, height, width)
+    if arr.ndim == 3:
+        if arr.shape[0] == height and arr.shape[1] == width:
+            return arr.copy()
+        zh, zw = height / arr.shape[0], width / arr.shape[1]
+        if zoom is not None:
+            z = (zh, zw) + (1.0,) * (arr.ndim - 2)
+            return zoom(arr, z, order=order, mode="nearest")
+        out = np.empty((height, width, arr.shape[2]), dtype=np.float64)
+        for c in range(arr.shape[2]):
+            out[:, :, c] = _resize_numpy(arr[:, :, c], height, width)
+        return out
+    raise ValueError("resize_to expects 2D or 3D data")
+
+
+def _resize_numpy(arr: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Nearest-neighbor resize when SciPy is unavailable."""
+    ys = np.linspace(0, arr.shape[0] - 1, height)
+    xs = np.linspace(0, arr.shape[1] - 1, width)
+    yi = np.clip(np.round(ys).astype(int), 0, arr.shape[0] - 1)
+    xi = np.clip(np.round(xs).astype(int), 0, arr.shape[1] - 1)
+    return arr[yi[:, None], xi[None, :]]
+
+
+def _lut_hot(n: int = 256) -> np.ndarray:
+    x = np.linspace(0.0, 1.0, n)
+    return np.column_stack(
+        [np.clip(x * 3.0, 0, 1), np.clip(x * 3.0 - 1.0, 0, 1), np.clip(x * 3.0 - 2.0, 0, 1)]
+    )
+
+
+def _lut_inferno(n: int = 256) -> np.ndarray:
+    """Compact inferno-like ramp (black → purple → orange → yellow)."""
+    x = np.linspace(0.0, 1.0, n)
+    r = np.clip(1.4 * x - 0.15 * np.sin(x * np.pi), 0, 1)
+    g = np.clip(x * x * 1.1, 0, 1)
+    b = np.clip(0.55 * np.sin(x * np.pi) + 0.15 * (1.0 - x), 0, 1)
+    return np.column_stack([r, g, b])
+
+
+def _lut_cyan(n: int = 256) -> np.ndarray:
+    x = np.linspace(0.0, 1.0, n)
+    return np.column_stack(
+        [0.05 * x, 0.65 * x + 0.1 * x * x, np.clip(0.3 + 0.7 * x, 0, 1)]
+    )
+
+
+COLORMAPS = {
+    "hot": _lut_hot,
+    "inferno": _lut_inferno,
+    "cyan": _lut_cyan,
+}
+
+
+def colorize_map(
+    data: np.ndarray,
+    *,
+    percentile: tuple = (2.0, 98.0),
+    cmap: str = "hot",
+) -> tuple:
+    """
+    Map a 2D intensity array to RGB in [0, 1] plus an alpha mask in [0, 1].
+
+    Alpha follows scaled intensity so empty pixels stay transparent.
+    """
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError("colorize_map expects a 2D array")
+    lut_fn = COLORMAPS.get((cmap or "hot").lower(), _lut_hot)
+    lut = lut_fn(256)
+    lo, hi = np.percentile(arr, percentile)
+    if hi <= lo:
+        hi = lo + 1.0
+    scaled = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    idx = np.clip((scaled * 255).astype(np.int32), 0, 255)
+    rgb = lut[idx]
+    return rgb, scaled
+
+
+def overlay_on_photo(
+    photo: np.ndarray,
+    overlay_rgb: np.ndarray,
+    *,
+    alpha: Optional[np.ndarray] = None,
+    opacity: float = 0.45,
+) -> np.ndarray:
+    """
+    Alpha-blend an RGB overlay onto an optical photo.
+
+    The overlay is resized to the photo. ``opacity`` is 0–1. If ``alpha`` is
+    given (0–1, same shape as the overlay before resize), low-count pixels
+    stay more transparent. Returns HxWx3 float in [0, 1].
+    """
+    photo_arr = np.asarray(photo, dtype=np.float64)
+    if photo_arr.ndim == 2:
+        photo_arr = np.repeat(photo_arr[:, :, None], 3, axis=2)
+    photo_arr = photo_arr[:, :, :3]
+    if photo_arr.max(initial=0.0) > 1.5:
+        photo_arr = photo_arr / 255.0
+    photo_arr = np.clip(photo_arr, 0.0, 1.0)
+    h, w = photo_arr.shape[:2]
+
+    over = np.asarray(overlay_rgb, dtype=np.float64)
+    if over.ndim != 3 or over.shape[2] < 3:
+        raise ValueError("overlay_rgb must be HxWx3")
+    over = over[:, :, :3]
+    if over.max(initial=0.0) > 1.5:
+        over = over / 255.0
+    over = np.clip(over, 0.0, 1.0)
+    if over.shape[0] != h or over.shape[1] != w:
+        over = resize_to(over, h, w, order=1)
+
+    opac = float(np.clip(opacity, 0.0, 1.0))
+    if alpha is None:
+        a = np.full((h, w), opac, dtype=np.float64)
+    else:
+        a = np.asarray(alpha, dtype=np.float64)
+        if a.shape != (h, w):
+            a = resize_to(a, h, w, order=1)
+        a = np.clip(a, 0.0, 1.0) * opac
+    a3 = a[:, :, None]
+    return np.clip(photo_arr * (1.0 - a3) + over * a3, 0.0, 1.0)
+
+
 def format_acquisition(meta: Optional[dict]) -> str:
     """One- or two-line summary of map live time, dwell, and tube settings."""
     if not meta:
