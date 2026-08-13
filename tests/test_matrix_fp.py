@@ -205,3 +205,34 @@ def test_fp_result_concentrations_roles():
     assert result.concentrations["H"]["role"] == "assumed"
     assert isinstance(result, FPQuantResult)
     assert "SiO2" in result.formula_summary()
+
+
+def test_empirical_formula_calcite_quartz_magnetite():
+    from core.matrix_model import empirical_formula
+
+    calcite_el, _ = expand_composition(
+        {"Ca": 1.0}, MatrixAssumptions(kind=MatrixKind.CARBONATE)
+    )
+    assert empirical_formula(calcite_el) == "CaCO₃"
+
+    quartz_el, _ = expand_composition(
+        {"Si": 1.0}, MatrixAssumptions(kind=MatrixKind.OXIDE)
+    )
+    assert empirical_formula(quartz_el) == "SiO₂"
+
+    mag_el, mag_f = expand_composition(
+        {"Fe": 1.0},
+        MatrixAssumptions(kind=MatrixKind.OXIDE, fe_as="Fe3O4"),
+    )
+    assert formula_for("Fe", MatrixAssumptions(kind=MatrixKind.OXIDE, fe_as="Fe3O4")) == "Fe3O4"
+    assert abs(mag_f["Fe3O4"] - 100.0) < 1e-6
+    assert empirical_formula(mag_el) == "Fe₃O₄"
+
+
+def test_coerce_matrix_kind_from_combo_strings():
+    from core.matrix_model import coerce_matrix_kind
+
+    assert coerce_matrix_kind("carbonate") == MatrixKind.CARBONATE
+    assert coerce_matrix_kind("Carbonate") == MatrixKind.CARBONATE
+    assert coerce_matrix_kind("Oxide / silicate") == MatrixKind.OXIDE
+    assert coerce_matrix_kind(MatrixKind.HYDROXIDE) == MatrixKind.HYDROXIDE

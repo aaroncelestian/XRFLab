@@ -60,6 +60,8 @@ _OXIDE_AS_FEO = {
 
 _OXIDE_AS_FE2O3 = dict(_OXIDE_AS_FEO)
 _OXIDE_AS_FE2O3["Fe"] = ("Fe2O3", 1.4297)
+_OXIDE_AS_FE3O4 = dict(_OXIDE_AS_FEO)
+_OXIDE_AS_FE3O4["Fe"] = ("Fe3O4", 1.3820)
 
 SQRT3_OVER_2 = 0.8660254037844386
 
@@ -254,9 +256,11 @@ def summarize_samples(
 
 
 def oxide_factor_table(fe_as: str = "FeO") -> Dict[str, Tuple[str, float]]:
-    key = (fe_as or "FeO").strip()
-    if key.lower() in {"fe2o3", "fe₂o₃"}:
+    key = (fe_as or "FeO").strip().lower().replace(" ", "")
+    if key in {"fe2o3", "fe₂o₃"}:
         return _OXIDE_AS_FE2O3
+    if key in {"fe3o4", "fe₃o₄", "magnetite"}:
+        return _OXIDE_AS_FE3O4
     return _OXIDE_AS_FEO
 
 

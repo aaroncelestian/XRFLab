@@ -24,7 +24,9 @@ def get_element_lines(symbol, z):
         dict: Dictionary with line series (K, L, M, N). Each entry is
         {'name', 'energy', 'intensity', 'relative_intensity'} where
         intensity is the xraylib radiative rate (or fallback approx) and
-        relative_intensity is normalized to the strongest line in that series (0–1).
+        relative_intensity is 0–1 vs the strongest line of the element
+        (radiative rate × fluorescence yield, so M lines are much weaker
+        than L/K). relative_intensity_series is 0–1 within that series.
     """
     if not XRAYLIB_AVAILABLE:
         return _get_fallback_lines(symbol, z)
@@ -110,6 +112,7 @@ def get_element_lines(symbol, z):
         print(f"Error getting lines for {symbol}: {e}")
 
     _normalize_series_intensities(lines)
+    _apply_element_relative_intensities(lines, z)
     return lines
 
 
@@ -145,7 +148,50 @@ def _normalize_series_intensities(lines):
                 entry['intensity'] = float(approx.get(entry.get('name'), 0.1))
         max_i = max(float(e.get('intensity', 0.0)) for e in entries) or 1.0
         for entry in entries:
-            entry['relative_intensity'] = float(entry.get('intensity', 0.0)) / max_i
+            entry['relative_intensity_series'] = float(entry.get('intensity', 0.0)) / max_i
+            entry['relative_intensity'] = entry['relative_intensity_series']
+
+
+def _series_fluorescence_yield(z: int, series: str) -> float:
+    """Approximate fluorescence yield so M << L << K on predicted-line plots."""
+    fallback = {'K': 0.5, 'L': 0.12, 'M': 0.02, 'N': 0.005}
+    if not XRAYLIB_AVAILABLE:
+        return float(fallback.get(series, 0.01))
+    shell = {
+        'K': xrl.K_SHELL,
+        'L': xrl.L3_SHELL,
+        'M': xrl.M5_SHELL,
+    }.get(series)
+    if shell is None:
+        return float(fallback.get(series, 0.01))
+    try:
+        y = float(xrl.FluorYield(int(z), shell))
+        return y if y > 0 else float(fallback.get(series, 0.01))
+    except Exception:
+        return float(fallback.get(series, 0.01))
+
+
+def _apply_element_relative_intensities(lines, z, e_max_kev=40.0):
+    """Normalize relative_intensity across K/L/M using fluorescence yields.
+
+    Lines above e_max_kev (typical XRF window) are omitted from the max so
+    Pb Kα at ~75 keV does not shrink Lα/Mα sticks that are actually observed.
+    """
+    in_range = []
+    for series, entries in lines.items():
+        w = _series_fluorescence_yield(z, series)
+        for entry in entries:
+            val = float(entry.get('intensity', 0.0)) * w
+            entry['observed_weight'] = val
+            energy = float(entry.get('energy', 0.0))
+            if energy <= float(e_max_kev):
+                in_range.append(val)
+    max_w = max(in_range) if in_range else 1.0
+    if max_w <= 0:
+        max_w = 1.0
+    for entries in lines.values():
+        for entry in entries:
+            entry['relative_intensity'] = float(entry.get('observed_weight', 0.0)) / max_w
 
 
 def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
@@ -333,4 +379,5 @@ def _get_fallback_lines(symbol, z):
         lines['L'].append({'name': 'Lβ1', 'energy': l_beta, 'intensity': 0.6})
 
     _normalize_series_intensities(lines)
+    _apply_element_relative_intensities(lines, z)
     return lines

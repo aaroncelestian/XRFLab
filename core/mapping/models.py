@@ -539,13 +539,23 @@ class MappingProject:
 
 def _element_from_line_name(name: str) -> str:
     """Extract element symbol from labels like 'Fe Ka1' or 'Na Ka1_2'."""
-    token = (name or "").strip().split()[0] if name else ""
-    if not token:
+    raw = (name or "").strip()
+    if not raw:
         return ""
-    # First capital + optional lowercase (Fe, Si, Na)
+    token = raw.split()[0]
+    rest = raw[len(token) :].strip().lower()
+    if rest:
+        tags = ("ka", "kb", "kα", "kβ", "la", "lb", "lα", "lβ", "ma", "mα", "roi")
+        compact = rest.replace(" ", "")
+        if not any(tag in compact for tag in tags):
+            return ""
     if len(token) >= 2 and token[1].islower():
-        return token[:2]
-    return token[:1] if token else ""
+        sym = token[:2]
+    else:
+        sym = token[:1]
+    if not sym.isalpha() or not sym[0].isupper():
+        return ""
+    return sym
 
 
 def coerce_element_symbols(elements) -> List[str]:

@@ -4,10 +4,100 @@ Interactive periodic table widget for element selection
 
 from PySide6.QtWidgets import (
     QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout,
-    QHBoxLayout, QButtonGroup, QScrollArea, QFrame, QMenu, QMessageBox
+    QHBoxLayout, QLayout, QScrollArea, QFrame, QMenu, QMessageBox,
+    QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QRect, QSize
 from PySide6.QtGui import QFont, QColor, QContextMenuEvent
+
+
+class _FlowLayout(QLayout):
+    """Left-to-right chips that wrap onto the next row when the panel is narrow."""
+
+    def __init__(self, parent=None, *, hspacing=8, vspacing=4):
+        super().__init__(parent)
+        self._items = []
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self.setContentsMargins(0, 4, 0, 2)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._hspacing
+            if next_x - self._hspacing > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + self._vspacing
+                next_x = x + hint.width() + self._hspacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + m.bottom()
+
+
+class _LegendBar(QWidget):
+    """Host for the wrapping group legend so the parent layout gets a real height."""
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        lay = self.layout()
+        return lay.heightForWidth(width) if lay is not None else 0
+
+    def sizeHint(self):
+        w = max(self.width(), 200)
+        return QSize(w, self.heightForWidth(w))
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
 
 class ElementButton(QPushButton):
@@ -146,34 +236,32 @@ class PeriodicTableWidget(QWidget):
         
         scroll.setWidget(self.table_widget)
         layout.addWidget(scroll, stretch=1)
-        
-        # Control buttons - compact layout
+
+        layout.addWidget(self._create_legend())
+
+        # Control buttons sit under the group legend
         button_layout = QHBoxLayout()
         button_layout.setSpacing(3)
-        
+
         self.select_all_btn = QPushButton("All")
         self.select_all_btn.setToolTip("Select all elements")
         self.select_all_btn.setMaximumHeight(24)
         self.select_all_btn.clicked.connect(self._select_all)
         button_layout.addWidget(self.select_all_btn)
-        
+
         self.clear_all_btn = QPushButton("Clear")
         self.clear_all_btn.setToolTip("Clear all selections")
         self.clear_all_btn.setMaximumHeight(24)
         self.clear_all_btn.clicked.connect(self._clear_all)
         button_layout.addWidget(self.clear_all_btn)
-        
+
         self.select_common_btn = QPushButton("Common")
         self.select_common_btn.setToolTip("Select commonly analyzed elements in XRF")
         self.select_common_btn.setMaximumHeight(24)
         self.select_common_btn.clicked.connect(self._select_common_xrf)
         button_layout.addWidget(self.select_common_btn)
-        
+
         layout.addLayout(button_layout)
-        
-        # Legend
-        legend_layout = self._create_legend()
-        layout.addLayout(legend_layout)
     
     def _create_periodic_table(self):
         """Create the periodic table layout"""
@@ -326,42 +414,43 @@ class PeriodicTableWidget(QWidget):
         self.table_layout.addWidget(actinide_label, 8, 2)
     
     def _create_legend(self):
-        """Create color legend for element groups"""
-        layout = QHBoxLayout()
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
+        """Color legend for element groups; wraps onto extra rows if needed."""
+        container = _LegendBar()
+        container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        layout = _FlowLayout(container, hspacing=10, vspacing=4)
+
         legend_items = [
-            ('Alkali', '#FF6B6B'),
-            ('Alkaline', '#FFA07A'),
-            ('Trans.', '#FFD93D'),
-            ('Post-T.', '#95E1D3'),
-            ('Metalloid', '#A8E6CF'),
-            ('Nonmet.', '#87CEEB'),
-            ('Halogen', '#DDA0DD'),
-            ('Noble', '#E6E6FA'),
-            ('Ln', '#FFDAB9'),
-            ('An', '#FFB6C1'),
+            ("Alkali", "#FF6B6B"),
+            ("Alkaline", "#FFA07A"),
+            ("Transition", "#FFD93D"),
+            ("Post-trans.", "#95E1D3"),
+            ("Metalloid", "#A8E6CF"),
+            ("Nonmetal", "#87CEEB"),
+            ("Halogen", "#DDA0DD"),
+            ("Noble gas", "#E6E6FA"),
+            ("Lanthanide", "#FFDAB9"),
+            ("Actinide", "#FFB6C1"),
         ]
-        
+
         for name, color in legend_items:
-            frame = QFrame()
-            frame.setFixedSize(8, 8)
-            frame.setStyleSheet(f"background-color: {color}; border: 1px solid #999;")
-            
+            chip = QWidget()
+            chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            row = QHBoxLayout(chip)
+            row.setContentsMargins(2, 2, 6, 2)
+            row.setSpacing(5)
+
+            swatch = QFrame()
+            swatch.setFixedSize(12, 12)
+            swatch.setStyleSheet(
+                f"background-color: {color}; border: 1px solid #888; border-radius: 2px;"
+            )
             label = QLabel(name)
-            label.setFont(QFont("Arial", 6))
-            
-            item_layout = QHBoxLayout()
-            item_layout.addWidget(frame)
-            item_layout.addWidget(label)
-            item_layout.setSpacing(1)
-            item_layout.setContentsMargins(0, 0, 4, 0)
-            
-            layout.addLayout(item_layout)
-        
-        layout.addStretch()
-        return layout
+            label.setFont(QFont("Arial", 9))
+            row.addWidget(swatch)
+            row.addWidget(label)
+            layout.addWidget(chip)
+
+        return container
     
     def _on_element_toggled(self, checked):
         """Handle element button toggle"""

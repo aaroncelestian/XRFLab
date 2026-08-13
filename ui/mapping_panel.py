@@ -213,16 +213,24 @@ class MappingPanel(QWidget):
 
         # ---- Display ----
         display_sec = CollapsibleSection("Display", expanded=True)
-        display_sec.addWidget(QLabel("Map / overview (if none checked)"))
+        display_sec.addWidget(QLabel("View"))
         self.map_combo = QComboBox()
-        self.map_combo.currentIndexChanged.connect(self._refresh_canvas)
+        self.map_combo.setToolTip(
+            "Choose an element map, Map Area Photo, or sample camera.\n"
+            "RGB composite is turned off automatically when you pick a photo."
+        )
+        self.map_combo.currentIndexChanged.connect(self._on_map_combo_changed)
         display_sec.addWidget(self.map_combo)
         hint = QLabel("Tip: check element maps in the Data tree to show subplots.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 11px;")
         display_sec.addWidget(hint)
         self.rgb_check = QCheckBox("RGB composite")
-        self.rgb_check.toggled.connect(self._refresh_canvas)
+        self.rgb_check.setToolTip(
+            "False-color composite from the R/G/B maps below. "
+            "Needs at least two different maps; otherwise it looks grayscale."
+        )
+        self.rgb_check.toggled.connect(self._on_rgb_toggled)
         display_sec.addWidget(self.rgb_check)
 
         self.overlay_check = QCheckBox("Overlay on Map Area Photo")
@@ -1619,11 +1627,18 @@ class MappingPanel(QWidget):
         self.overlay_slider.setEnabled(has_photo)
         self.overlay_cmap.setEnabled(has_photo)
         self.overlay_mask_check.setEnabled(has_photo)
-        if not has_photo:
-            self.overlay_check.blockSignals(True)
-            self.overlay_check.setChecked(False)
-            self.overlay_check.blockSignals(False)
-        self._refresh_canvas()
+        self.overlay_check.blockSignals(True)
+        self.overlay_check.setChecked(has_photo)
+        self.overlay_check.blockSignals(False)
+        # RGB of a single map is just grayscale — don't leave it stuck on
+        if len(fov.element_maps) < 2:
+            self.rgb_check.blockSignals(True)
+            self.rgb_check.setChecked(False)
+            self.rgb_check.blockSignals(False)
+        if has_photo:
+            self._select_combo_kind("optical")
+        else:
+            self._refresh_canvas()
         self._update_cube_controls()
         if fov.line_scans:
             self._plot_ipj_line_scan(fov.line_scans[0], switch_tab=False)
@@ -1803,11 +1818,14 @@ class MappingPanel(QWidget):
 
         # Elements from loaded maps (so Map: Ca Ka1 can drive a spectral ROI)
         for m in fov.element_maps:
+            if m.metadata.get("source") == "cube_total":
+                continue
             el = (m.element or "").strip()
-            if el:
-                for s, e in self._analysis_element_energies(symbols=[el]):
-                    add(s, e)
-                    break
+            if not el:
+                continue
+            for s, e in self._analysis_element_energies(symbols=[el]):
+                add(s, e)
+                break
 
         # Analysis-selected elements
         for sym, e_kev in self._analysis_element_energies():
@@ -1842,7 +1860,10 @@ class MappingPanel(QWidget):
             import xraylib as xrl
 
             def _z(sym: str) -> int:
-                return int(xrl.SymbolToAtomicNumber(sym))
+                try:
+                    return int(xrl.SymbolToAtomicNumber(sym))
+                except Exception:
+                    return 0
         except Exception:
             _FALLBACK_Z = {
                 "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16,
@@ -2257,6 +2278,42 @@ class MappingPanel(QWidget):
         if self.overlay_check.isChecked():
             self._refresh_canvas()
 
+    def _combo_kind(self) -> str:
+        data = self.map_combo.currentData()
+        if data and data[0]:
+            return str(data[0])
+        return ""
+
+    def _on_map_combo_changed(self, _index: int = 0) -> None:
+        """Honor the View selector even if RGB or Data-tree map checks are on."""
+        kind = self._combo_kind()
+        if kind in ("optical", "whole_image", "overview"):
+            self.rgb_check.blockSignals(True)
+            self.rgb_check.setChecked(False)
+            self.rgb_check.blockSignals(False)
+        if kind in ("whole_image", "overview"):
+            self.overlay_check.blockSignals(True)
+            self.overlay_check.setChecked(False)
+            self.overlay_check.blockSignals(False)
+        self._clear_map_checks()
+        self._refresh_canvas()
+
+    def _on_rgb_toggled(self, checked: bool) -> None:
+        if checked:
+            # RGB is a map view — jump off a photo so the composite is visible
+            kind = self._combo_kind()
+            if kind in ("optical", "whole_image", "overview"):
+                fov = self.current_fov
+                if fov is not None and fov.element_maps:
+                    self.map_combo.blockSignals(True)
+                    for i in range(self.map_combo.count()):
+                        d = self.map_combo.itemData(i)
+                        if d and d[0] == "map":
+                            self.map_combo.setCurrentIndex(i)
+                            break
+                    self.map_combo.blockSignals(False)
+        self._refresh_canvas()
+
     def _overlay_map_source(self):
         """Element map or None; RGB overlay is handled separately."""
         fov = self.current_fov
@@ -2327,8 +2384,30 @@ class MappingPanel(QWidget):
         if fov is None:
             return
 
-        if self.overlay_check.isChecked() and fov.optical is not None:
+        kind = self._combo_kind()
+        overlay_ok = (
+            self.overlay_check.isChecked()
+            and fov.optical is not None
+            and kind != "whole_image"
+            and kind != "overview"
+        )
+        if overlay_ok:
             if self._show_photo_overlay():
+                return
+
+        # Photo / overview from the View selector beat RGB and Data-tree checks
+        if kind == "overview" and fov.overview is not None:
+            self.canvas.set_image(
+                fov.overview.data, rgb=False, title=fov.overview.name or "Overview"
+            )
+            return
+        if kind == "optical" and fov.optical is not None:
+            self._show_photo(fov.optical)
+            return
+        if kind == "whole_image":
+            sample = self._sample_for_site(fov)
+            if sample is not None and sample.whole_image is not None:
+                self._show_photo(sample.whole_image)
                 return
 
         checked = self._checked_display_maps()
@@ -2362,18 +2441,17 @@ class MappingPanel(QWidget):
                 self.canvas.set_image(
                     fov.overview.data, rgb=False, title=fov.overview.name
                 )
+            elif fov.element_maps:
+                m = fov.element_maps[0]
+                processed = self._process_map_array(m.data)
+                self.canvas.set_image(
+                    processed,
+                    display=self._display_array(processed),
+                    rgb=False,
+                    title=m.name,
+                )
             return
-        if data[0] == "overview" and fov.overview is not None:
-            self.canvas.set_image(
-                fov.overview.data, rgb=False, title=fov.overview.name or "Overview"
-            )
-        elif data[0] == "optical" and fov.optical is not None:
-            self._show_photo(fov.optical)
-        elif data[0] == "whole_image":
-            sample = self._sample_for_site(fov)
-            if sample is not None and sample.whole_image is not None:
-                self._show_photo(sample.whole_image)
-        elif data[0] == "map":
+        if data[0] == "map":
             m = fov.find_map(data[1])
             if m is not None:
                 processed = self._process_map_array(m.data)
@@ -2796,7 +2874,10 @@ class MappingPanel(QWidget):
             import xraylib as xrl
 
             def _z(sym: str) -> int:
-                return int(xrl.SymbolToAtomicNumber(sym))
+                try:
+                    return int(xrl.SymbolToAtomicNumber(sym))
+                except Exception:
+                    return 0
         except Exception:
             _FALLBACK_Z = {
                 "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16,

@@ -25,6 +25,7 @@ from utils.desktop_shortcut import install_desktop_shortcut
 from utils.paths import icon_path, resource_path
 from core.fitting import SpectrumFitter
 from core.fp_quantification import quantify_from_peaks
+from core.matrix_model import empirical_formula
 from core.session import AnalysisSession
 from core.smart_peak_id import (
     SmartIDConfig,
@@ -906,7 +907,8 @@ class MainWindow(QMainWindow):
             identified = []
             if fit_params.get('auto_id_after_peak_find', True):
                 preview_peaks, identified, id_summary = auto_id_peak_positions(
-                    preview_peaks
+                    preview_peaks,
+                    excitation_kv=fit_params.get('excitation_kv', 50.0),
                 )
                 if identified:
                     self.element_panel.set_selected_elements(identified)
@@ -1089,14 +1091,17 @@ class MainWindow(QMainWindow):
             self.session.set_fp_result(result)
             self.results_panel.set_fp_live(True)
             self.results_panel.set_quantification(result.concentrations)
-            bits = [f"As formulas: {result.formula_summary()}"]
+            bits = [f"As compounds: {result.formula_summary()}"]
             if result.residual < float("inf"):
                 bits.append(
                     f"intensity residual {result.residual:.4f} "
                     f"({result.iterations} iter)"
                 )
             bits.append(f"measured cations {result.measured_cation_pct:.1f} %")
-            self.results_panel.set_formula_summary("    |  ".join(bits))
+            self.results_panel.set_formula_summary(
+                "    |  ".join(bits),
+                empirical=empirical_formula(result.element_wt),
+            )
             n = len([k for k, v in result.concentrations.items()
                      if v.get("role") == "measured"])
             self.status_bar.showMessage(

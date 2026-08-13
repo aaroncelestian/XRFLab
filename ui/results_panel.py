@@ -5,12 +5,12 @@ Results panel for displaying quantification results and fit statistics
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QPushButton, QLabel, QTextEdit, QComboBox, QDoubleSpinBox,
-    QGridLayout
+    QGridLayout, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QColor, QBrush
 
-from core.matrix_model import MatrixAssumptions, MatrixKind
+from core.matrix_model import MatrixAssumptions, MatrixKind, coerce_matrix_kind
 
 
 class ResultsPanel(QWidget):
@@ -135,10 +135,12 @@ class ResultsPanel(QWidget):
         grid.setVerticalSpacing(4)
 
         self.matrix_combo = QComboBox()
-        self.matrix_combo.addItem("Measured only (metal / sulfide)", MatrixKind.MEASURED)
-        self.matrix_combo.addItem("Oxide / silicate", MatrixKind.OXIDE)
-        self.matrix_combo.addItem("Carbonate", MatrixKind.CARBONATE)
-        self.matrix_combo.addItem("Hydroxide", MatrixKind.HYDROXIDE)
+        self.matrix_combo.addItem(
+            "Measured only (metal / sulfide)", MatrixKind.MEASURED.value
+        )
+        self.matrix_combo.addItem("Oxide / silicate", MatrixKind.OXIDE.value)
+        self.matrix_combo.addItem("Carbonate", MatrixKind.CARBONATE.value)
+        self.matrix_combo.addItem("Hydroxide", MatrixKind.HYDROXIDE.value)
         self.matrix_combo.setToolTip(
             "Galena (PbS) and metals need Measured only.\n"
             "Silicates use Oxide. Calcite uses Carbonate.\n"
@@ -149,9 +151,12 @@ class ResultsPanel(QWidget):
         grid.addWidget(self.matrix_combo, 0, 1, 1, 3)
 
         self.fe_combo = QComboBox()
-        self.fe_combo.addItems(["FeO", "Fe2O3"])
+        self.fe_combo.addItems(["FeO", "Fe2O3", "Fe3O4"])
         self.fe_combo.setEnabled(False)
-        self.fe_combo.setToolTip("Iron oxidation state for the oxide model")
+        self.fe_combo.setToolTip(
+            "Iron oxidation state for the oxide model:\n"
+            "FeO (ferrous), Fe2O3 (ferric), Fe3O4 (magnetite)."
+        )
         self.fe_combo.currentTextChanged.connect(self._on_matrix_control_changed)
         grid.addWidget(QLabel("Fe as"), 1, 0)
         grid.addWidget(self.fe_combo, 1, 1)
@@ -220,6 +225,35 @@ class ResultsPanel(QWidget):
         """Create quantification results table"""
         group = QGroupBox("Quantification")
         layout = QVBoxLayout(group)
+
+        self.formula_empirical = QLabel("Formula: —")
+        self.formula_empirical.setWordWrap(True)
+        self.formula_empirical.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        self.formula_empirical.setStyleSheet(
+            "color: #00332e; background: #e0f2f1; padding: 10px; border-radius: 4px;"
+        )
+        self.formula_empirical.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        self.formula_empirical.setMinimumHeight(40)
+        self.formula_empirical.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.formula_empirical)
+
+        self.formula_label = QLabel(
+            "As compounds: —  (pick a matrix model, then FP Composition)"
+        )
+        self.formula_label.setWordWrap(True)
+        self.formula_label.setFont(QFont("Arial", 10))
+        self.formula_label.setStyleSheet("color: #004d40; padding: 2px 4px;")
+        self.formula_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        self.formula_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.formula_label)
         
         # Create table
         self.results_table = QTableWidget()
@@ -242,16 +276,11 @@ class ResultsPanel(QWidget):
         self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_table.setMinimumHeight(80)
         self.results_table.setToolTip("Click an element to show its emission lines on the spectrum (click again to clear)")
         self.results_table.cellClicked.connect(self._on_result_cell_clicked)
         
         layout.addWidget(self.results_table)
-
-        self.formula_label = QLabel("")
-        self.formula_label.setWordWrap(True)
-        self.formula_label.setFont(QFont("Arial", 9))
-        self.formula_label.setStyleSheet("color: #333;")
-        layout.addWidget(self.formula_label)
         
         # Method note
         self.method_label = QLabel(
@@ -283,9 +312,9 @@ class ResultsPanel(QWidget):
         return group
 
     def get_matrix_assumptions(self) -> MatrixAssumptions:
-        kind = self.matrix_combo.currentData()
-        if not isinstance(kind, MatrixKind):
-            kind = MatrixKind.MEASURED
+        kind = coerce_matrix_kind(self.matrix_combo.currentData())
+        if kind == MatrixKind.MEASURED:
+            kind = coerce_matrix_kind(self.matrix_combo.currentText())
         return MatrixAssumptions(
             kind=kind,
             fe_as=self.fe_combo.currentText() or "FeO",
@@ -423,8 +452,17 @@ class ResultsPanel(QWidget):
                     "Method: area-normalized semi-quant (not FP wt%)"
                 )
 
-    def set_formula_summary(self, text: str) -> None:
-        self.formula_label.setText(text or "")
+    def set_formula_summary(self, text: str, *, empirical: str = "") -> None:
+        if empirical:
+            self.formula_empirical.setText(f"Formula:  {empirical}")
+        elif text:
+            self.formula_empirical.setText("Formula:  —")
+        else:
+            self.formula_empirical.setText("Formula:  —")
+        self.formula_label.setText(
+            text
+            or "As compounds: —  (pick a matrix model, then FP Composition)"
+        )
     
     def set_peaks(self, peaks):
         """
@@ -508,8 +546,12 @@ class ResultsPanel(QWidget):
             self.method_label.setText(
                 "Method: area-normalized semi-quant (not FP wt%)"
             )
+        if hasattr(self, "formula_empirical"):
+            self.formula_empirical.setText("Formula:  —")
         if hasattr(self, "formula_label"):
-            self.formula_label.setText("")
+            self.formula_label.setText(
+                "As compounds: —  (pick a matrix model, then FP Composition)"
+            )
         self.chi_squared_label.setText("χ²: --")
         self.r_squared_label.setText("R²: --")
         self.reduced_chi_label.setText("χ²ᵣ: --")

@@ -232,3 +232,41 @@ def test_auto_id_peak_positions():
     assert labeled[0]["element"] == "Fe"
     assert labeled[2]["is_tube_line"] is True
     assert summary and "Auto-ID" in summary[0]
+
+
+def test_pb_m_alpha_weaker_than_l_alpha():
+    from core.xray_data import get_element_lines
+
+    lines = get_element_lines('Pb', 82)
+    la = next(l for l in lines['L'] if l['name'] in ('Lα1', 'Lα'))
+    ma = next((l for l in lines['M'] if l['name'] in ('Mα1', 'Mα')), None)
+    assert la['relative_intensity'] > 0.5
+    if ma is not None:
+        assert ma['relative_intensity'] < 0.25
+        assert ma['relative_intensity'] < la['relative_intensity']
+
+
+def test_auto_id_does_not_call_pb_from_m_alpha_alone():
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": 2.347, "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Pb" not in symbols
+    assert labeled[0].get("element") != "Pb"
+
+
+def test_auto_id_pb_requires_l_alpha():
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": 10.551, "element": None, "line": None, "is_tube_line": False},
+        {"energy": 2.347, "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Pb" in symbols
+    assert labeled[0]["element"] == "Pb"
+    assert "Lα" in labeled[0]["line"]
+    assert labeled[1]["element"] == "Pb"
+    assert labeled[1]["line"].startswith("M")

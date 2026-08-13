@@ -216,11 +216,51 @@ def parse_formula(formula: str) -> Dict[str, int]:
     return counts
 
 
+_FE_AS_FORMULAS = {
+    "feo": "FeO",
+    "fe2o3": "Fe2O3",
+    "fe₂o₃": "Fe2O3",
+    "fe3o4": "Fe3O4",
+    "fe₃o₄": "Fe3O4",
+    "magnetite": "Fe3O4",
+    "feooh": "FeOOH",
+}
+
+_SUBSCRIPTS = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def coerce_matrix_kind(value) -> MatrixKind:
+    """Accept MatrixKind, its .value string, or a combo label."""
+    if isinstance(value, MatrixKind):
+        return value
+    if isinstance(value, str):
+        key = value.strip()
+        try:
+            return MatrixKind(key)
+        except ValueError:
+            pass
+        lower = key.lower()
+        if "oxide" in lower or "silicate" in lower:
+            return MatrixKind.OXIDE
+        if "carbonate" in lower:
+            return MatrixKind.CARBONATE
+        if "hydroxide" in lower:
+            return MatrixKind.HYDROXIDE
+        if "measured" in lower or "metal" in lower or "sulfide" in lower:
+            return MatrixKind.MEASURED
+    return MatrixKind.MEASURED
+
+
+def fe_formula(fe_as: str, *, default: str = "FeO") -> str:
+    key = (fe_as or default).strip().lower().replace(" ", "")
+    return _FE_AS_FORMULAS.get(key, default)
+
+
 def formula_for(cation: str, assumptions: MatrixAssumptions) -> Optional[str]:
     """Stoichiometric compound for a measured cation, or None if elemental."""
     if cation in _LIGHT:
         return None
-    kind = assumptions.kind
+    kind = coerce_matrix_kind(assumptions.kind)
     if kind == MatrixKind.MEASURED:
         return None
     if kind == MatrixKind.CARBONATE and cation in _CARBONATE_FORMULAS:
@@ -229,12 +269,7 @@ def formula_for(cation: str, assumptions: MatrixAssumptions) -> Optional[str]:
         return _HYDROXIDE_FORMULAS[cation]
     if kind in (MatrixKind.OXIDE, MatrixKind.CARBONATE, MatrixKind.HYDROXIDE):
         if cation == "Fe":
-            key = (assumptions.fe_as or "FeO").strip()
-            if key.lower() in {"fe2o3", "fe₂o₃"}:
-                return "Fe2O3"
-            if key.lower() in {"feooh"}:
-                return "FeOOH"
-            return "FeO"
+            return fe_formula(assumptions.fe_as, default="FeO")
         return _OXIDE_FORMULAS.get(cation)
     return None
 
@@ -331,6 +366,92 @@ def expand_composition(
         formula_wt["CO2"] = formula_wt.get("CO2", 0.0) + co2
 
     return element_wt, formula_wt
+
+
+def _nice_mole_multiplier(moles: Dict[str, float]) -> float:
+    """Small integer that makes mole ratios closest to whole numbers."""
+    vals = [v for v in moles.values() if v > 1e-8]
+    if not vals:
+        return 1.0
+    best_m = 1
+    best_score = float("inf")
+    for m in range(1, 9):
+        score = 0.0
+        for v in vals:
+            s = v * m
+            score += abs(s - round(s))
+        score /= len(vals)
+        if score < best_score - 1e-6 or (
+            abs(score - best_score) < 1e-6 and m < best_m
+        ):
+            best_score = score
+            best_m = m
+    return float(best_m)
+
+
+def _fmt_stoich(n: float) -> Optional[str]:
+    """Subscript count for a formula term. None means omit the element."""
+    if n < 0.03:
+        return None
+    nearest = round(n)
+    if abs(n - nearest) < 0.04:
+        if nearest <= 0:
+            return None
+        if nearest == 1:
+            return ""
+        return str(int(nearest)).translate(_SUBSCRIPTS)
+    return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def empirical_formula(element_wt: Dict[str, float]) -> str:
+    """Stoichiometric formula from elemental wt% (e.g. CaCO₃, SiO₂, Fe₃O₄)."""
+    moles: Dict[str, float] = {}
+    for el, wt in (element_wt or {}).items():
+        if float(wt) <= 0.02:
+            continue
+        try:
+            moles[el] = float(wt) / atomic_weight(el)
+        except KeyError:
+            continue
+    if not moles:
+        return "—"
+
+    cations = {k: v for k, v in moles.items() if k not in _LIGHT}
+    if cations:
+        base = max(cations.values())
+    else:
+        base = max(moles.values())
+    if base <= 0:
+        return "—"
+    ratios = {k: v / base for k, v in moles.items()}
+    mult = _nice_mole_multiplier(ratios)
+    scaled = {k: v * mult for k, v in ratios.items()}
+
+    cations_sorted = sorted(
+        (e for e in scaled if e not in _LIGHT),
+        key=lambda e: -scaled[e],
+    )
+    order = cations_sorted + [e for e in ("C", "H", "O", "N", "F") if e in scaled]
+    parts = []
+    for el in order:
+        token = _fmt_stoich(scaled[el])
+        if token is None:
+            continue
+        parts.append(f"{el}{token}")
+    return "".join(parts) if parts else "—"
+
+
+def format_formula_wt(formula_wt: Dict[str, float], max_terms: int = 10) -> str:
+    """Compound wt% line: 'CaCO3  98.2 wt% · SiO2  1.8 wt%'."""
+    items = sorted((formula_wt or {}).items(), key=lambda kv: -kv[1])
+    parts = []
+    for name, wt in items[:max_terms]:
+        if wt <= 0.05:
+            continue
+        parts.append(f"{name}  {wt:.1f} wt%")
+    if len(items) > max_terms:
+        parts.append("…")
+    return "   ·   ".join(parts) if parts else "—"
 
 
 def measured_cation_wt(element_wt: Dict[str, float]) -> float:

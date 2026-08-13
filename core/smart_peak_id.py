@@ -95,6 +95,46 @@ def _kb_ka_ratio(z: int) -> float:
     return 0.12
 
 
+def _diagnostic_line(
+    line_map: Dict[str, float],
+    *,
+    e_max_kev: float = 40.0,
+    e_min_kev: float = 0.70,
+) -> Optional[Tuple[str, float]]:
+    """The line that must be present to identify this element.
+
+    Prefer Kα when it can be excited and detected; otherwise Lα; else Mα.
+    Pb Kα is ~75 keV, so at 50 kV the diagnostic line is Lα (~10.55 keV).
+    """
+    def _pick(names):
+        for name in names:
+            if name in line_map:
+                e = float(line_map[name])
+                if e_min_kev <= e <= e_max_kev:
+                    return name, e
+        return None
+
+    return (
+        _pick(('Kα1', 'Kα'))
+        or _pick(('Lα1', 'Lα'))
+        or _pick(('Mα1', 'Mα'))
+    )
+
+
+def _is_minor_line(line_name: str, diagnostic_name: Optional[str]) -> bool:
+    """True if this line must not ID the element without the diagnostic line."""
+    if not diagnostic_name or not line_name:
+        return False
+    ln = line_name.replace('α', 'a').replace('β', 'b')
+    dn = diagnostic_name.replace('α', 'a').replace('β', 'b')
+    # Same family as diagnostic (Kα2 with Kα1, Lα2 with Lα1) is not minor
+    if ln[:2] == dn[:2] and 'a' in ln[:3] and 'a' in dn[:3]:
+        return False
+    if line_name == diagnostic_name:
+        return False
+    return True
+
+
 def _primary_lines(line_map: Dict[str, float]) -> List[Tuple[str, float]]:
     """Preferred ID lines in priority order."""
     preferred = [
@@ -128,6 +168,10 @@ def _confirming_partners(line_name: str, line_map: Dict[str, float]) -> List[Tup
                 partners.append((name, line_map[name]))
     elif line_name.startswith('Lβ'):
         for name in ('Lα1', 'Lα', 'Lγ1'):
+            if name in line_map:
+                partners.append((name, line_map[name]))
+    elif line_name.startswith('M'):
+        for name in ('Lα1', 'Lα', 'Lβ1', 'Lβ'):
             if name in line_map:
                 partners.append((name, line_map[name]))
     return partners
@@ -170,6 +214,7 @@ def _score_element_for_peak(
     z: int,
     all_peaks: Sequence[Peak],
     tol: float,
+    e_max_kev: float = 40.0,
 ) -> Tuple[float, Optional[str], List[str]]:
     """
     Score how well an element explains this peak via primary + confirming lines.
@@ -180,6 +225,8 @@ def _score_element_for_peak(
     if not line_map:
         return 0.0, None, []
 
+    diagnostic = _diagnostic_line(line_map, e_max_kev=e_max_kev)
+
     best_score = 0.0
     best_line = None
     best_reasons: List[str] = []
@@ -188,6 +235,12 @@ def _score_element_for_peak(
         d_primary = abs(float(peak.energy) - line_e)
         if d_primary > tol:
             continue
+
+        if diagnostic and _is_minor_line(line_name, diagnostic[0]):
+            hit = _nearest_peak(all_peaks, diagnostic[1], tol, exclude_idx=peak_index)
+            if hit is None:
+                # e.g. Pb Mα without Pb Lα — do not ID the element
+                continue
 
         score = 1.0 + max(0.0, 1.0 - d_primary / tol)  # 1–2 for energy match
         reasons = [f"{symbol} {line_name} within {d_primary*1000:.0f} eV"]
@@ -548,6 +601,7 @@ def auto_id_peak_positions(
     candidate_elements: Optional[Sequence[Dict]] = None,
     energy_tol_kev: float = 0.080,
     require_confirming_line: bool = False,
+    excitation_kv: float = 50.0,
 ) -> Tuple[List[dict], List[str], List[str]]:
     """
     Label unknown peak-find seeds by matching energies to element emission lines.
@@ -556,11 +610,16 @@ def auto_id_peak_positions(
     auto-ID against a survey library (default: COMMON_XRF_SYMBOLS), then let
     the user confirm on the Elements tab before Fitting.
 
+    An element is only identified if its diagnostic line is present (Kα when
+    it can be excited, otherwise Lα, else Mα). Minor lines such as Pb Mα
+    are labeled only after that diagnostic match — never used to introduce Pb.
+
     Args:
         peak_positions: Peak seed dicts (energy, element, line, is_tube_line, ...)
         candidate_elements: Optional [{symbol, z}, ...]; defaults to common XRF
         energy_tol_kev: Max |E_peak - E_line| for a match
         require_confirming_line: If True, only accept IDs with a second line nearby
+        excitation_kv: Tube kV; lines above ~0.95× this cannot be diagnostic
 
     Returns:
         (updated_positions, identified_symbols, summary_lines)
@@ -571,59 +630,86 @@ def auto_id_peak_positions(
         if e.get('symbol') and e.get('z')
     ]
 
-    # Build (symbol, z, line_name, energy) catalog of major lines
-    catalog: List[Tuple[str, int, str, float]] = []
+    e_max_kev = min(40.0, float(excitation_kv) * 0.95)
+
+    # Diagnostic line per element, plus full primary-line catalog
+    diag_catalog: List[Tuple[str, int, str, float]] = []
+    line_catalog: Dict[str, List[Tuple[int, str, float]]] = {}
+    line_maps: Dict[str, Dict[str, float]] = {}
     for elem in candidates:
         symbol = elem['symbol']
         z = int(elem['z'])
         line_map = _line_lookup(symbol, z)
-        for line_name, line_e in _primary_lines(line_map):
-            catalog.append((symbol, z, line_name, float(line_e)))
+        line_maps[symbol] = line_map
+        diagnostic = _diagnostic_line(line_map, e_max_kev=e_max_kev)
+        if diagnostic:
+            diag_catalog.append((symbol, z, diagnostic[0], float(diagnostic[1])))
+        line_catalog[symbol] = [
+            (z, name, float(energy))
+            for name, energy in _primary_lines(line_map)
+        ]
 
     positions = [dict(p) for p in (peak_positions or [])]
+    all_energies = [float(p.get('energy', 0.0)) for p in positions]
+
+    def _partners_ok(symbol: str, line_name: str) -> bool:
+        if not require_confirming_line:
+            return True
+        partners = _confirming_partners(line_name, line_maps.get(symbol, {}))
+        return any(
+            any(abs(ae - pe) <= energy_tol_kev for ae in all_energies)
+            for _, pe in partners
+        )
+
+    # Pass 1: which elements have their diagnostic line on a measured peak?
+    present: set = set()
+    for pos in positions:
+        if pos.get('is_tube_line'):
+            continue
+        if pos.get('element') and pos.get('line'):
+            present.add(pos['element'])
+            continue
+        e_peak = float(pos.get('energy', 0.0))
+        best = None
+        for symbol, z, line_name, line_e in diag_catalog:
+            dist = abs(e_peak - line_e)
+            if dist > energy_tol_kev:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, symbol, line_name)
+        if best is None:
+            continue
+        _, symbol, line_name = best
+        if _partners_ok(symbol, line_name):
+            present.add(symbol)
+
+    # Pass 2: assign each unlabeled peak to the nearest line of a present element
     identified: List[str] = []
     summary: List[str] = []
     n_labeled = 0
-
-    # Energies already present (for confirming-line checks)
-    all_energies = [float(p.get('energy', 0.0)) for p in positions]
 
     for pos in positions:
         if pos.get('is_tube_line'):
             continue
         if pos.get('element') and pos.get('line'):
-            # Keep existing label; still count symbol
-            sym = pos['element']
-            if sym not in identified:
-                identified.append(sym)
+            if pos['element'] not in identified:
+                identified.append(pos['element'])
             continue
 
         e_peak = float(pos.get('energy', 0.0))
-        best = None  # (dist, symbol, z, line_name, line_e)
-
-        for symbol, z, line_name, line_e in catalog:
-            dist = abs(e_peak - line_e)
-            if dist > energy_tol_kev:
-                continue
-            if best is None or dist < best[0]:
-                best = (dist, symbol, z, line_name, line_e)
+        best = None  # (dist, symbol, z, line_name)
+        for symbol in present:
+            for z, line_name, line_e in line_catalog.get(symbol, []):
+                dist = abs(e_peak - line_e)
+                if dist > energy_tol_kev:
+                    continue
+                if best is None or dist < best[0]:
+                    best = (dist, symbol, z, line_name)
 
         if best is None:
             continue
 
-        dist, symbol, z, line_name, line_e = best
-
-        if require_confirming_line:
-            line_map = _line_lookup(symbol, z)
-            partners = _confirming_partners(line_name, line_map)
-            confirmed = False
-            for pname, pe in partners:
-                if any(abs(ae - pe) <= energy_tol_kev for ae in all_energies):
-                    confirmed = True
-                    break
-            if not confirmed:
-                continue
-
+        dist, symbol, z, line_name = best
         pos['element'] = symbol
         pos['line'] = line_name
         n_labeled += 1

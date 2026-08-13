@@ -205,7 +205,7 @@ class CompositionPanel(QWidget):
         row.addWidget(self.oxides_check)
 
         self.fe_combo = QComboBox()
-        self.fe_combo.addItems(["FeO", "Fe2O3"])
+        self.fe_combo.addItems(["FeO", "Fe2O3", "Fe3O4"])
         self.fe_combo.setEnabled(False)
         self.fe_combo.currentTextChanged.connect(self._on_display_changed)
         row.addWidget(self.fe_combo)
@@ -471,10 +471,10 @@ class CompositionPanel(QWidget):
         defaults = {
             self.tern_a: _prefer(keys, ("SiO2", "Si")),
             self.tern_b: _prefer(keys, ("Al2O3", "Al", "MgO", "Mg")),
-            self.tern_c: _prefer(keys, ("FeO", "Fe2O3", "Fe", "CaO", "Ca")),
+            self.tern_c: _prefer(keys, ("FeO", "Fe2O3", "Fe3O4", "Fe", "CaO", "Ca")),
             self.corr_x: _prefer(keys, ("SiO2", "Si")),
-            self.corr_y: _prefer(keys, ("FeO", "Fe2O3", "Fe")),
-            self.ratio_x_num: _prefer(keys, ("FeO", "Fe2O3", "Fe")),
+            self.corr_y: _prefer(keys, ("FeO", "Fe2O3", "Fe3O4", "Fe")),
+            self.ratio_x_num: _prefer(keys, ("FeO", "Fe2O3", "Fe3O4", "Fe")),
             self.ratio_x_den: _prefer(keys, ("MgO", "Mg")),
             self.ratio_y_num: _prefer(keys, ("SiO2", "Si")),
             self.ratio_y_den: _prefer(keys, ("Al2O3", "Al")),

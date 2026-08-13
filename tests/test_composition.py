@@ -163,6 +163,7 @@ def test_oxide_convert_and_close():
     np.testing.assert_allclose(sum(closed.values()), 100.0)
     assert oxide_label("Fe", "FeO") == "FeO"
     assert oxide_label("Fe", "Fe2O3") == "Fe2O3"
+    assert oxide_label("Fe", "Fe3O4") == "Fe3O4"
 
 
 def test_scatter_and_ratio_and_matrix():

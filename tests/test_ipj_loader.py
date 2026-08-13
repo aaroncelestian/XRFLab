@@ -75,6 +75,22 @@ def test_barstow_spectra_and_dims(barstow):
     assert s0.energy[-1] > s0.energy[0]
 
 
+def test_barstow_sum_spectrum_ca_ka_energy(barstow):
+    """XGT intercept: Ca Kα in the tufa sum spectrum must sit near 3.69 keV."""
+    fov = next(f for f in barstow.fovs if f.cube is not None)
+    ms = fov.sum_spectrum()
+    assert ms is not None
+    sp = ms.spectrum
+    i = int(np.argmax(sp.counts))
+    e_max = float(sp.energy[i])
+    assert 3.55 < e_max < 3.85, f"Ca Kα at {e_max:.3f} keV (expected ~3.69)"
+    assert float(sp.metadata.get("energy_offset_ev", 0.0)) == -400.0
+    # Cube ROI around Ca Kα must include the intense channels
+    axis = fov.cube.energy_axis_kev()
+    mask = (axis >= 3.59) & (axis <= 3.79)
+    assert int(fov.cube.data[mask].sum()) > int(fov.cube.data.sum()) * 0.05
+
+
 def test_dylan_point_series_and_maps(dylan):
     map_fov = dylan.primary_fov
     assert map_fov is not None

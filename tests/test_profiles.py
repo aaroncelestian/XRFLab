@@ -118,5 +118,13 @@ def test_coerce_element_symbols_from_analysis_dicts():
     assert coerce_element_symbols(None) == []
     assert _element_from_line_name("Ca Ka1") == "Ca"
     assert _element_from_line_name("Cr Ka1") == "Cr"
+    assert _element_from_line_name("Na Ka1_2") == "Na"
+    assert _element_from_line_name("Total counts (cube)") == ""
     em = ElementMap(name="Ca Ka1", data=np.ones((4, 4)))
     assert em.element == "Ca"
+    total = ElementMap(
+        name="Total counts (cube)",
+        data=np.ones((4, 4)),
+        metadata={"source": "cube_total"},
+    )
+    assert total.element == ""

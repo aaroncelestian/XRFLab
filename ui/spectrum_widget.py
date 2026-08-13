@@ -245,7 +245,7 @@ class SpectrumWidget(QWidget):
         for i, spec in enumerate(ordered):
             # Intensity-scaled sticks place labels near stick tip instead
             if spec.get('relative_intensity') is not None:
-                rel = max(0.05, min(1.0, float(spec['relative_intensity'])))
+                rel = max(0.015, min(1.0, float(spec['relative_intensity'])))
                 spec['position'] = 0.12 + 0.82 * rel
             else:
                 spec['position'] = positions[i % len(positions)]
@@ -267,7 +267,7 @@ class SpectrumWidget(QWidget):
 
         if rel is not None:
             # Vertical stick whose height tracks relative radiative intensity
-            rel = max(0.05, min(1.0, float(rel)))
+            rel = max(0.015, min(1.0, float(rel)))
             y_top = rel * self._intensity_stick_scale()
             width = 1.0 + 1.5 * rel
             alpha = int(80 + 175 * rel)
@@ -340,10 +340,12 @@ class SpectrumWidget(QWidget):
     
     def show_element_lines(self, symbol, z):
         """
-        Show emission lines for an element, scaled by relative radiative intensity.
+        Show emission lines for an element, scaled by relative intensity.
 
-        Stick height / opacity and the label percent are normalized within each
-        series (K, L, M) so the strongest line in that series is 100%.
+        Stick height is element-wide (K/L/M together, fluorescence-yield
+        weighted) so Mα is much weaker than Lα. Lines outside the measured
+        spectrum (or above 40 keV) are omitted so e.g. Pb Kα at ~75 keV
+        does not hide Pb Lα. Diagnostic α lines are always kept.
         
         Args:
             symbol: Element symbol
@@ -357,25 +359,42 @@ class SpectrumWidget(QWidget):
             'M': 'b',
             'N': 'm',
         }
-        
-        self.clear_peak_markers()
-        
+        diagnostic_names = {'Kα1', 'Kα', 'Lα1', 'Lα', 'Mα1', 'Mα'}
+
+        e_min, e_max = 0.50, 40.0
+        if self.spectrum_data is not None and len(getattr(self.spectrum_data, 'energy', [])):
+            e_min = max(0.40, float(np.nanmin(self.spectrum_data.energy)))
+            e_max = float(np.nanmax(self.spectrum_data.energy))
+
+        collected = []
         for series, color in series_colors.items():
             for line_data in lines.get(series, []) or []:
-                energy = line_data['energy']
-                name = line_data['name']
+                energy = float(line_data['energy'])
+                if energy < e_min or energy > e_max:
+                    continue
                 rel = float(line_data.get('relative_intensity', 1.0) or 1.0)
-                pct = int(round(100.0 * rel))
-                label = f"{symbol}-{name} {pct}%"
-                self.add_peak_marker(
-                    energy,
-                    element=symbol,
-                    line=name,
-                    color=color,
-                    label=label,
-                    relative_intensity=rel,
-                    redraw=False,
-                )
+                collected.append((color, line_data, rel))
+
+        max_rel = max((rel for _, _, rel in collected), default=1.0) or 1.0
+
+        self.clear_peak_markers()
+
+        for color, line_data, rel in collected:
+            name = line_data['name']
+            rel_disp = rel / max_rel
+            if rel_disp < 0.02 and name not in diagnostic_names:
+                continue
+            pct = int(round(100.0 * rel_disp))
+            label = f"{symbol}-{name} {pct}%"
+            self.add_peak_marker(
+                float(line_data['energy']),
+                element=symbol,
+                line=name,
+                color=color,
+                label=label,
+                relative_intensity=rel_disp,
+                redraw=False,
+            )
         self._redraw_peak_markers()
     
     def set_log_scale(self, enabled):

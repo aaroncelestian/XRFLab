@@ -18,6 +18,7 @@ from core.fundamental_parameters import FundamentalParameters
 from core.matrix_model import (
     MatrixAssumptions,
     expand_composition,
+    format_formula_wt,
     measured_cation_wt,
 )
 
@@ -151,11 +152,7 @@ class FPQuantResult:
     measured_cation_pct: float = 0.0
 
     def formula_summary(self, max_terms: int = 8) -> str:
-        items = sorted(self.formula_wt.items(), key=lambda kv: -kv[1])
-        parts = [f"{name} {wt:.2f}" for name, wt in items[:max_terms] if wt > 0.05]
-        if len(items) > max_terms:
-            parts.append("…")
-        return "  ".join(parts)
+        return format_formula_wt(self.formula_wt, max_terms=max_terms)
 
 
 def _concentrations_dict(
@@ -306,8 +303,4 @@ def quantify_from_peaks(
 
 
 def format_formula_summary(formula_wt: Dict[str, float], max_terms: int = 10) -> str:
-    items = sorted(formula_wt.items(), key=lambda kv: -kv[1])
-    parts = [f"{name} {wt:.2f}" for name, wt in items[:max_terms] if wt > 0.05]
-    if len(items) > max_terms:
-        parts.append("…")
-    return "  ".join(parts)
+    return format_formula_wt(formula_wt, max_terms=max_terms)

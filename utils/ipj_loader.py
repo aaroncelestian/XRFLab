@@ -41,10 +41,11 @@ else:
 _MICROMAP_HEADER = 32
 _MICROMAP_TRAILER = 216
 _SPECTRUM_HEADER = 10
-# INCA/XGT Spectrum streams are 4096 × uint32 (10 eV/ch is common after fix;
-# inference may select 20 eV from peak labels)
+# INCA/XGT Spectrum streams are 4096 × uint32 at 10 eV/ch.
+# Channel 0 is ~-0.40 keV so the electronic zero/noise peak sits near 0 keV.
 _DEFAULT_EV_PER_CHANNEL = 10.0
 _DEFAULT_N_CHANNELS = 4096
+_XGT_ZERO_CHANNEL = 40.0
 # XGT2Data stage X/Y (float32) — observed across numbered spectra
 _XGT2_STAGE_X_OFF = 154
 _XGT2_STAGE_Y_OFF = 162
@@ -397,8 +398,14 @@ def _parse_smartmap_cube(
             )
             if len(expected) == cube.n_channels:
                 cube.ev_per_channel = ev
+                cube.energy_offset_ev = float(
+                    sum_ms.spectrum.metadata.get("energy_offset_ev", 0.0)
+                )
             elif len(expected) == cube.n_channels * 2:
                 cube.ev_per_channel = ev * 2.0
+                cube.energy_offset_ev = float(
+                    sum_ms.spectrum.metadata.get("energy_offset_ev", 0.0)
+                )
     return cube
 
 
@@ -573,9 +580,9 @@ def _parse_spectra(
         live_time = float(info.get("live_time", 100.0))
         real_time = float(info.get("real_time", live_time))
         name = str(info.get("name") or spe_id)
-        ev_per_ch = _infer_ev_per_channel(counts, peaks)
+        ev_per_ch, offset_ev = _infer_energy_calibration(counts, peaks)
         n = len(counts)
-        energy = (np.arange(n, dtype=np.float64) * ev_per_ch) / 1000.0  # keV
+        energy = (offset_ev + np.arange(n, dtype=np.float64) * ev_per_ch) / 1000.0
 
         kind = "sum" if "sum" in name.lower() else "spot"
         # Numbered spectra belong to an ordered point series (line or multipoint)
@@ -586,7 +593,8 @@ def _parse_spectra(
             "name": name,
             "spe_id": spe_id,
             "ev_per_channel": ev_per_ch,
-            "energy_calibration": "ipj_default_or_peak_inferred",
+            "energy_offset_ev": offset_ev,
+            "energy_calibration": "xgt_10eV_ch_offset",
             "source": "ipj",
         }
         if info.get("acquired_at"):
@@ -987,6 +995,52 @@ def _read_label(
     if len(parts) > 1:
         out["kind"] = parts[1]
     return out
+
+
+def _xgt_energy_offset_ev(ev_per_ch: float) -> float:
+    """XGT-7200 MCA: channel 40 ≈ 0 keV (noise peak visible just above zero)."""
+    return -_XGT_ZERO_CHANNEL * float(ev_per_ch)
+
+
+def _infer_energy_calibration(
+    counts: np.ndarray,
+    peaks: List[Dict[str, Any]],
+) -> Tuple[float, float]:
+    """
+    Return (eV/channel, offset_eV) for E = offset + channel * gain.
+
+    XGT/INCA 4096-bin spectra are 10 eV/ch with a -400 eV intercept. Without
+    that offset, Ca Kα at channel 410 is plotted at 4.10 keV instead of 3.69.
+    """
+    ev = _infer_ev_per_channel(counts, peaks)
+    offset = _xgt_energy_offset_ev(ev)
+    if peaks:
+        # Re-score gain using the XGT intercept so labeled Ka lines land on
+        # the observed maxima (channel = (E - offset) / gain).
+        by_el: Dict[str, float] = {}
+        for p in peaks:
+            el = p.get("element")
+            e = p.get("energy_ev")
+            if not el or e is None:
+                continue
+            if el not in by_el or e < by_el[el]:
+                by_el[el] = float(e)
+        best = ev
+        best_score = -1.0
+        for cand in (5.0, 10.0, 20.0):
+            off = _xgt_energy_offset_ev(cand)
+            score = 0.0
+            for e_ev in list(by_el.values())[:6]:
+                ch = int(round((e_ev - off) / cand))
+                if 5 <= ch < len(counts) - 5:
+                    window = counts[ch - 5 : ch + 6]
+                    score += float(window.max())
+            if score > best_score:
+                best_score = score
+                best = cand
+        ev = best
+        offset = _xgt_energy_offset_ev(ev)
+    return float(ev), float(offset)
 
 
 def _infer_ev_per_channel(
