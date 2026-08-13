@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
         )
         self.tab_widget.addTab(self.composition_panel, "Composition")
 
-        # Mapping tab (IPJ element maps, line scans, correlations)
+        # Mapping tab: IPJ maps + collected line-scan semi-quant
         self.mapping_panel = MappingPanel()
         self.mapping_panel.set_fitter(self.fitter)
         self.mapping_panel.set_element_panel(self.element_panel)

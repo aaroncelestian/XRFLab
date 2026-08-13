@@ -8,6 +8,7 @@ from core.mapping.models import (
     MappingFOV,
     MappingSample,
     MappingProject,
+    coerce_element_symbols,
 )
 from core.mapping.cube import SpectrumCube, decode_listdata
 from core.mapping.profiles import (
@@ -28,6 +29,7 @@ __all__ = [
     "MappingFOV",
     "MappingSample",
     "MappingProject",
+    "coerce_element_symbols",
     "SpectrumCube",
     "decode_listdata",
     "extract_line_profile",

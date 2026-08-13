@@ -26,7 +26,7 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 - **Semi-quant**: area-normalized relative intensities (not FP weight %)
 - **FP composition**: standardless wt% from one fitted spectrum, with a matrix model (measured / oxide / carbonate / hydroxide) and live H₂O, OH, and CO₂ knobs for unmeasurable light elements
 - **Batch analysis** using the same fitter contract as the Analysis tab
-- **Mapping tab** for Oxford INCA / Horiba XGT `.ipj` projects: element maps, RGB composites, correlations, IPJ line scans, draw-transect profiles, and send spectra to Analysis for fitting/quant
+- **Mapping tab** for Oxford INCA / Horiba XGT `.ipj` projects: **Maps** (element maps, RGB, correlations, drawn intensity profiles) and **Line scan** (collected line / multipoint ROI profiles and area-normalized semi-quant)
 - Multi-format I/O (TXT, CSV, MCA, HDF5, EMSA, IPJ)
 - Session model with injectable detector / instrument state
 - Optional **fisx** / xraylib FP helpers for standards-based work
@@ -35,6 +35,7 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 - Analysis **Semi-Quant** = peak-area relative intensities normalized to 100%. It is **not** fundamental-parameters concentrations.
 - Analysis **FP Composition** = standardless wt% from fitted peak areas, using a matrix model plus optional H₂O / OH / CO₂. Those knobs are user assumptions, not measured concentrations.
 - Use **Calibration → Standards** for instrument-calibrated / multi-standard intensity work.
+- Mapping **Line scan** semi-quant is only for collected line / multipoint spectra. A transect drawn on a map is an intensity profile, not a fit.
 - Project open/save, energy-axis dialog, dark theme, and report generation are not implemented yet (menus for unfinished items are hidden).
 
 ## Installation

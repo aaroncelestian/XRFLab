@@ -546,3 +546,26 @@ def _element_from_line_name(name: str) -> str:
     if len(token) >= 2 and token[1].islower():
         return token[:2]
     return token[:1] if token else ""
+
+
+def coerce_element_symbols(elements) -> List[str]:
+    """Normalize Analysis element selection to chemical symbols.
+
+    ``ElementPanel.get_selected_elements()`` returns dicts with a ``symbol``
+    key. Mapping code used to call ``str(item)`` on those dicts, which never
+    matches map names like ``Ca Ka1``.
+    """
+    out: List[str] = []
+    seen = set()
+    for item in elements or []:
+        if isinstance(item, dict):
+            sym = str(item.get("symbol") or "").strip()
+        else:
+            sym = str(item or "").strip()
+        if not sym or not sym.isalpha() or len(sym) > 2:
+            continue
+        if sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out

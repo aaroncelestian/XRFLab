@@ -105,3 +105,18 @@ def test_array_profile_width_matches_center_when_uniform():
     d5, v5 = extract_array_profile(data, (0, 3), (7, 3), width=5)
     np.testing.assert_allclose(v1, v5)
     np.testing.assert_allclose(d1, d5)
+
+
+def test_coerce_element_symbols_from_analysis_dicts():
+    from core.mapping.models import coerce_element_symbols, _element_from_line_name
+
+    assert coerce_element_symbols(
+        [{"symbol": "Ca", "z": 20, "name": "Calcium"}, {"symbol": "Cr", "z": 24}]
+    ) == ["Ca", "Cr"]
+    assert coerce_element_symbols(["Fe", "Si"]) == ["Fe", "Si"]
+    assert coerce_element_symbols([str({"symbol": "Ca"})]) == []
+    assert coerce_element_symbols(None) == []
+    assert _element_from_line_name("Ca Ka1") == "Ca"
+    assert _element_from_line_name("Cr Ka1") == "Cr"
+    em = ElementMap(name="Ca Ka1", data=np.ones((4, 4)))
+    assert em.element == "Ca"

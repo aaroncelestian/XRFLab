@@ -1,6 +1,9 @@
 """
-Mapping workspace: load INCA/XGT .ipj projects, visualize element maps,
-draw line profiles, correlate elements, and send spectra to Analysis.
+Mapping workspace: load INCA/XGT .ipj projects.
+
+Maps tab: element maps, RGB, correlations, and drawn intensity profiles.
+Line scan tab: collected line / multipoint spectra, ROI profiles, and
+area-normalized semi-quant along that series.
 """
 
 from __future__ import annotations
@@ -28,12 +31,14 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTextEdit,
     QTreeWidget,
@@ -50,7 +55,14 @@ from core.mapping.display import (
     overlay_on_photo,
     upsample_map,
 )
-from core.mapping.models import ElementMap, LineScan, MappingFOV, MappingProject, MapSpectrum
+from core.mapping.models import (
+    ElementMap,
+    LineScan,
+    MappingFOV,
+    MappingProject,
+    MapSpectrum,
+    coerce_element_symbols,
+)
 from core.mapping.profiles import (
     extract_cube_element_profiles,
     extract_multi_element_profiles,
@@ -74,6 +86,7 @@ class MappingPanel(QWidget):
         self._element_panel = None
         self._quant_distances: Optional[np.ndarray] = None
         self._quant_table = None  # list of dicts
+        self._last_ls_profiles = None  # collected line-scan ROI profiles
         self._picked_spectrum: Optional[MapSpectrum] = None
         self._last_line: Optional[tuple] = None  # (x0, y0, x1, y1)
         self._pixel_popup: Optional[PixelSpectrumPopup] = None
@@ -121,7 +134,7 @@ class MappingPanel(QWidget):
         left_layout.addWidget(self.active_site_label)
 
         self.nav_tabs = QTabWidget()
-        self.nav_tabs.setMinimumHeight(160)
+        self.nav_tabs.setMinimumHeight(240)
         self.nav_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         # Sites tab: Project → Sample → Site of Interest
@@ -448,10 +461,10 @@ class MappingPanel(QWidget):
         self.profile_map_list.setMaximumHeight(160)
         self.profile_map_list.setToolTip(
             "Checked items drive the Line profile chart:\n"
-            "• Map names → drawn map transect intensities\n"
-            "• Element ROIs → counts in that energy window along the line "
-            "(drawn transect or XGT line-scan points)\n\n"
-            "Elements selected in Analysis are included automatically. "
+            "• Map names → intensity along the yellow drawn transect\n"
+            "• Map names also → energy-window counts along an XGT line scan\n"
+            "• Element ROIs → counts in that energy window along the line\n\n"
+            "Elements selected in Analysis are used if nothing is checked. "
             "Use From Analysis to sync this list."
         )
         self.profile_map_list.itemChanged.connect(self._on_profile_map_check_changed)
@@ -541,26 +554,37 @@ class MappingPanel(QWidget):
         )
         self.send_btn.clicked.connect(self._send_selected_spectrum)
         quant_sec.addWidget(self.send_btn)
-        self.fit_line_btn = QPushButton("Fit / semi-quant line scan")
-        self.fit_line_btn.setToolTip(
-            "Fit each point along a line using current Analysis elements.\n"
-            "If you just drew a transect (and the site has a cube), you can "
-            "use that line; otherwise an IPJ/XGT point series is used."
-        )
-        self.fit_line_btn.clicked.connect(self._fit_line_scan)
-        quant_sec.addWidget(self.fit_line_btn)
         self.export_profile_btn = QPushButton("Export profile CSV…")
-        self.export_profile_btn.clicked.connect(self._export_profile_csv)
+        self.export_profile_btn.setToolTip(
+            "Export the current drawn-transect intensity profile"
+        )
+        self.export_profile_btn.clicked.connect(self._export_map_profile_csv)
         quant_sec.addWidget(self.export_profile_btn)
+        ls_note = QLabel(
+            "Collected line-scan semi-quant lives on the Line scan tab — "
+            "not on a transect drawn here."
+        )
+        ls_note.setWordWrap(True)
+        ls_note.setStyleSheet("color: #555; font-size: 11px;")
+        quant_sec.addWidget(ls_note)
         scroll_layout.addWidget(quant_sec)
 
         scroll_layout.addStretch(1)
         scroll.setWidget(scroll_body)
-        left_layout.addWidget(scroll, stretch=2)
 
         splitter.addWidget(left)
 
-        # Center: map canvas
+        self.workspace_tabs = QTabWidget()
+        self.workspace_tabs.currentChanged.connect(self._on_workspace_tab)
+
+        # ---- Maps workspace: tools | canvas | profiles ----
+        maps_page = QWidget()
+        maps_split = QSplitter(Qt.Horizontal)
+        maps_layout = QHBoxLayout(maps_page)
+        maps_layout.setContentsMargins(0, 0, 0, 0)
+        maps_layout.addWidget(maps_split)
+        maps_split.addWidget(scroll)
+
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -572,16 +596,15 @@ class MappingPanel(QWidget):
         center_layout.addWidget(self.canvas)
         self.cursor_label = QLabel("Cursor: —")
         center_layout.addWidget(self.cursor_label)
-        splitter.addWidget(center)
+        maps_split.addWidget(center)
 
-        # Right: profile / correlation / quant plots
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.plot_tabs_label = QLabel("Profiles & correlations")
+        self.plot_tabs_label = QLabel("Drawn transect & correlations")
         right_layout.addWidget(self.plot_tabs_label)
 
-        self.profile_plot = pg.PlotWidget(title="Line profile")
+        self.profile_plot = pg.PlotWidget(title="Map line profile")
         self.profile_plot.setLabel("bottom", "Distance (pixels)")
         self.profile_plot.setLabel("left", "Intensity")
         self.profile_plot.addLegend(offset=(10, 10))
@@ -592,18 +615,148 @@ class MappingPanel(QWidget):
         self.corr_plot.setLabel("left", "Map B")
         right_layout.addWidget(self.corr_plot, stretch=1)
 
-        self.quant_plot = pg.PlotWidget(title="Line-scan semi-quant")
-        self.quant_plot.setLabel("bottom", "Point index / distance")
-        self.quant_plot.setLabel("left", "Relative %")
-        self.quant_plot.addLegend(offset=(10, 10))
-        right_layout.addWidget(self.quant_plot, stretch=1)
-
         self.info_label = QLabel("Open an .ipj mapping project to begin.")
         self.info_label.setWordWrap(True)
         right_layout.addWidget(self.info_label)
+        maps_split.addWidget(right)
+        maps_split.setSizes([260, 520, 400])
+        self.workspace_tabs.addTab(maps_page, "Maps")
 
-        splitter.addWidget(right)
-        splitter.setSizes([280, 520, 420])
+        # ---- Line scan workspace: tools | ROI profile + semi-quant ----
+        ls_page = QWidget()
+        ls_split = QSplitter(Qt.Horizontal)
+        ls_page_layout = QHBoxLayout(ls_page)
+        ls_page_layout.setContentsMargins(0, 0, 0, 0)
+        ls_page_layout.addWidget(ls_split)
+
+        ls_scroll = QScrollArea()
+        ls_scroll.setWidgetResizable(True)
+        ls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        ls_scroll.setFrameShape(QScrollArea.NoFrame)
+        ls_scroll.setMinimumWidth(240)
+        ls_body = QWidget()
+        ls_layout = QVBoxLayout(ls_body)
+        ls_layout.setContentsMargins(0, 0, 4, 0)
+        ls_layout.setSpacing(8)
+
+        ls_intro = QLabel(
+            "This tab is for spectra the instrument actually collected along "
+            "a path (line scan or multipoint). Check the elements you want "
+            "on the profile, then Fit / semi-quant uses that same list.\n\n"
+            "A line drawn on a map stays on Maps as an intensity profile. "
+            "Map pixels are usually too short-count to fit at each point."
+        )
+        ls_intro.setWordWrap(True)
+        ls_intro.setStyleSheet("color: #444; font-size: 11px;")
+        ls_layout.addWidget(ls_intro)
+
+        self.ls_status_label = QLabel("No collected line scan in this site.")
+        self.ls_status_label.setWordWrap(True)
+        ls_layout.addWidget(self.ls_status_label)
+
+        ls_layout.addWidget(QLabel("Elements on this line"))
+        self.ls_element_list = QListWidget()
+        self.ls_element_list.setMinimumHeight(140)
+        self.ls_element_list.setToolTip(
+            "Checked elements drive the ROI profile and Fit / semi-quant.\n"
+            "Use From Analysis to copy the Analysis → Elements selection."
+        )
+        self.ls_element_list.itemChanged.connect(self._on_ls_element_check_changed)
+        ls_layout.addWidget(self.ls_element_list)
+
+        ls_btn_row = QHBoxLayout()
+        self.ls_all_btn = QPushButton("All")
+        self.ls_all_btn.clicked.connect(lambda: self._set_all_ls_elements(True))
+        self.ls_none_btn = QPushButton("None")
+        self.ls_none_btn.clicked.connect(lambda: self._set_all_ls_elements(False))
+        self.ls_sync_btn = QPushButton("From Analysis")
+        self.ls_sync_btn.setToolTip(
+            "Check elements selected in Analysis → Elements"
+        )
+        self.ls_sync_btn.clicked.connect(self._sync_ls_elements_from_analysis)
+        ls_btn_row.addWidget(self.ls_all_btn)
+        ls_btn_row.addWidget(self.ls_none_btn)
+        ls_btn_row.addWidget(self.ls_sync_btn)
+        ls_layout.addLayout(ls_btn_row)
+
+        self.ls_replot_btn = QPushButton("Replot ROI profile")
+        self.ls_replot_btn.setToolTip(
+            "Refresh windowed counts vs distance for the checked elements"
+        )
+        self.ls_replot_btn.clicked.connect(self._replot_collected_line_scan)
+        ls_layout.addWidget(self.ls_replot_btn)
+
+        self.fit_line_btn = QPushButton("Fit / semi-quant along line")
+        self.fit_line_btn.setToolTip(
+            "Fit each collected point with the checked elements, then plot "
+            "area-normalized relative intensities (not FP wt%)."
+        )
+        self.fit_line_btn.clicked.connect(self._fit_line_scan)
+        ls_layout.addWidget(self.fit_line_btn)
+
+        self.ls_export_btn = QPushButton("Export line-scan CSV…")
+        self.ls_export_btn.setToolTip(
+            "Export semi-quant table if fitted, otherwise the ROI profile"
+        )
+        self.ls_export_btn.clicked.connect(self._export_line_scan_csv)
+        ls_layout.addWidget(self.ls_export_btn)
+
+        self.ls_send_btn = QPushButton("Send selected point → Analysis")
+        self.ls_send_btn.setToolTip(
+            "Send the tree-selected line-scan point (or the first point) "
+            "to Analysis for peak ID"
+        )
+        self.ls_send_btn.clicked.connect(self._send_selected_spectrum)
+        ls_layout.addWidget(self.ls_send_btn)
+
+        ls_layout.addStretch(1)
+        ls_scroll.setWidget(ls_body)
+        ls_split.addWidget(ls_scroll)
+
+        self.ls_content_stack = QStackedWidget()
+        ls_empty = QWidget()
+        ls_empty_layout = QVBoxLayout(ls_empty)
+        self.ls_empty_label = QLabel(
+            "This site has no collected line scan or multipoint series.\n\n"
+            "Semi-quant along a transect needs spectra the instrument "
+            "acquired along a path. Activate a line-scan site in Sites, "
+            "or select the series in Data.\n\n"
+            "Drawing a line on an element map does not create that data — "
+            "use the Maps tab for intensity profiles."
+        )
+        self.ls_empty_label.setWordWrap(True)
+        self.ls_empty_label.setStyleSheet("color: #444;")
+        ls_empty_layout.addWidget(self.ls_empty_label)
+        ls_empty_layout.addStretch(1)
+        self.ls_content_stack.addWidget(ls_empty)
+
+        ls_plots = QWidget()
+        ls_plots_layout = QVBoxLayout(ls_plots)
+        ls_plots_layout.setContentsMargins(0, 0, 0, 0)
+        self.ls_profile_plot = pg.PlotWidget(title="Line-scan ROI profile")
+        self.ls_profile_plot.setLabel("bottom", "Distance")
+        self.ls_profile_plot.setLabel("left", "Counts in window")
+        self.ls_profile_plot.addLegend(offset=(10, 10))
+        ls_plots_layout.addWidget(self.ls_profile_plot, stretch=1)
+
+        self.quant_plot = pg.PlotWidget(title="Line-scan semi-quant")
+        self.quant_plot.setLabel("bottom", "Distance")
+        self.quant_plot.setLabel("left", "Relative %")
+        self.quant_plot.addLegend(offset=(10, 10))
+        ls_plots_layout.addWidget(self.quant_plot, stretch=1)
+
+        self.ls_info_label = QLabel(
+            "Select a collected line scan, check elements, then Fit / semi-quant."
+        )
+        self.ls_info_label.setWordWrap(True)
+        ls_plots_layout.addWidget(self.ls_info_label)
+        self.ls_content_stack.addWidget(ls_plots)
+        ls_split.addWidget(self.ls_content_stack)
+        ls_split.setSizes([280, 720])
+        self.workspace_tabs.addTab(ls_page, "Line scan")
+
+        splitter.addWidget(self.workspace_tabs)
+        splitter.setSizes([280, 920])
         root.addWidget(splitter)
 
         self._last_profiles = None  # dict name -> (dist, vals)
@@ -1452,11 +1605,15 @@ class MappingPanel(QWidget):
         self._drawn_line_scan = None
         self._drawn_cache_key = None
         self._profile_source = None
+        self._quant_table = None
+        self._last_ls_profiles = None
         # Reset checked maps for new site (repopulated with defaults in data tree)
         self._checked_map_names = set()
+        self.canvas.clear_line()
         self.canvas.clear_region()
         self._fill_map_combos()
         self._fill_profile_map_list()
+        self._fill_ls_element_list()
         has_photo = fov.optical is not None
         self.overlay_check.setEnabled(has_photo)
         self.overlay_slider.setEnabled(has_photo)
@@ -1469,9 +1626,89 @@ class MappingPanel(QWidget):
         self._refresh_canvas()
         self._update_cube_controls()
         if fov.line_scans:
-            self._plot_ipj_line_scan(fov.line_scans[0])
-        elif self._active_line_scan is None:
-            pass
+            self._plot_ipj_line_scan(fov.line_scans[0], switch_tab=False)
+        self._update_workspace_for_fov(fov)
+
+    def _fov_has_maps(self, fov: Optional[MappingFOV]) -> bool:
+        if fov is None:
+            return False
+        return bool(
+            fov.element_maps
+            or fov.cube is not None
+            or fov.overview is not None
+            or fov.optical is not None
+        )
+
+    def _on_workspace_tab(self, index: int) -> None:
+        if index == 1:
+            self._update_line_scan_page()
+            if self._collected_line_scan() is not None and not self._last_ls_profiles:
+                self._replot_collected_line_scan()
+
+    def _update_workspace_for_fov(
+        self, fov: MappingFOV, *, prefer_line_scan: bool = False
+    ) -> None:
+        has_ls = bool(fov.line_scans)
+        has_map = self._fov_has_maps(fov)
+        self.workspace_tabs.blockSignals(True)
+        if prefer_line_scan and has_ls:
+            self.workspace_tabs.setCurrentIndex(1)
+        elif has_ls and not has_map:
+            self.workspace_tabs.setCurrentIndex(1)
+        elif has_map and not has_ls:
+            self.workspace_tabs.setCurrentIndex(0)
+        self.workspace_tabs.blockSignals(False)
+        self._update_line_scan_page()
+
+    def _update_line_scan_page(self) -> None:
+        ls = self._collected_line_scan()
+        has = ls is not None and ls.n_points > 0
+        self.ls_content_stack.setCurrentIndex(1 if has else 0)
+        self.fit_line_btn.setEnabled(has)
+        self.ls_replot_btn.setEnabled(has)
+        self.ls_export_btn.setEnabled(has)
+        self.ls_send_btn.setEnabled(has)
+        self.ls_all_btn.setEnabled(has)
+        self.ls_none_btn.setEnabled(has)
+        self.ls_sync_btn.setEnabled(True)
+        if not has:
+            self.ls_status_label.setText("No collected line scan in this site.")
+            return
+        tag = ls.display_label()
+        self.ls_status_label.setText(
+            f"{tag}: {ls.name}  ·  {ls.n_points} spectra"
+        )
+
+    def _collected_line_scan(self) -> Optional[LineScan]:
+        """Instrument-collected line scan or multipoint (not a drawn map transect)."""
+        items = self.tree.selectedItems()
+        if items:
+            payload = items[0].data(0, Qt.UserRole)
+            if payload and payload[0] == "linescan":
+                fov = self._find_fov(payload[1])
+                if fov:
+                    for ls in fov.line_scans:
+                        if ls.name == payload[2] and ls.source != "drawn":
+                            return ls
+            if payload and payload[0] == "spectrum":
+                fov = self._find_fov(payload[1])
+                if fov:
+                    for ls in fov.line_scans:
+                        if ls.source == "drawn":
+                            continue
+                        if any(p.name == payload[2] for p in ls.points):
+                            return ls
+        if (
+            self._active_line_scan is not None
+            and self._active_line_scan.source != "drawn"
+            and self._active_line_scan.n_points > 0
+        ):
+            return self._active_line_scan
+        if self.current_fov:
+            for ls in self.current_fov.line_scans:
+                if ls.source != "drawn" and ls.n_points > 0:
+                    return ls
+        return None
 
     def _fill_profile_map_list(self) -> None:
         """Populate checklist: element maps (transect) + element ROIs (IPJ line scan)."""
@@ -1515,6 +1752,29 @@ class MappingPanel(QWidget):
 
         self.profile_map_list.blockSignals(False)
 
+    def _fill_ls_element_list(self) -> None:
+        """Populate Line scan tab element checklist (ROI windows)."""
+        self.ls_element_list.blockSignals(True)
+        self.ls_element_list.clear()
+        fov = self.current_fov
+        if fov is None:
+            self.ls_element_list.blockSignals(False)
+            return
+        rois = self._line_scan_roi_candidates(fov)
+        analysis_syms = {s for s, _ in self._analysis_element_energies()}
+        for sym, e_kev in rois:
+            item = QListWidgetItem(f"{sym} ({e_kev:.2f} keV)")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if self._checked_roi_symbols:
+                checked = sym in self._checked_roi_symbols
+            else:
+                checked = sym in analysis_syms
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            item.setData(Qt.UserRole, ("roi", sym, float(e_kev)))
+            self.ls_element_list.addItem(item)
+        self.ls_element_list.blockSignals(False)
+        self._remember_checked_ls_rois()
+
     def _line_scan_roi_candidates(self, fov: MappingFOV):
         """Return [(symbol, energy_kev), ...] for line-scan ROI plotting."""
         out = []
@@ -1541,6 +1801,14 @@ class MappingPanel(QWidget):
                 if el and e is not None:
                     add(el, float(e))
 
+        # Elements from loaded maps (so Map: Ca Ka1 can drive a spectral ROI)
+        for m in fov.element_maps:
+            el = (m.element or "").strip()
+            if el:
+                for s, e in self._analysis_element_energies(symbols=[el]):
+                    add(s, e)
+                    break
+
         # Analysis-selected elements
         for sym, e_kev in self._analysis_element_energies():
             add(sym, e_kev)
@@ -1554,16 +1822,17 @@ class MappingPanel(QWidget):
 
         return out
 
+    def _analysis_symbols(self, symbols=None):
+        """Chemical symbols from Analysis, or from an explicit iterable."""
+        if symbols is not None:
+            return coerce_element_symbols(symbols)
+        if self._element_panel is None:
+            return []
+        return coerce_element_symbols(self._element_panel.get_selected_elements())
+
     def _analysis_element_energies(self, symbols=None):
         """Yield (symbol, Ka-or-La energy_kev) for Analysis elements."""
-        if symbols is None:
-            if self._element_panel is None:
-                return []
-            symbols = [
-                str(s).strip()
-                for s in (self._element_panel.get_selected_elements() or [])
-                if s
-            ]
+        symbols = self._analysis_symbols(symbols)
         if not symbols:
             return []
 
@@ -1602,6 +1871,22 @@ class MappingPanel(QWidget):
                 result.append((sym, e_kev))
         return result
 
+    def _list_item_payload(self, item) -> tuple:
+        data = item.data(Qt.UserRole) if item is not None else None
+        if isinstance(data, (tuple, list)):
+            return tuple(data)
+        if isinstance(data, str) and data:
+            return ("map", data)
+        return ()
+
+    def _list_item_checked(self, item) -> bool:
+        if item is None:
+            return False
+        try:
+            return int(item.checkState()) == int(Qt.Checked)
+        except (TypeError, ValueError):
+            return item.checkState() == Qt.Checked
+
     def _checked_profile_maps(self):
         """Return ElementMap list for checked map entries (drawn transect)."""
         fov = self.current_fov
@@ -1610,45 +1895,144 @@ class MappingPanel(QWidget):
         names = []
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            if item.checkState() != Qt.Checked:
+            if not self._list_item_checked(item):
                 continue
-            data = item.data(Qt.UserRole)
-            if isinstance(data, tuple) and data and data[0] == "map":
+            data = self._list_item_payload(item)
+            if data and data[0] == "map":
                 names.append(data[1])
-            elif isinstance(data, str):
-                names.append(data)
+            else:
+                text = item.text() or ""
+                if text.startswith("Map: "):
+                    names.append(text[5:])
         return [m for m in fov.element_maps if m.name in names]
 
     def _checked_line_scan_rois(self):
-        """Return [(symbol, energy_kev), ...] for checked ROI entries."""
+        """Return [(symbol, energy_kev), ...] for checked Maps-tab ROI entries."""
         out = []
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            if item.checkState() != Qt.Checked:
+            if not self._list_item_checked(item):
                 continue
-            data = item.data(Qt.UserRole)
-            if isinstance(data, tuple) and data and data[0] == "roi":
+            data = self._list_item_payload(item)
+            if data and data[0] == "roi":
                 out.append((data[1], float(data[2])))
         return out
 
-    def _remember_checked_rois(self) -> None:
-        self._checked_roi_symbols = {sym for sym, _ in self._checked_line_scan_rois()}
+    def _checked_ls_rois(self):
+        """Return [(symbol, energy_kev), ...] for checked Line scan tab elements."""
+        out = []
+        for i in range(self.ls_element_list.count()):
+            item = self.ls_element_list.item(i)
+            if not self._list_item_checked(item):
+                continue
+            data = self._list_item_payload(item)
+            if data and data[0] == "roi":
+                out.append((data[1], float(data[2])))
+        return out
 
-    def _effective_element_rois(self):
-        """ROIs to plot: checked list items plus Analysis-selected elements."""
+    def _rois_from_checked_maps(self):
+        """Element energy windows implied by checked Map: items."""
         out = []
         seen = set()
-        for sym, e_kev in self._checked_line_scan_rois():
-            if sym in seen:
+        for m in self._checked_profile_maps():
+            if m.metadata.get("source") == "cube_total":
                 continue
-            out.append((sym, e_kev))
-            seen.add(sym)
+            el = (m.element or "").strip()
+            if not el or el in seen:
+                continue
+            energies = self._analysis_element_energies(symbols=[el])
+            if not energies:
+                continue
+            out.append(energies[0])
+            seen.add(el)
+        return out
+
+    def _remember_checked_rois(self) -> None:
+        syms = {sym for sym, _ in self._checked_line_scan_rois()}
+        syms.update(sym for sym, _ in self._checked_ls_rois())
+        self._checked_roi_symbols = syms
+
+    def _remember_checked_ls_rois(self) -> None:
+        self._remember_checked_rois()
+
+    def _effective_element_rois(self):
+        """ROIs for a drawn map transect: checked Map/ROI items, else Analysis."""
+        out = []
+        seen = set()
+        for src in (self._checked_line_scan_rois(), self._rois_from_checked_maps()):
+            for sym, e_kev in src:
+                if sym in seen:
+                    continue
+                out.append((sym, e_kev))
+                seen.add(sym)
+        if out:
+            return out
         for sym, e_kev in self._analysis_element_energies():
             if sym in seen:
                 continue
             out.append((sym, e_kev))
             seen.add(sym)
         return out
+
+    def _effective_ls_rois(self):
+        """ROIs for a collected line scan: checked Line scan elements, else Analysis."""
+        out = list(self._checked_ls_rois())
+        if out:
+            return out
+        return list(self._analysis_element_energies())
+
+    def _set_all_ls_elements(self, checked: bool) -> None:
+        state = Qt.Checked if checked else Qt.Unchecked
+        self.ls_element_list.blockSignals(True)
+        for i in range(self.ls_element_list.count()):
+            self.ls_element_list.item(i).setCheckState(state)
+        self.ls_element_list.blockSignals(False)
+        self._remember_checked_ls_rois()
+        self._replot_collected_line_scan()
+
+    def _on_ls_element_check_changed(self, _item=None) -> None:
+        self._remember_checked_ls_rois()
+        self._replot_collected_line_scan()
+
+    def _sync_ls_elements_from_analysis(self) -> None:
+        if self._element_panel is None:
+            QMessageBox.information(
+                self,
+                "From Analysis",
+                "Analysis element panel is not connected.",
+            )
+            return
+        symbols = {
+            str(s).strip()
+            for s in (self._element_panel.get_selected_elements() or [])
+            if s
+        }
+        if not symbols:
+            QMessageBox.information(
+                self,
+                "From Analysis",
+                "Select elements in Analysis → Elements first.\n\n"
+                "Send the Sum Spectrum or one line-scan point to Analysis, "
+                "pick elements, then return here.",
+            )
+            return
+        self._checked_roi_symbols = set(symbols)
+        self._fill_ls_element_list()
+        self.ls_element_list.blockSignals(True)
+        matched = 0
+        for i in range(self.ls_element_list.count()):
+            item = self.ls_element_list.item(i)
+            data = self._list_item_payload(item)
+            hit = bool(data) and data[0] == "roi" and data[1] in symbols
+            item.setCheckState(Qt.Checked if hit else Qt.Unchecked)
+            if hit:
+                matched += 1
+        self.ls_element_list.blockSignals(False)
+        self._remember_checked_ls_rois()
+        self._replot_collected_line_scan()
+        self.status_message.emit(
+            f"Line scan elements: {matched} checked from Analysis"
+        )
 
     def _line_width(self) -> int:
         return max(1, int(self.line_width_spin.value()))
@@ -1660,7 +2044,7 @@ class MappingPanel(QWidget):
             self.canvas.set_line(*self._last_line, width=width)
         self._drawn_line_scan = None
         self._drawn_cache_key = None
-        if self._last_line is not None and self._profile_source != "ipj":
+        if self._last_line is not None:
             self._replot_last_line()
 
     def _set_all_profile_maps(self, checked: bool) -> None:
@@ -1680,11 +2064,7 @@ class MappingPanel(QWidget):
                 "Analysis element panel is not connected.",
             )
             return
-        symbols = {
-            str(s).strip()
-            for s in (self._element_panel.get_selected_elements() or [])
-            if s
-        }
+        symbols = set(self._analysis_symbols())
         if not symbols:
             QMessageBox.information(
                 self,
@@ -1706,16 +2086,14 @@ class MappingPanel(QWidget):
         matched_rois = 0
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            data = item.data(Qt.UserRole)
-            if isinstance(data, tuple) and data and data[0] == "roi":
+            data = self._list_item_payload(item)
+            if data and data[0] == "roi":
                 hit = data[1] in symbols
                 item.setCheckState(Qt.Checked if hit else Qt.Unchecked)
                 if hit:
                     matched_rois += 1
             else:
-                name = data[1] if isinstance(data, tuple) and data else (
-                    data if isinstance(data, str) else item.text()
-                )
+                name = data[1] if data and data[0] == "map" else item.text()
                 fov = self.current_fov
                 em = fov.find_map(name) if fov else None
                 el = (em.element if em else "") or ""
@@ -1740,17 +2118,14 @@ class MappingPanel(QWidget):
         self._replot_profile()
 
     def _replot_profile(self) -> None:
-        """Refresh drawn-transect and/or active XGT line-scan profile chart."""
-        if self._profile_source == "drawn" and self._last_line is not None:
-            self._replot_last_line()
-            return
-        if self._profile_source == "ipj" and self._active_line_scan is not None:
-            self._plot_ipj_line_scan(self._active_line_scan)
-            return
+        """Refresh the Maps-tab drawn-transect intensity profile."""
         if self._last_line is not None:
             self._replot_last_line()
-        elif self._active_line_scan is not None:
-            self._plot_ipj_line_scan(self._active_line_scan)
+
+    def _replot_collected_line_scan(self) -> None:
+        ls = self._collected_line_scan()
+        if ls is not None:
+            self._plot_ipj_line_scan(ls, switch_tab=False)
 
     def _update_cube_controls(self) -> None:
         fov = self.current_fov
@@ -2098,7 +2473,8 @@ class MappingPanel(QWidget):
             if fov:
                 for ls in fov.line_scans:
                     if ls.name == payload[2]:
-                        self._plot_ipj_line_scan(ls)
+                        self._plot_ipj_line_scan(ls, switch_tab=True)
+                        self._update_line_scan_page()
                         break
 
     # -------------------------------------------------------- line tools
@@ -2197,7 +2573,7 @@ class MappingPanel(QWidget):
 
     def _clear_line(self) -> None:
         self.canvas.clear_line()
-        self.profile_plot.clear()
+        self._reset_profile_plot()
         self._last_profiles = None
         self._last_line = None
         self._drawn_line_scan = None
@@ -2232,19 +2608,6 @@ class MappingPanel(QWidget):
         element_maps = [
             m for m in maps if m.metadata.get("source") != "cube_total"
         ]
-        analysis_syms = {s for s, _ in self._analysis_element_energies()}
-        if analysis_syms:
-            matched = [
-                m
-                for m in element_maps
-                if (m.element or "").strip() in analysis_syms
-                or any(
-                    str(m.name).lower().startswith(sym.lower())
-                    or f" {sym.lower()} " in f" {str(m.name).lower()} "
-                    for sym in analysis_syms
-                )
-            ]
-            element_maps = matched
         profiles = {}
         if element_maps:
             profiles.update(
@@ -2273,14 +2636,14 @@ class MappingPanel(QWidget):
         if profiles:
             self._last_profiles = profiles
             self._plot_profiles(profiles)
-        elif not analysis_syms and maps:
+        elif maps:
             profiles = extract_multi_element_profiles(
                 maps, start, end, width=width
             )
             self._last_profiles = profiles
             self._plot_profiles(profiles)
             n = len(profiles)
-        elif fov.cube is not None and not analysis_syms:
+        elif fov.cube is not None and not rois:
             dist, _xs, _ys, counts = fov.cube.spectra_along_line(
                 x0, y0, x1, y1, width=width
             )
@@ -2289,11 +2652,11 @@ class MappingPanel(QWidget):
             self._plot_profiles(self._last_profiles)
             n = 1
         else:
-            self.profile_plot.clear()
+            self._reset_profile_plot()
             self._last_profiles = None
             self.status_message.emit(
-                "No per-element series for this transect — select elements in "
-                "Analysis, check maps under Tools, or add ROI maps from Analysis"
+                "No per-element series for this transect — check maps under "
+                "Tools, or select elements in Analysis"
             )
             return
 
@@ -2395,12 +2758,8 @@ class MappingPanel(QWidget):
         self.profile_map_list.blockSignals(True)
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            data = item.data(Qt.UserRole)
-            name = (
-                data[1]
-                if isinstance(data, tuple) and data and data[0] == "map"
-                else (data if isinstance(data, str) else item.text())
-            )
+            data = self._list_item_payload(item)
+            name = data[1] if data and data[0] == "map" else item.text()
             if name == em.name:
                 item.setCheckState(Qt.Checked)
         self.profile_map_list.blockSignals(False)
@@ -2419,11 +2778,7 @@ class MappingPanel(QWidget):
                 self, "ROI maps", "Analysis element panel is not connected."
             )
             return
-        symbols = [
-            str(s).strip()
-            for s in (self._element_panel.get_selected_elements() or [])
-            if s
-        ]
+        symbols = self._analysis_symbols()
         if not symbols:
             QMessageBox.information(
                 self,
@@ -2485,12 +2840,8 @@ class MappingPanel(QWidget):
         self.profile_map_list.blockSignals(True)
         for i in range(self.profile_map_list.count()):
             item = self.profile_map_list.item(i)
-            data = item.data(Qt.UserRole)
-            name = (
-                data[1]
-                if isinstance(data, tuple) and data and data[0] == "map"
-                else (data if isinstance(data, str) else item.text())
-            )
+            data = self._list_item_payload(item)
+            name = data[1] if data and data[0] == "map" else item.text()
             item.setCheckState(
                 Qt.Checked if name in created else Qt.Unchecked
             )
@@ -2538,29 +2889,40 @@ class MappingPanel(QWidget):
                 return True
         return False
 
-    def _plot_profiles(self, profiles: dict) -> None:
+    def _reset_profile_plot(self) -> None:
         self.profile_plot.clear()
+        legend = getattr(self.profile_plot.plotItem, "legend", None)
+        if legend is not None:
+            legend.clear()
+
+    def _reset_ls_profile_plot(self) -> None:
+        self.ls_profile_plot.clear()
+        legend = getattr(self.ls_profile_plot.plotItem, "legend", None)
+        if legend is not None:
+            legend.clear()
+
+    def _plot_profiles(self, profiles: dict) -> None:
+        self._reset_profile_plot()
         colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
         for i, (name, (dist, vals)) in enumerate(profiles.items()):
             pen = pg.mkPen(colors[i % len(colors)], width=2)
             self.profile_plot.plot(dist, vals, pen=pen, name=name)
 
-    def _plot_ipj_line_scan(self, line_scan: LineScan) -> None:
-        """Plot total counts + element ROIs vs distance for an XGT line."""
+    def _plot_ipj_line_scan(self, line_scan: LineScan, *, switch_tab: bool = False) -> None:
+        """Plot windowed counts vs distance for a collected line / multipoint."""
+        if line_scan.source == "drawn":
+            return
         self._active_line_scan = line_scan
         self._profile_source = "ipj"
-        self.profile_plot.clear()
+        if switch_tab:
+            self.workspace_tabs.setCurrentIndex(1)
+        self._reset_ls_profile_plot()
         if line_scan.n_points == 0:
             return
         xs = line_scan.distances()
-        totals = np.array([p.spectrum.total_counts for p in line_scan.points])
-        profiles = {"Total counts": (xs, totals)}
-        self.profile_plot.plot(
-            xs, totals, pen=pg.mkPen("#377eb8", width=2), name="Total counts"
-        )
-
-        colors = ["#e41a1c", "#4daf4a", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
-        rois = self._effective_element_rois()
+        rois = self._effective_ls_rois()
+        profiles = {}
+        colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628", "#f781bf"]
         half = 0.15  # keV
         for ci, (sym, e_kev) in enumerate(rois):
             series = []
@@ -2573,25 +2935,39 @@ class MappingPanel(QWidget):
             ys = np.asarray(series, dtype=np.float64)
             label = f"{sym} ({e_kev:.2f} keV)"
             profiles[label] = (xs, ys)
-            self.profile_plot.plot(
+            self.ls_profile_plot.plot(
                 xs,
                 ys,
                 pen=pg.mkPen(colors[ci % len(colors)], width=2),
                 name=label,
             )
 
+        if not profiles:
+            totals = np.array([p.spectrum.total_counts for p in line_scan.points])
+            profiles = {"Total counts": (xs, totals)}
+            self.ls_profile_plot.plot(
+                xs, totals, pen=pg.mkPen("#377eb8", width=2), name="Total counts"
+            )
+
         n_roi = len(rois)
-        self.info_label.setText(
-            f"{line_scan.name}: total"
-            + (f" + {n_roi} element ROI(s)" if n_roi else "")
-            + ". Check ROI elements under Tools, or select elements in Analysis."
+        self.ls_info_label.setText(
+            f"{line_scan.display_label()} “{line_scan.name}”: "
+            + (f"{n_roi} element ROI(s) — Fit / semi-quant uses this same list."
+               if n_roi else
+               "only total counts. Check elements above, or From Analysis.")
         )
         if n_roi == 0:
             self.status_message.emit(
-                f"{line_scan.display_label()}: only total counts shown — "
-                "select elements in Analysis, then Tools → From Analysis"
+                f"{line_scan.display_label()}: only total counts — "
+                "check elements on the Line scan tab"
             )
-        self._last_profiles = profiles
+        else:
+            names = ", ".join(profiles.keys())
+            self.status_message.emit(
+                f"{line_scan.display_label()}: {n_roi} element series ({names})"
+            )
+        self._last_ls_profiles = profiles
+        self._update_line_scan_page()
 
     def _on_cursor(self, x, y, val) -> None:
         self.cursor_label.setText(f"Cursor: x={x:.1f}, y={y:.1f}, value={val:.3g}")
@@ -2673,95 +3049,48 @@ class MappingPanel(QWidget):
         self.spectrum_send_requested.emit(ms.spectrum, ms.peak_labels)
         self.status_message.emit(f"Sent “{ms.name}” to Analysis")
 
-    def _ipj_line_scan_for_fit(self, *, current_fov_only: bool = False):
-        """Resolve an IPJ/XGT LineScan from the tree selection or FOV."""
-        items = self.tree.selectedItems()
-        if items:
-            payload = items[0].data(0, Qt.UserRole)
-            if payload and payload[0] == "linescan":
-                fov = self._find_fov(payload[1])
-                if fov:
-                    for ls in fov.line_scans:
-                        if ls.name == payload[2]:
-                            return ls
-        if self.current_fov and self.current_fov.line_scans:
-            return self.current_fov.line_scans[0]
-        if current_fov_only or self.project is None:
-            return None
-        for fov in self.project.fovs:
-            if fov.line_scans:
-                return fov.line_scans[0]
-        return None
-
-    def _ensure_drawn_line_scan(self) -> Optional[LineScan]:
-        """Sample the cube along the current drawn transect (cached)."""
-        fov = self.current_fov
-        if self._last_line is None or fov is None or fov.cube is None:
-            return None
-        width = self._line_width()
-        key = (*self._last_line, width)
-        if self._drawn_line_scan is not None and self._drawn_cache_key == key:
-            return self._drawn_line_scan
-        x0, y0, x1, y1 = self._last_line
-        ls = fov.line_scan_from_drawn(x0, y0, x1, y1, width=width)
-        self._drawn_line_scan = ls
-        self._drawn_cache_key = key
-        return ls
-
-    def _resolve_line_scan_for_fit(self) -> Optional[LineScan]:
-        """Choose drawn transect vs IPJ series, asking when both exist."""
-        drawn = self._ensure_drawn_line_scan()
-        ipj = self._ipj_line_scan_for_fit(current_fov_only=drawn is not None)
-        if drawn is not None and ipj is not None:
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Fit line scan")
-            msg.setText(
-                "Use the transect you just drew, or the IPJ/XGT point series?"
-            )
-            w = self._line_width()
-            drawn_info = drawn.name
-            if w > 1:
-                drawn_info += f"\n(averaging a {w} px-wide band)"
-            msg.setInformativeText(f"Drawn: {drawn_info}\nIPJ: {ipj.name}")
-            drawn_btn = msg.addButton("Drawn transect", QMessageBox.AcceptRole)
-            ipj_btn = msg.addButton("IPJ line scan", QMessageBox.AcceptRole)
-            msg.addButton(QMessageBox.Cancel)
-            msg.setDefaultButton(drawn_btn)
-            msg.exec()
-            clicked = msg.clickedButton()
-            if clicked == drawn_btn:
-                return drawn
-            if clicked == ipj_btn:
-                return ipj
-            return None
-        if drawn is not None:
-            return drawn
-        return ipj
-
     def _fit_line_scan(self) -> None:
         if self._fitter is None or self._element_panel is None:
             QMessageBox.warning(
                 self, "Fit line scan", "Analysis fitter is not connected."
             )
             return
-        line_scan = self._resolve_line_scan_for_fit()
+        self.workspace_tabs.setCurrentIndex(1)
+        line_scan = self._collected_line_scan()
         if line_scan is None or line_scan.n_points == 0:
             QMessageBox.information(
                 self,
-                "Fit line scan",
-                "Draw a line on a site with a hyperspectral cube, "
-                "or select an IPJ/XGT line-scan series.",
+                "Fit / semi-quant",
+                "Semi-quant along a transect is only for collected line scans "
+                "or multipoint series (spectra the instrument acquired along "
+                "a path).\n\n"
+                "A line drawn on a map is an intensity profile — use the Maps "
+                "tab for that. Activate a line-scan site, or select the series "
+                "in Data.",
             )
             return
 
-        elements = self._element_panel.get_selected_elements()
+        rois = self._checked_ls_rois()
+        if rois:
+            elements = coerce_element_symbols(sym for sym, _ in rois)
+            auto_find = False
+        else:
+            elements = coerce_element_symbols(
+                self._element_panel.get_selected_elements() or []
+            )
+            auto_find = bool(
+                self._element_panel.get_fitting_params().get("auto_find_peaks", True)
+            )
         if not elements:
             QMessageBox.information(
                 self,
-                "Fit line scan",
-                "Select elements in the Analysis → Elements tab first.",
+                "Fit / semi-quant",
+                "Check the elements you want on this line (the same list as "
+                "the ROI profile), or select them in Analysis → Elements "
+                "and click From Analysis.",
             )
             return
+
         fit_params = self._element_panel.get_fitting_params()
         exp_params = self._element_panel.get_experimental_params()
         background_method = str(fit_params.get("background_method", "snip")).lower()
@@ -2770,8 +3099,30 @@ class MappingPanel(QWidget):
         distances = line_scan.distances()
         rows = []
         self.quant_plot.clear()
+        legend = getattr(self.quant_plot.plotItem, "legend", None)
+        if legend is not None:
+            legend.clear()
+
+        n = line_scan.n_points
+        progress = QProgressDialog(
+            f"Fitting {line_scan.display_label().lower()}…",
+            "Cancel",
+            0,
+            n,
+            self,
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        canceled = False
         try:
             for i, pt in enumerate(line_scan.points):
+                progress.setValue(i)
+                progress.setLabelText(
+                    f"Fitting point {i + 1}/{n} ({pt.name})"
+                )
+                if progress.wasCanceled():
+                    canceled = True
+                    break
                 sp = pt.spectrum
                 result = self._fitter.fit_spectrum(
                     energy=sp.energy,
@@ -2779,7 +3130,7 @@ class MappingPanel(QWidget):
                     elements=elements,
                     background_method=background_method,
                     peak_shape=peak_shape,
-                    auto_find_peaks=fit_params.get("auto_find_peaks", True),
+                    auto_find_peaks=auto_find,
                     tube_element=fit_params.get("tube_element", "Rh"),
                     excitation_kv=fit_params.get("excitation_kv", 50.0),
                     include_tube_lines=fit_params.get("include_tube_lines", True),
@@ -2805,41 +3156,78 @@ class MappingPanel(QWidget):
                         elif isinstance(v, (int, float)):
                             row[str(k)] = float(v)
                 rows.append(row)
-                self.status_message.emit(
-                    f"Fitting line scan {i + 1}/{line_scan.n_points}…"
-                )
         except Exception as exc:
+            progress.close()
             QMessageBox.critical(self, "Fit line scan failed", str(exc))
+            return
+        progress.setValue(n)
+        progress.close()
+
+        if not rows:
             return
 
         self._quant_table = rows
-        self._quant_distances = distances
-        # Plot each element series
+        self._quant_distances = distances[: len(rows)]
         colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#a65628"]
         element_keys = [
             k for k in rows[0].keys() if k not in ("index", "name", "distance")
-        ] if rows else []
+        ]
+        plot_x = distances[: len(rows)]
         for ci, key in enumerate(element_keys):
             ys = [r.get(key, np.nan) for r in rows]
             self.quant_plot.plot(
-                distances,
+                plot_x,
                 ys,
                 pen=pg.mkPen(colors[ci % len(colors)], width=2),
                 name=key,
             )
-        self.info_label.setText(
-            f"Semi-quant along {line_scan.name}: {len(rows)} points, "
-            f"{len(element_keys)} elements"
+        done = (
+            f"Semi-quant along {line_scan.name}: {len(rows)}/{n} points, "
+            f"{len(element_keys)} elements (area-normalized relative %)"
         )
-        self.status_message.emit("Line-scan fit complete")
+        if canceled:
+            done += " — stopped early"
+        self.ls_info_label.setText(done)
+        self.status_message.emit(
+            "Line-scan fit complete" if not canceled else "Line-scan fit canceled"
+        )
 
-    def _export_profile_csv(self) -> None:
+    def _write_profile_csv(self, path: str, profiles: dict) -> None:
+        import csv
+
+        names = list(profiles.keys())
+        dist = profiles[names[0]][0]
+        cols = {"distance": dist}
+        for name in names:
+            cols[name] = profiles[name][1]
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(list(cols.keys()))
+            for i in range(len(dist)):
+                w.writerow([cols[k][i] for k in cols])
+
+    def _export_map_profile_csv(self) -> None:
+        if not self._last_profiles:
+            QMessageBox.information(
+                self,
+                "Export",
+                "No drawn-transect profile to export yet. Draw a line on the map.",
+            )
+            return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export profile CSV", "", "CSV (*.csv)"
+            self, "Export map profile CSV", "", "CSV (*.csv)"
         )
         if not path:
             return
-        # Prefer quant table if available
+        self._write_profile_csv(path, self._last_profiles)
+        self.status_message.emit(f"Exported map profile → {path}")
+
+    def _export_line_scan_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export line-scan CSV", "", "CSV (*.csv)"
+        )
+        if not path:
+            return
         if self._quant_table:
             import csv
 
@@ -2848,22 +3236,15 @@ class MappingPanel(QWidget):
                 w = csv.DictWriter(f, fieldnames=keys)
                 w.writeheader()
                 w.writerows(self._quant_table)
-            self.status_message.emit(f"Exported quant table → {path}")
+            self.status_message.emit(f"Exported semi-quant table → {path}")
             return
-        if not self._last_profiles:
-            QMessageBox.information(self, "Export", "No profile to export yet.")
+        if not self._last_ls_profiles:
+            QMessageBox.information(
+                self,
+                "Export",
+                "No line-scan profile to export yet. Check elements and replot, "
+                "or run Fit / semi-quant.",
+            )
             return
-        # Merge profiles on distance
-        names = list(self._last_profiles.keys())
-        dist = self._last_profiles[names[0]][0]
-        cols = {"distance": dist}
-        for name in names:
-            cols[name] = self._last_profiles[name][1]
-        import csv
-
-        with open(path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(list(cols.keys()))
-            for i in range(len(dist)):
-                w.writerow([cols[k][i] for k in cols])
-        self.status_message.emit(f"Exported profile → {path}")
+        self._write_profile_csv(path, self._last_ls_profiles)
+        self.status_message.emit(f"Exported ROI profile → {path}")
