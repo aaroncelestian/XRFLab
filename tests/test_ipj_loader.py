@@ -167,6 +167,48 @@ def test_line_profile_and_correlation(dylan):
     assert rgb.min() >= 0 and rgb.max() <= 1
 
 
+def test_ipj_sample_info_text_fields(dylan, barstow, emerald):
+    from utils.ipj_loader import _read_counted_strings
+
+    raw = (
+        b"\x01\x00\x00\x00\x34"
+        b"\x08\x00\x00\x00Sample 1"
+        b"\x00\x00\x00\x00"
+        b"\x07\x00\x00\x00Default"
+    )
+    assert _read_counted_strings(raw)[:3] == ["Sample 1", "", "Default"]
+
+    assert dylan.metadata.get("instrument") == "XGT7200"
+    assert dylan.metadata.get("project_title")
+    sample = dylan.samples[0]
+    assert sample.name == "Sample 1"
+    assert sample.metadata.get("sample_type") == "Default"
+    site = dylan.primary_fov
+    assert site is not None
+    assert site.name.startswith("Site of Interest")
+
+    assert emerald.metadata.get("project_title") == "ca emerald with citrine"
+    assert barstow.metadata.get("instrument") == "XGT7200"
+
+
+def test_dylan_map_acquisition_metadata(dylan):
+    fov = dylan.primary_fov
+    assert fov is not None
+    assert fov.metadata.get("map_live_time_s") == 300.0
+    assert fov.width == 128 and fov.height == 109
+    assert fov.metadata.get("n_pixels") == 128 * 109
+    dwell_ms = fov.metadata.get("dwell_ms")
+    assert dwell_ms is not None
+    assert abs(dwell_ms - 300_000 / (128 * 109)) < 0.05
+    assert fov.metadata.get("kv") == 30.0
+    assert fov.metadata.get("ma") == 15.0
+    acquired = fov.metadata.get("acquired_at") or ""
+    assert acquired.startswith("2020-07-13")
+    summary = fov.acquisition_summary()
+    assert "ms/pixel" in summary
+    assert "30 kV" in summary
+
+
 def test_hyperspectral_cube_dylan(dylan):
     fov = dylan.primary_fov
     assert fov is not None
