@@ -9,13 +9,22 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QFileDialog, QProgressBar,
                                QMessageBox, QSplitter, QTabWidget, QListWidget,
                                QListWidgetItem, QTextEdit, QTableWidget, QTableWidgetItem,
-                               QHeaderView, QCheckBox, QComboBox, QScrollArea, QFormLayout)
+                               QHeaderView, QCheckBox, QComboBox, QScrollArea, QFormLayout,
+                               QAbstractItemView, QInputDialog, QMenu)
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtCore import Qt, Signal, QThread
 from pathlib import Path
 import pyqtgraph as pg
 import numpy as np
 
-from core.batch_processing import BatchProcessor, BatchProcessingConfig, BatchFitResult
+from core.batch_processing import (
+    BatchProcessor,
+    BatchProcessingConfig,
+    BatchFitResult,
+    rename_files_in_place,
+    sanitize_sample_name,
+)
+from core.composition import numbered_replicate_names, strip_replicate_suffix
 from ui.element_panel import ElementPanel
 
 
@@ -258,11 +267,20 @@ class BatchAnalysisPanel(QWidget):
 
         self.file_list = QListWidget()
         self.file_list.setMinimumHeight(140)
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._on_file_list_context_menu)
         self.file_list.setToolTip(
             "Spectra to process with the Analysis-tab settings.\n"
-            "Add files here, or send a line scan / site subset from Mapping."
+            "Add files here, or send a line scan / site subset from Mapping.\n"
+            "Shift/Ctrl-click to select several · F2 to rename.\n"
+            "Select spots from one sample and Rename to get Sample_1, Sample_2, …"
         )
         layout.addWidget(self.file_list, stretch=1)
+
+        rename_shortcut = QShortcut(QKeySequence("F2"), self.file_list)
+        rename_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        rename_shortcut.activated.connect(self._rename_selected_files)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(6)
@@ -277,11 +295,27 @@ class BatchAnalysisPanel(QWidget):
         add_dir_btn.clicked.connect(self._add_directory)
         btn_layout.addWidget(add_dir_btn)
 
+        layout.addLayout(btn_layout)
+
+        btn_layout2 = QHBoxLayout()
+        btn_layout2.setSpacing(6)
+
+        rename_btn = QPushButton("Rename…")
+        rename_btn.setToolTip(
+            "Rename selected spectra.\n"
+            "One spectrum: new name as typed.\n"
+            "Several: SampleName → SampleName_1, SampleName_2, … "
+            "(Composition groups those as one sample).\n"
+            "Disk files are renamed on disk; Mapping/IPJ spectra only change the list name."
+        )
+        rename_btn.clicked.connect(self._rename_selected_files)
+        btn_layout2.addWidget(rename_btn)
+
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self._clear_files)
-        btn_layout.addWidget(clear_btn)
+        btn_layout2.addWidget(clear_btn)
 
-        layout.addLayout(btn_layout)
+        layout.addLayout(btn_layout2)
 
         self.file_count_label = QLabel("0 files")
         self.file_count_label.setStyleSheet("color: #666;")
@@ -293,6 +327,182 @@ class BatchAnalysisPanel(QWidget):
         self.file_list.clear()
         self._memory_spectra.clear()
         self._update_file_count()
+
+    def _selected_file_items(self):
+        """Selected file-list items in list order (not click order)."""
+        return [
+            self.file_list.item(i)
+            for i in range(self.file_list.count())
+            if self.file_list.item(i).isSelected()
+        ]
+
+    def _item_is_memory(self, item) -> bool:
+        return item.text() in self._memory_spectra
+
+    def _item_stem(self, item) -> str:
+        name = item.text()
+        if self._item_is_memory(item):
+            return name
+        return Path(name).stem
+
+    def _on_file_list_context_menu(self, pos):
+        item = self.file_list.itemAt(pos)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.file_list.clearSelection()
+            item.setSelected(True)
+        n = len(self._selected_file_items())
+        menu = QMenu(self)
+        act = QAction("Rename…", self)
+        if n > 1:
+            act.setText(f"Rename {n} as sample…")
+        act.setShortcut(QKeySequence("F2"))
+        act.triggered.connect(self._rename_selected_files)
+        menu.addAction(act)
+        menu.exec(self.file_list.viewport().mapToGlobal(pos))
+
+    def _rename_selected_files(self):
+        """Rename selected spectra; several get Sample_1, Sample_2, …"""
+        items = self._selected_file_items()
+        if not items:
+            QMessageBox.information(
+                self, "Rename", "Select one or more spectra to rename."
+            )
+            return
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self, "Rename", "Wait for processing to finish before renaming."
+            )
+            return
+
+        n = len(items)
+        stems = [self._item_stem(it) for it in items]
+        if n == 1:
+            title = "Rename"
+            label = "New name:"
+            default = stems[0]
+        else:
+            title = "Rename sample"
+            label = (
+                f"Sample name for {n} spectra.\n"
+                f"They will be named <name>_1 … <name>_{n}."
+            )
+            stripped = {strip_replicate_suffix(s) for s in stems}
+            default = next(iter(stripped)) if len(stripped) == 1 else ""
+
+        name, ok = QInputDialog.getText(self, title, label, text=default)
+        if not ok:
+            return
+        name = sanitize_sample_name(name)
+        suffixes = {
+            Path(it.text()).suffix
+            for it in items
+            if not self._item_is_memory(it)
+        }
+        if len(suffixes) == 1:
+            suffix = next(iter(suffixes))
+            if suffix and name.lower().endswith(suffix.lower()):
+                name = sanitize_sample_name(name[: -len(suffix)])
+        if not name:
+            QMessageBox.warning(self, "Rename", "Enter a valid name.")
+            return
+
+        new_stems = numbered_replicate_names(name, n)
+        occupied_text = {
+            self.file_list.item(i).text()
+            for i in range(self.file_list.count())
+            if self.file_list.item(i) not in items
+        }
+
+        plan = []  # (item, old_text, new_text, old_stem, new_stem, is_memory)
+        disk_pairs = []
+        for item, new_stem in zip(items, new_stems):
+            old_text = item.text()
+            old_stem = self._item_stem(item)
+            is_memory = self._item_is_memory(item)
+            if is_memory:
+                new_text = new_stem
+            else:
+                old_path = Path(old_text)
+                new_text = str(old_path.with_name(new_stem + old_path.suffix))
+                if old_path.resolve() != Path(new_text).resolve():
+                    disk_pairs.append((old_path, Path(new_text)))
+            if new_text != old_text and new_text in occupied_text:
+                QMessageBox.warning(
+                    self,
+                    "Rename",
+                    f"The name “{new_stem}” is already in the list.",
+                )
+                return
+            occupied_text.add(new_text)
+            plan.append((item, old_text, new_text, old_stem, new_stem, is_memory))
+
+        if disk_pairs:
+            preview_lines = [
+                f"  {old.name} → {new.name}" for old, new in disk_pairs[:8]
+            ]
+            extra = len(disk_pairs) - len(preview_lines)
+            if extra > 0:
+                preview_lines.append(f"  … and {extra} more")
+            confirm = QMessageBox.question(
+                self,
+                "Rename files on disk",
+                "These files will be renamed on disk:\n"
+                + "\n".join(preview_lines)
+                + "\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            try:
+                rename_files_in_place(disk_pairs)
+            except FileExistsError as e:
+                QMessageBox.warning(self, "Rename", str(e))
+                return
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Rename",
+                    f"Could not rename files on disk:\n{e}",
+                )
+                return
+
+        memory_moves = [
+            (old_text, new_text)
+            for item, old_text, new_text, old_stem, new_stem, is_memory in plan
+            if is_memory and old_text != new_text
+        ]
+        moved = {}
+        for old_text, new_text in memory_moves:
+            spec = self._memory_spectra.pop(old_text)
+            moved[new_text] = spec
+        for new_text, spec in moved.items():
+            meta = getattr(spec, "metadata", None)
+            if isinstance(meta, dict):
+                meta["name"] = new_text
+                meta["source_label"] = new_text
+            self._memory_spectra[new_text] = spec
+
+        for item, old_text, new_text, old_stem, new_stem, is_memory in plan:
+            if old_text != new_text:
+                item.setText(new_text)
+            if is_memory:
+                item.setToolTip("In-memory spectrum (from Mapping / IPJ)")
+            self._retarget_results(old_stem, old_text, new_stem, new_text)
+
+        if self.results:
+            self._populate_results_table()
+            if self.current_result is not None:
+                self._display_fit_result(self.current_result)
+
+    def _retarget_results(self, old_name, old_path, new_name, new_path):
+        """Keep already-fitted results in sync with a renamed spectrum."""
+        for result in self.results or []:
+            if result.spectrum_path == old_path or result.spectrum_name == old_name:
+                result.spectrum_name = new_name
+                result.spectrum_path = new_path
 
     def _create_processing_controls_group(self):
         """Create processing controls"""
@@ -966,3 +1176,79 @@ class BatchAnalysisPanel(QWidget):
                 pass  # Skip trend line if fit fails
         
         return plot_widget
+
+    def capture_state(self) -> dict:
+        file_paths = [
+            self.file_list.item(i).text() for i in range(self.file_list.count())
+        ]
+        from core.project_file import _batch_config_dict
+
+        return {
+            "file_paths": file_paths,
+            "memory_names": list(self._memory_spectra.keys()),
+            "config": _batch_config_dict(self.config),
+            "ui": {
+                "use_calibration": bool(self.use_calibration_check.isChecked()),
+                "save_fits": bool(self.save_fits_check.isChecked()),
+                "trend_elements": [
+                    name
+                    for name, box in self.element_trend_checks.items()
+                    if box.isChecked()
+                ],
+            },
+        }
+
+    def restore_state(self, state: dict, *, results=None, memory_spectra=None) -> None:
+        from core.project_file import _batch_config_from_dict
+        from core.batch_processing import BatchProcessor
+
+        state = state or {}
+        self._clear_files()
+        memory_spectra = memory_spectra or {}
+        self._memory_spectra = dict(memory_spectra)
+        cfg = state.get("config") or {}
+        self.config = _batch_config_from_dict(cfg)
+        if self._instrument_state is not None:
+            self.config.instrument_state = self._instrument_state
+        ui = state.get("ui") or {}
+        self.use_calibration_check.setChecked(bool(ui.get("use_calibration", False)))
+        self.save_fits_check.setChecked(bool(ui.get("save_fits", True)))
+        self.config.use_calibration = self.use_calibration_check.isChecked()
+        self.config.save_individual_fits = self.save_fits_check.isChecked()
+
+        existing = set()
+        for name in state.get("file_paths") or []:
+            if name in existing:
+                continue
+            spec = self._memory_spectra.get(name)
+            item = QListWidgetItem(name)
+            if spec is not None:
+                item.setToolTip("In-memory spectrum (from Mapping / IPJ)")
+            self.file_list.addItem(item)
+            existing.add(name)
+        for name in self._memory_spectra:
+            if name in existing:
+                continue
+            item = QListWidgetItem(name)
+            item.setToolTip("In-memory spectrum (from Mapping / IPJ)")
+            self.file_list.addItem(item)
+        self._update_file_count()
+
+        self.results = list(results or [])
+        if self.results:
+            self.processor = BatchProcessor(self.config)
+            self.processor.results = self.results
+            self._populate_results_table()
+            self._update_summary()
+            self._populate_element_checkboxes()
+            wanted = set(ui.get("trend_elements") or [])
+            if wanted:
+                for name, box in self.element_trend_checks.items():
+                    box.blockSignals(True)
+                    box.setChecked(name in wanted)
+                    box.blockSignals(False)
+                self._update_trends_plots()
+        else:
+            self.processor = None
+            self._populate_results_table()
+            self._update_summary()

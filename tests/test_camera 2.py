@@ -46,3 +46,18 @@ def test_camera_from_image_uses_square_pixels_on_long_axis():
     px, py = cam.stages_to_pixels(xs, ys)
     assert px[0] > (2592 - 1) / 2.0  # +X is to the right of centre
     assert py[1] < py[0]  # more positive Y is higher on the photo
+
+
+def test_stage_bounds_to_pixel_rect():
+    cam = StageCamera(
+        width_px=1000,
+        height_px=800,
+        fov_width_mm=100.0,
+        fov_height_mm=80.0,
+    )
+    # 10×10 mm box centred on stage origin → centred on image
+    x0, y0, x1, y1 = cam.stage_bounds_to_pixel_rect((-5.0, -5.0, 5.0, 5.0))
+    assert x0 < 499.5 < x1
+    assert y0 < 399.5 < y1
+    np.testing.assert_allclose(x1 - x0, 100.0, atol=1.0)
+    np.testing.assert_allclose(y1 - y0, 100.0, atol=1.0)

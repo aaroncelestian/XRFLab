@@ -5,17 +5,71 @@ This module handles bulk processing of multiple XRF spectra with consistent
 fitting parameters and semi-quantitative (area-normalized) intensities.
 """
 
-import numpy as np
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional, Any, Tuple
+
+import numpy as np
 
 from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
 from core.calibration import CalibrationResult
 from core.spectrum import Spectrum
 from utils.io_handler import IOHandler
+
+_UNSAFE_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_sample_name(name: str) -> str:
+    """Strip characters that cannot be used in a file stem."""
+    text = _UNSAFE_FILENAME.sub("_", str(name).strip())
+    return text.strip(" .")
+
+
+def rename_files_in_place(pairs):
+    """Rename files ``(old, new)`` in the same directory, two-phase if needed."""
+    jobs = []
+    for old, new in pairs:
+        old = Path(old)
+        new = Path(new)
+        if old.resolve() != new.resolve():
+            jobs.append((old, new))
+    if not jobs:
+        return
+
+    dests = [new.resolve() for _, new in jobs]
+    if len(set(dests)) != len(dests):
+        raise ValueError("Two spectra would get the same filename.")
+
+    sources = {old.resolve() for old, _ in jobs}
+    for _, new in jobs:
+        if new.exists() and new.resolve() not in sources:
+            raise FileExistsError(f"Already exists: {new}")
+
+    needs_temp = any(new.exists() for _, new in jobs)
+    if not needs_temp:
+        for old, new in jobs:
+            old.rename(new)
+        return
+
+    staged = []
+    try:
+        for old, new in jobs:
+            temp = old.with_name(f".xrflab_tmp_{uuid.uuid4().hex[:12]}{old.suffix}")
+            old.rename(temp)
+            staged.append((old, temp, new))
+        for old, temp, new in staged:
+            temp.rename(new)
+    except Exception:
+        for old, temp, new in reversed(staged):
+            if temp.exists() and not old.exists():
+                temp.rename(old)
+            elif new.exists() and not old.exists():
+                new.rename(old)
+        raise
 
 
 @dataclass

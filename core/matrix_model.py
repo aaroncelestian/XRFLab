@@ -142,6 +142,27 @@ class MatrixAssumptions:
     oh_wt: float = 0.0
     co2_wt: float = 0.0
 
+    def to_dict(self) -> dict:
+        kind = self.kind.value if isinstance(self.kind, MatrixKind) else str(self.kind)
+        return {
+            "kind": kind,
+            "fe_as": self.fe_as,
+            "h2o_wt": float(self.h2o_wt),
+            "oh_wt": float(self.oh_wt),
+            "co2_wt": float(self.co2_wt),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "MatrixAssumptions":
+        data = data or {}
+        return cls(
+            kind=coerce_matrix_kind(data.get("kind", MatrixKind.MEASURED)),
+            fe_as=str(data.get("fe_as") or "FeO"),
+            h2o_wt=float(data.get("h2o_wt") or 0.0),
+            oh_wt=float(data.get("oh_wt") or 0.0),
+            co2_wt=float(data.get("co2_wt") or 0.0),
+        )
+
     def light_sum(self) -> float:
         return max(0.0, self.h2o_wt) + max(0.0, self.oh_wt) + max(0.0, self.co2_wt)
 

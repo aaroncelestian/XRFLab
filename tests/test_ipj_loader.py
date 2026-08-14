@@ -175,6 +175,19 @@ def test_overlay_respects_dest_rect():
     assert out[25, 60].mean() > 0.9
 
 
+def test_embed_map_on_photo_keeps_photo_shape():
+    from core.mapping.display import embed_map_on_photo
+
+    mmap = np.arange(20, dtype=np.float64).reshape(4, 5)
+    full = embed_map_on_photo(mmap, (10, 12), dest_rect=None)
+    assert full.shape == (10, 12)
+    placed = embed_map_on_photo(mmap, (10, 12), dest_rect=(2, 1, 7, 5))
+    assert placed.shape == (10, 12)
+    assert placed[0, 0] == 0.0
+    assert placed[1:5, 2:7].shape == (4, 5)
+    assert placed[1:5, 2:7].max() > 0
+
+
 def test_classify_equal_vs_irregular_steps():
     from core.mapping.models import MapSpectrum
     from core.spectrum import Spectrum
@@ -408,6 +421,24 @@ def test_optical_camera_bmps(barstow, dylan, emerald):
     dylan_opt = next((f for f in dylan.fovs if f.optical is not None), None)
     assert dylan_opt is not None
     assert dylan_opt.optical.data.ndim == 3
+
+
+def test_map_area_thumbnail_is_crop_of_sample_camera(dylan, emerald, barstow):
+    """Small MapAreaImage BMPs are exact crops of the sample-camera photo."""
+    from core.mapping.camera import locate_image_crop
+
+    for proj, expect_crop in ((dylan, True), (emerald, True), (barstow, False)):
+        sample = proj.samples[0]
+        fov = next(f for f in proj.fovs if f.optical is not None)
+        photo = sample.whole_image.data
+        opt = fov.optical.data
+        rect = locate_image_crop(photo, opt)
+        if not expect_crop:
+            assert rect is None, proj.name
+            continue
+        assert rect is not None, proj.name
+        x0, y0, x1, y1 = (int(round(v)) for v in rect)
+        np.testing.assert_array_equal(photo[y0:y1, x0:x1], opt)
 
 
 def test_point_spectra_skip_sum_and_spectra_only_flag(barstow, dylan):

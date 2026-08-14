@@ -6,7 +6,20 @@ import numpy as np
 from scipy import signal, optimize
 from scipy.special import wofz
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert numpy scalars/containers so Peak.to_dict() is JSON-serializable."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 @dataclass
@@ -26,6 +39,42 @@ class Peak:
     def __post_init__(self):
         if self.shape_params is None:
             self.shape_params = {}
+
+    def to_dict(self) -> dict:
+        """JSON-friendly representation for project files."""
+        return {
+            "energy": float(self.energy),
+            "amplitude": float(self.amplitude),
+            "fwhm": float(self.fwhm),
+            "area": float(self.area),
+            "element": self.element,
+            "line": self.line,
+            "shape": self.shape,
+            "shape_params": _json_safe(self.shape_params or {}),
+            "is_tube_line": bool(self.is_tube_line),
+            "fixed_fwhm": (
+                None if self.fixed_fwhm is None else float(self.fixed_fwhm)
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Peak":
+        return cls(
+            energy=float(data["energy"]),
+            amplitude=float(data.get("amplitude", 0.0)),
+            fwhm=float(data.get("fwhm", 0.0)),
+            area=float(data.get("area", 0.0)),
+            element=data.get("element"),
+            line=data.get("line"),
+            shape=str(data.get("shape") or "gaussian"),
+            shape_params=dict(data.get("shape_params") or {}),
+            is_tube_line=bool(data.get("is_tube_line", False)),
+            fixed_fwhm=(
+                None
+                if data.get("fixed_fwhm") is None
+                else float(data["fixed_fwhm"])
+            ),
+        )
     
     def __str__(self):
         tube_marker = " [TUBE]" if self.is_tube_line else ""
@@ -55,6 +104,9 @@ class PeakFitter:
     CENTER_SHIFT_MAX_KEV = 0.040  # 40 eV cap
     # Known (element/tube) line centers stay even tighter
     KNOWN_LINE_CENTER_SHIFT_KEV = 0.020  # 20 eV
+    # Reject electronic zero/noise. C Kα is ~0.277 keV (some instruments);
+    # Na Kα is ~1.04 keV (typical EDXRF). 0.17 keV sits below C so both work.
+    MIN_PEAK_ENERGY_KEV = 0.17
     _fwhm_calibration = None  # Optional FWHMCalibration shared by all fits
     _active = None  # Currently activated PeakFitter instance
     
@@ -198,7 +250,8 @@ class PeakFitter:
     
     @staticmethod
     def find_peaks(energy, counts, prominence=None, distance=None, height=None,
-                   prominence_percent=None, min_separation_ev=None):
+                   prominence_percent=None, min_separation_ev=None,
+                   min_energy_kev=None):
         """
         Find peaks in spectrum using scipy peak detection
         
@@ -210,12 +263,18 @@ class PeakFitter:
             height: Minimum peak height
             prominence_percent: If set, prominence = percent/100 * max(counts)
             min_separation_ev: If set, convert to channel distance using energy spacing
+            min_energy_kev: Ignore detections below this energy (default
+                MIN_PEAK_ENERGY_KEV = 0.17 keV, below C Kα)
             
         Returns:
             List of (energy, height) tuples for detected peaks
         """
         counts = np.asarray(counts, dtype=float)
         energy = np.asarray(energy, dtype=float)
+        if min_energy_kev is None:
+            min_energy_kev = PeakFitter.MIN_PEAK_ENERGY_KEV
+        else:
+            min_energy_kev = float(min_energy_kev)
         
         if prominence is None:
             if prominence_percent is not None:
@@ -243,10 +302,12 @@ class PeakFitter:
             height=height
         )
         
-        # Extract peak information
+        # Extract peak information (skip electronic zero/noise below floor)
         peaks = []
         for idx in peak_indices:
-            peak_energy = energy[idx]
+            peak_energy = float(energy[idx])
+            if peak_energy < min_energy_kev:
+                continue
             peak_height = counts[idx]
             peaks.append((peak_energy, peak_height))
         
@@ -292,6 +353,9 @@ class PeakFitter:
         Returns:
             Peak object with fitted parameters
         """
+        if float(initial_center) < PeakFitter.MIN_PEAK_ENERGY_KEV:
+            return None
+
         # Define fitting window around peak
         # Use appropriate window for peak width (±3 FWHM is standard)
         if fixed_fwhm is not None:
@@ -675,6 +739,9 @@ class PeakFitter:
             
             else:
                 raise ValueError(f"Unknown peak shape: {shape}")
+
+            if float(center) < PeakFitter.MIN_PEAK_ENERGY_KEV:
+                return None
             
             return Peak(
                 energy=center,

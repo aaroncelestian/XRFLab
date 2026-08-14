@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -169,13 +168,10 @@ class CompositionPanel(QWidget):
         self.group_combo.addItem("Parent folder", GroupMode.FOLDER)
         self.group_combo.addItem("Filename prefix", GroupMode.PREFIX)
         self.group_combo.addItem("Regex", GroupMode.REGEX)
-        self.group_combo.addItem("Sequential (N samples × spots)", GroupMode.SEQUENTIAL)
         self.group_combo.addItem("None (each spectrum)", GroupMode.NONE)
         self.group_combo.setToolTip(
             "Auto uses parent folders when each pellet is a folder, "
             "otherwise strips _1 / _rep2 / _a from the filename.\n"
-            "Sequential chunks Spectrum 1, 2, 3… into N samples × M spots "
-            "when names have no folders or prefixes.\n"
             "Edit the Sample column to fix leftovers."
         )
         self.group_combo.currentIndexChanged.connect(self._on_group_mode_changed)
@@ -188,37 +184,6 @@ class CompositionPanel(QWidget):
         self.regex_edit.editingFinished.connect(self._apply_grouping)
         self.regex_edit.setVisible(False)
         layout.addWidget(self.regex_edit)
-
-        self.sequential_widget = QWidget()
-        seq = QHBoxLayout(self.sequential_widget)
-        seq.setContentsMargins(0, 0, 0, 0)
-        seq.addWidget(QLabel("Samples"))
-        self.n_samples_spin = QSpinBox()
-        self.n_samples_spin.setRange(1, 9999)
-        self.n_samples_spin.setValue(1)
-        self.n_samples_spin.setToolTip(
-            "How many physical samples are in this project, in collection order"
-        )
-        self.n_samples_spin.valueChanged.connect(self._on_n_samples_changed)
-        seq.addWidget(self.n_samples_spin)
-        seq.addWidget(QLabel("Spots each"))
-        self.spots_spin = QSpinBox()
-        self.spots_spin.setRange(1, 99)
-        self.spots_spin.setValue(3)
-        self.spots_spin.setToolTip(
-            "Replicate spots collected on each sample "
-            "(Spectrum 1–3 → sample 1, 4–6 → sample 2, …)"
-        )
-        self.spots_spin.valueChanged.connect(self._on_spots_changed)
-        seq.addWidget(self.spots_spin)
-        seq.addWidget(QLabel("Prefix"))
-        self.seq_prefix_edit = QLineEdit("Sample")
-        self.seq_prefix_edit.setPlaceholderText("Sample")
-        self.seq_prefix_edit.setToolTip("Group names: Prefix 01, Prefix 02, …")
-        self.seq_prefix_edit.editingFinished.connect(self._apply_grouping)
-        seq.addWidget(self.seq_prefix_edit, stretch=1)
-        self.sequential_widget.setVisible(False)
-        layout.addWidget(self.sequential_widget)
 
         self.group_summary = QLabel("No spectra loaded")
         self.group_summary.setStyleSheet("color: #555;")
@@ -418,8 +383,6 @@ class CompositionPanel(QWidget):
     def load_batch_results(self, results) -> None:
         """Replace the table from BatchFitResult objects."""
         self.rows = rows_from_batch_results(results or [])
-        if self._current_mode() == GroupMode.SEQUENTIAL:
-            self._suggest_sequential_counts()
         self._apply_grouping()
 
     def _current_mode(self) -> GroupMode:
@@ -429,37 +392,6 @@ class CompositionPanel(QWidget):
     def _on_group_mode_changed(self) -> None:
         mode = self._current_mode()
         self.regex_edit.setVisible(mode == GroupMode.REGEX)
-        self.sequential_widget.setVisible(mode == GroupMode.SEQUENTIAL)
-        if mode == GroupMode.SEQUENTIAL:
-            self._suggest_sequential_counts()
-        self._apply_grouping()
-
-    def _suggest_sequential_counts(self) -> None:
-        n = len(self.rows)
-        if n < 1:
-            return
-        spots = max(1, self.spots_spin.value())
-        samples = max(1, n // spots)
-        self.n_samples_spin.blockSignals(True)
-        self.n_samples_spin.setValue(samples)
-        self.n_samples_spin.blockSignals(False)
-
-    def _on_spots_changed(self, spots: int) -> None:
-        n = len(self.rows)
-        spots = max(1, int(spots))
-        if n >= 1:
-            self.n_samples_spin.blockSignals(True)
-            self.n_samples_spin.setValue(max(1, n // spots))
-            self.n_samples_spin.blockSignals(False)
-        self._apply_grouping()
-
-    def _on_n_samples_changed(self, n_samples: int) -> None:
-        n = len(self.rows)
-        n_samples = max(1, int(n_samples))
-        if n >= 1 and n % n_samples == 0:
-            self.spots_spin.blockSignals(True)
-            self.spots_spin.setValue(max(1, n // n_samples))
-            self.spots_spin.blockSignals(False)
         self._apply_grouping()
 
     def _apply_grouping(self) -> None:
@@ -473,9 +405,6 @@ class CompositionPanel(QWidget):
             self.rows,
             self._current_mode(),
             regex=self.regex_edit.text().strip() or DEFAULT_GROUP_REGEX,
-            spots_per_sample=self.spots_spin.value(),
-            n_samples=self.n_samples_spin.value(),
-            prefix=self.seq_prefix_edit.text().strip() or "Sample",
         )
         self._group_mode = used
         self.summaries = summarize_samples(self.rows)
@@ -485,27 +414,10 @@ class CompositionPanel(QWidget):
         ns = [s.n for s in self.summaries]
         extra = f"  ({n_fail} failed fits omitted)" if n_fail else ""
         mode_label = used.value
-        mismatch = ""
-        if used == GroupMode.SEQUENTIAL:
-            expected = self.n_samples_spin.value() * self.spots_spin.value()
-            n_all = len(self.rows)
-            if n_all != expected:
-                leftover = n_all - expected
-                if leftover > 0:
-                    mismatch = (
-                        f"  ({n_all} spectra for {self.n_samples_spin.value()}×"
-                        f"{self.spots_spin.value()}={expected}; "
-                        f"{leftover} extra → extra sample)"
-                    )
-                else:
-                    mismatch = (
-                        f"  ({n_all} spectra for {self.n_samples_spin.value()}×"
-                        f"{self.spots_spin.value()}={expected}; last sample short)"
-                    )
         self.group_summary.setText(
             f"{n_spec} spectra → {n_samp} samples  "
             f"(n={min(ns) if ns else 0}–{max(ns) if ns else 0}, {mode_label})"
-            f"{extra}{mismatch}"
+            f"{extra}"
         )
         self.status_label.setText(
             f"Plotting {n_samp} sample means. Click a row or point to inspect "
@@ -922,109 +834,3 @@ class CompositionPanel(QWidget):
             QMessageBox.critical(self, "Export", str(exc))
             return
         QMessageBox.information(self, "Export", f"Wrote {path}")
-
-    def capture_state(self) -> dict:
-        mode = self._current_mode()
-        return {
-            "rows": [r.to_dict() for r in self.rows],
-            "group_mode": mode.value if hasattr(mode, "value") else str(mode),
-            "regex": self.regex_edit.text(),
-            "oxides": bool(self.oxides_check.isChecked()),
-            "fe_as": self.fe_combo.currentText(),
-            "close": bool(self.close_check.isChecked()),
-            "errorbars": bool(self.errorbar_check.isChecked()),
-            "plot_tab": int(self.plot_tabs.currentIndex()),
-            "tern_a": self.tern_a.currentText(),
-            "tern_b": self.tern_b.currentText(),
-            "tern_c": self.tern_c.currentText(),
-            "corr_x": self.corr_x.currentText(),
-            "corr_y": self.corr_y.currentText(),
-            "ratio_x_num": self.ratio_x_num.currentText(),
-            "ratio_x_den": self.ratio_x_den.currentText(),
-            "ratio_y_num": self.ratio_y_num.currentText(),
-            "ratio_y_den": self.ratio_y_den.currentText(),
-            "selected_sample": self._selected_sample,
-        }
-
-    def restore_state(self, state: dict) -> None:
-        if not state:
-            return
-        from core.composition import CompositionRow, summarize_samples
-
-        self.group_combo.blockSignals(True)
-        mode_val = state.get("group_mode")
-        try:
-            mode_enum = GroupMode(mode_val) if mode_val else GroupMode.AUTO
-        except ValueError:
-            mode_enum = GroupMode.AUTO
-        idx = self.group_combo.findData(mode_enum)
-        if idx < 0:
-            for i in range(self.group_combo.count()):
-                data = self.group_combo.itemData(i)
-                if getattr(data, "value", data) == mode_val:
-                    idx = i
-                    break
-        if idx >= 0:
-            self.group_combo.setCurrentIndex(idx)
-        self.group_combo.blockSignals(False)
-        mode = self._current_mode()
-        self.regex_edit.setVisible(mode == GroupMode.REGEX)
-        if state.get("regex"):
-            self.regex_edit.setText(str(state["regex"]))
-        self.oxides_check.blockSignals(True)
-        self.oxides_check.setChecked(bool(state.get("oxides", False)))
-        self.oxides_check.blockSignals(False)
-        if state.get("fe_as"):
-            self.fe_combo.blockSignals(True)
-            self.fe_combo.setCurrentText(str(state["fe_as"]))
-            self.fe_combo.blockSignals(False)
-        self.close_check.blockSignals(True)
-        self.close_check.setChecked(bool(state.get("close", False)))
-        self.close_check.blockSignals(False)
-        self.errorbar_check.blockSignals(True)
-        self.errorbar_check.setChecked(bool(state.get("errorbars", True)))
-        self.errorbar_check.blockSignals(False)
-        self.fe_combo.setEnabled(self._as_oxides())
-
-        self.rows = [
-            CompositionRow.from_dict(r) for r in (state.get("rows") or [])
-        ]
-        self._selected_sample = state.get("selected_sample")
-        if not self.rows:
-            self.summaries = []
-            self.group_summary.setText("No spectra loaded")
-            self._fill_table()
-            self._refresh_plots()
-            return
-        self.summaries = summarize_samples(self.rows)
-        n_spec = sum(1 for r in self.rows if r.success)
-        n_fail = sum(1 for r in self.rows if not r.success)
-        n_samp = len(self.summaries)
-        ns = [s.n for s in self.summaries]
-        extra = f"  ({n_fail} failed fits omitted)" if n_fail else ""
-        self.group_summary.setText(
-            f"{n_spec} spectra → {n_samp} samples  "
-            f"(n={min(ns) if ns else 0}–{max(ns) if ns else 0}, {mode.value})"
-            f"{extra}"
-        )
-        self._fill_table()
-        self._fill_combos()
-        for combo, key in (
-            (self.tern_a, "tern_a"),
-            (self.tern_b, "tern_b"),
-            (self.tern_c, "tern_c"),
-            (self.corr_x, "corr_x"),
-            (self.corr_y, "corr_y"),
-            (self.ratio_x_num, "ratio_x_num"),
-            (self.ratio_x_den, "ratio_x_den"),
-            (self.ratio_y_num, "ratio_y_num"),
-            (self.ratio_y_den, "ratio_y_den"),
-        ):
-            text = state.get(key)
-            if text:
-                combo.blockSignals(True)
-                combo.setCurrentText(str(text))
-                combo.blockSignals(False)
-        if state.get("plot_tab") is not None:
-            self.plot_tabs.setCurrentIndex(int(state["plot_tab"]))
-        self._refresh_plots()

@@ -60,7 +60,7 @@ class OverviewImage:
         return self.data.shape
 
 
-@dataclass
+@dataclass(eq=False)
 class MapSpectrum:
     """A Spectrum with optional spatial / line-scan context."""
 
@@ -700,10 +700,10 @@ class MappingProject:
 
     def find_fov_for_spectrum(self, ms: MapSpectrum) -> Optional[MappingFOV]:
         for fov in self.fovs:
-            if ms in fov.spectra:
+            if any(ms is s for s in fov.spectra):
                 return fov
             for ls in fov.line_scans:
-                if ms in ls.points:
+                if any(ms is s for s in ls.points):
                     return fov
         return None
 

@@ -27,7 +27,7 @@ def test_stage_camera_roundtrip_center_and_offset():
     assert py1 < py0
 
 
-def test_camera_from_image_uses_square_pixels_on_long_axis():
+def test_camera_from_image_inscribes_100mm_stage_square():
     img = OverviewImage(
         name="Sample camera",
         data=np.zeros((1944, 2592, 3), dtype=np.uint8),
@@ -37,9 +37,17 @@ def test_camera_from_image_uses_square_pixels_on_long_axis():
     assert cam is not None
     assert cam.width_px == 2592
     assert cam.height_px == 1944
-    np.testing.assert_allclose(cam.fov_width_mm, 100.0)
-    np.testing.assert_allclose(cam.fov_height_mm, 75.0)
+    # Short axis (height) is 100 mm; extra width is camera-only margin
+    np.testing.assert_allclose(cam.fov_height_mm, 100.0)
+    np.testing.assert_allclose(cam.fov_width_mm, 100.0 * 2592 / 1944)
     np.testing.assert_allclose(cam.mm_per_px_x, cam.mm_per_px_y)
+
+    x0, y0, x1, y1 = cam.probeable_pixel_rect()
+    # 100×100 mm square fills the image height and is inset left/right
+    np.testing.assert_allclose(y1 - y0, 1944.0, atol=2.0)
+    np.testing.assert_allclose(x1 - x0, 1944.0, atol=2.0)
+    assert x0 > 200
+    assert x1 < 2592 - 200
 
     xs = np.array([6.6, 6.6])
     ys = np.array([-5.8, 5.5])
@@ -61,3 +69,27 @@ def test_stage_bounds_to_pixel_rect():
     assert y0 < 399.5 < y1
     np.testing.assert_allclose(x1 - x0, 100.0, atol=1.0)
     np.testing.assert_allclose(y1 - y0, 100.0, atol=1.0)
+
+
+def test_locate_image_crop_finds_exact_subimage():
+    from core.mapping.camera import locate_image_crop
+
+    photo = np.zeros((80, 120, 3), dtype=np.uint8)
+    photo[10:40, 25:70] = (12, 80, 200)
+    photo[20, 40] = (255, 255, 0)
+    crop = photo[10:40, 25:70].copy()
+    rect = locate_image_crop(photo, crop)
+    assert rect == (25.0, 10.0, 70.0, 40.0)
+    # Larger template cannot be a crop
+    assert locate_image_crop(crop, photo) is None
+
+
+def test_locate_image_crop_uses_distinctive_row():
+    from core.mapping.camera import locate_image_crop
+
+    photo = np.full((60, 90), 7, dtype=np.uint8)
+    crop = np.full((20, 15), 7, dtype=np.uint8)
+    crop[12] = np.arange(15, dtype=np.uint8) + 40
+    photo[30:50, 10:25] = crop
+    rect = locate_image_crop(photo, crop)
+    assert rect == (10.0, 30.0, 25.0, 50.0)

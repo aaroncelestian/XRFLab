@@ -634,3 +634,16 @@ class FWHMCalibrationPanel(QWidget):
             QMessageBox.critical(
                 self, "Load Error", f"Failed to load calibration:\n{e}"
             )
+
+    def restore_calibration(self, calibration) -> None:
+        """Install a calibration from a project file without writing AppData."""
+        self.fwhm_calibration = calibration
+        if calibration is None:
+            return
+        self.apply_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+        self._display_results(calibration)
+        try:
+            self._plot_fitted_curve_only(calibration)
+        except Exception:
+            pass

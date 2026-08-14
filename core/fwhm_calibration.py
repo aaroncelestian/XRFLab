@@ -88,7 +88,11 @@ class FWHMCalibration:
     @classmethod
     def from_dict(cls, data: Dict) -> 'FWHMCalibration':
         """Create from dictionary"""
-        return cls(**data)
+        payload = dict(data)
+        er = payload.get("energy_range")
+        if isinstance(er, list):
+            payload["energy_range"] = tuple(er)
+        return cls(**payload)
     
     def save(self, filepath: str):
         """Save calibration to JSON file"""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -309,14 +309,17 @@ def overlay_on_photo(
     *,
     alpha: Optional[np.ndarray] = None,
     opacity: float = 0.45,
+    dest_rect: Optional[Tuple[float, float, float, float]] = None,
 ) -> np.ndarray:
     """
     Alpha-blend an RGB overlay onto an optical photo.
 
-    The overlay is resized to the photo. ``opacity`` is 0–1. If ``alpha`` is
-    given (0–1, same shape as the overlay before resize), it is resized with
-    nearest-neighbor so zero-count pixels stay fully transparent. Returns
-    HxWx3 float in [0, 1].
+    By default the overlay is resized to the full photo. If ``dest_rect`` is
+    given as ``(x0, y0, x1, y1)`` in photo pixel coordinates, the overlay is
+    placed only in that rectangle (the rest of the photo is unchanged).
+    ``opacity`` is 0–1. If ``alpha`` is given (0–1, same shape as the overlay
+    before resize), it is resized with nearest-neighbor so zero-count pixels
+    stay fully transparent. Returns HxWx3 float in [0, 1].
     """
     photo_arr = np.asarray(photo, dtype=np.float64)
     if photo_arr.ndim == 2:
@@ -334,20 +337,39 @@ def overlay_on_photo(
     if over.max(initial=0.0) > 1.5:
         over = over / 255.0
     over = np.clip(over, 0.0, 1.0)
-    if over.shape[0] != h or over.shape[1] != w:
-        over = resize_to(over, h, w, order=1)
+
+    if dest_rect is None:
+        x0, y0, x1, y1 = 0, 0, w, h
+    else:
+        x0 = int(np.floor(min(dest_rect[0], dest_rect[2])))
+        x1 = int(np.ceil(max(dest_rect[0], dest_rect[2])))
+        y0 = int(np.floor(min(dest_rect[1], dest_rect[3])))
+        y1 = int(np.ceil(max(dest_rect[1], dest_rect[3])))
+        x0 = int(np.clip(x0, 0, w))
+        x1 = int(np.clip(x1, 0, w))
+        y0 = int(np.clip(y0, 0, h))
+        y1 = int(np.clip(y1, 0, h))
+    rh = y1 - y0
+    rw = x1 - x0
+    if rh < 1 or rw < 1:
+        return photo_arr
+
+    if over.shape[0] != rh or over.shape[1] != rw:
+        over = resize_to(over, rh, rw, order=1)
 
     opac = float(np.clip(opacity, 0.0, 1.0))
     if alpha is None:
-        a = np.full((h, w), opac, dtype=np.float64)
+        a = np.full((rh, rw), opac, dtype=np.float64)
     else:
         a = np.asarray(alpha, dtype=np.float64)
-        if a.shape != (h, w):
-            # Nearest-neighbor so zero-count pixels stay fully transparent
-            a = resize_to(a, h, w, order=0)
+        if a.shape != (rh, rw):
+            a = resize_to(a, rh, rw, order=0)
         a = np.clip(a, 0.0, 1.0) * opac
     a3 = a[:, :, None]
-    return np.clip(photo_arr * (1.0 - a3) + over * a3, 0.0, 1.0)
+    out = photo_arr.copy()
+    region = out[y0:y1, x0:x1]
+    out[y0:y1, x0:x1] = np.clip(region * (1.0 - a3) + over * a3, 0.0, 1.0)
+    return out
 
 
 def format_acquisition(meta: Optional[dict]) -> str:

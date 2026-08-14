@@ -2,10 +2,12 @@
 Main window for XRF Fundamental Parameters Analysis Application
 """
 
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
-    QTabWidget, QPushButton, QLabel
+    QTabWidget, QPushButton, QLabel, QApplication
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
@@ -27,6 +29,13 @@ from core.fitting import SpectrumFitter
 from core.fp_quantification import quantify_from_peaks
 from core.matrix_model import empirical_formula
 from core.session import AnalysisSession
+from core.project_file import (
+    FILE_FILTER,
+    ProjectDocument,
+    ProjectFileError,
+    load_project as read_project_file,
+    save_project as write_project_file,
+)
 from core.smart_peak_id import (
     SmartIDConfig,
     analyze_fitted_peaks,
@@ -52,6 +61,8 @@ class MainWindow(QMainWindow):
         self.session.apply_instrument_to_fitter(self.fitter)
         self.settings = QSettings()
         self._displayed_element_lines = None  # symbol currently shown on plot, or None
+        self._project_path = None
+        self.analysis_splitter = None
         
         # Setup UI (status bar before central widget — FWHM auto-load may message it)
         self._create_actions()
@@ -94,6 +105,21 @@ class MainWindow(QMainWindow):
             "Open an Oxford INCA / Horiba XGT .ipj mapping project"
         )
         self.open_ipj_action.triggered.connect(self.open_ipj_project)
+
+        self.open_project_action = QAction("Open &Project...", self)
+        self.open_project_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.open_project_action.setStatusTip("Open a saved XRFLab project (.xrfp)")
+        self.open_project_action.triggered.connect(self.open_project)
+
+        self.save_project_action = QAction("&Save Project", self)
+        self.save_project_action.setShortcut(QKeySequence.Save)
+        self.save_project_action.setStatusTip("Save the entire workspace to a .xrfp file")
+        self.save_project_action.triggered.connect(self.save_project)
+
+        self.save_project_as_action = QAction("Save Project &As...", self)
+        self.save_project_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.save_project_as_action.setStatusTip("Save the workspace to a new .xrfp file")
+        self.save_project_as_action.triggered.connect(self.save_project_as)
         
         self.export_results_action = QAction("&Export Results...", self)
         self.export_results_action.setStatusTip("Export analysis results")
@@ -182,6 +208,10 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_ipj_action)
+        file_menu.addAction(self.open_project_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.save_project_action)
+        file_menu.addAction(self.save_project_as_action)
         file_menu.addSeparator()
         file_menu.addAction(self.export_results_action)
         file_menu.addSeparator()
@@ -220,6 +250,8 @@ class MainWindow(QMainWindow):
         
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.open_ipj_action)
+        toolbar.addAction(self.open_project_action)
+        toolbar.addAction(self.save_project_action)
     
     def _create_central_widget(self):
         """Create the main layout with primary Analysis tabs and nested Calibration"""
@@ -340,6 +372,7 @@ class MainWindow(QMainWindow):
         
         # Create main horizontal splitter (left panel | right side)
         main_splitter = QSplitter(Qt.Horizontal)
+        self.analysis_splitter = main_splitter
         
         # Left panel - Tabbed interface for compact layout
         self.analysis_left_tabs = QTabWidget()
@@ -514,6 +547,293 @@ class MainWindow(QMainWindow):
         """Save window settings"""
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
+
+    def _project_dialog_dir(self) -> str:
+        last = self.settings.value("last_project")
+        if last:
+            parent = Path(str(last)).parent
+            if parent.is_dir():
+                return str(parent)
+        return ""
+
+    def _set_project_path(self, path) -> None:
+        self._project_path = str(path) if path else None
+        if self._project_path:
+            self.settings.setValue("last_project", self._project_path)
+            self.setWindowTitle(f"XRFLab — {Path(self._project_path).name}")
+        else:
+            self.setWindowTitle("XRFLab - Fundamental Parameters Analysis")
+
+    def _workspace_has_content(self) -> bool:
+        return bool(
+            self.session.spectrum is not None
+            or self.mapping_panel.project is not None
+            or self.batch_analysis_panel.file_list.count() > 0
+            or self.composition_panel.rows
+        )
+
+    def capture_document(self) -> ProjectDocument:
+        """Collect the full workspace into a ProjectDocument."""
+        analysis_ui = {
+            "element_panel": self.element_panel.capture_state(),
+            "results_panel": self.results_panel.capture_state(),
+            "spectrum_widget": self.spectrum_widget.capture_state(),
+            "left_tab": int(self.analysis_left_tabs.currentIndex()),
+            "displayed_element_lines": self._displayed_element_lines,
+        }
+        analysis = {
+            "spectrum": self.session.spectrum,
+            "spectrum_path": self.session.spectrum_path,
+            "elements": self.session.elements or self.element_panel.get_selected_elements(),
+            "fit_result": self.session.fit_result,
+            "concentrations": self.session.concentrations,
+            "quantification_method": self.session.quantification_method,
+            "matrix": self.results_panel.get_matrix_assumptions(),
+            "fp_result": self.session.fp_result,
+            "ui": analysis_ui,
+        }
+        batch_state = self.batch_analysis_panel.capture_state()
+        batch = {
+            "file_paths": batch_state.get("file_paths") or [],
+            "memory_spectra": dict(self.batch_analysis_panel._memory_spectra),
+            "results": list(self.batch_analysis_panel.results or []),
+            "config": batch_state.get("config") or {},
+            "ui": batch_state.get("ui") or {},
+        }
+        calibrations = {}
+        fwhm = self.fwhm_calibration_panel.fwhm_calibration
+        if fwhm is not None:
+            calibrations["fwhm"] = fwhm.to_dict()
+        tube = self.tube_profile_panel.get_library()
+        if tube is not None:
+            calibrations["tube"] = tube.to_dict()
+        standards = self.standards_panel.calibration_result
+        if standards is not None:
+            calibrations["standards"] = standards.to_dict()
+        window = {
+            "tab": int(self.tab_widget.currentIndex()),
+            "calibration_tab": int(self.calibration_tabs.currentIndex()),
+            "log_y": bool(self.toggle_log_action.isChecked()),
+            "grid": bool(self.toggle_grid_action.isChecked()),
+            "analysis_splitter": (
+                list(self.analysis_splitter.sizes())
+                if self.analysis_splitter is not None
+                else None
+            ),
+        }
+        return ProjectDocument(
+            analysis=analysis,
+            mapping_project=self.mapping_panel.project,
+            mapping_ui=self.mapping_panel.capture_ui_state(),
+            drawn_line_scan=self.mapping_panel._drawn_line_scan,
+            batch=batch,
+            composition=self.composition_panel.capture_state(),
+            calibrations=calibrations,
+            window=window,
+        )
+
+    def apply_document(self, document: ProjectDocument) -> None:
+        """Replace the workspace with a loaded ProjectDocument."""
+        from core.calibration import CalibrationResult
+        from core.fwhm_calibration import FWHMCalibration
+        from core.tube_profile import TubeProfileLibrary
+
+        cals = document.calibrations or {}
+        if cals.get("fwhm"):
+            fwhm = FWHMCalibration.from_dict(cals["fwhm"])
+            self.fwhm_calibration_panel.restore_calibration(fwhm)
+            self.on_fwhm_calibration_applied(fwhm)
+        if cals.get("tube"):
+            library = TubeProfileLibrary.from_dict(cals["tube"])
+            self.tube_profile_panel.restore_library(library)
+            self.on_tube_profiles_changed(library)
+        if cals.get("standards"):
+            std = CalibrationResult.from_dict(cals["standards"])
+            self.standards_panel.restore_calibration(std)
+            self.session.instrument.standards_calibration = std
+
+        analysis = document.analysis or {}
+        ui = analysis.get("ui") or {}
+        self.element_panel.restore_state(ui.get("element_panel") or {})
+        self.session.spectrum = analysis.get("spectrum")
+        self.session.spectrum_path = analysis.get("spectrum_path")
+        self.session.elements = list(
+            analysis.get("elements") or self.element_panel.get_selected_elements()
+        )
+        self.session.fit_result = analysis.get("fit_result")
+        self.session.concentrations = dict(analysis.get("concentrations") or {})
+        self.session.quantification_method = str(
+            analysis.get("quantification_method") or "semi_quant_area"
+        )
+        matrix = analysis.get("matrix")
+        if matrix is not None:
+            self.session.matrix = matrix
+        self.session.fp_result = analysis.get("fp_result")
+
+        self.results_panel.clear_results()
+        self.spectrum_widget.set_fitted_spectrum(None)
+        self.spectrum_widget.set_background(None)
+        self.spectrum_widget.clear_peak_markers()
+        if self.session.spectrum is not None:
+            self.spectrum_widget.set_spectrum(self.session.spectrum)
+        else:
+            self.spectrum_widget.set_spectrum(None)
+        fit = self.session.fit_result
+        if fit is not None:
+            self.spectrum_widget.set_fitted_spectrum(fit.fitted_spectrum)
+            self.spectrum_widget.set_background(fit.background)
+            show = True
+            ep = ui.get("element_panel") or {}
+            if "show_markers" in ep:
+                show = bool(ep["show_markers"])
+            self.spectrum_widget.set_peak_markers(fit.peaks, show=show)
+            self.results_panel.set_fit_statistics(fit.statistics or {})
+            self.results_panel.set_peaks(fit.peaks)
+            flags = getattr(fit, "tube_overlap_flags", None) or []
+            if flags:
+                self.results_panel.set_tube_overlap_flags(flags)
+        self.results_panel.restore_state(ui.get("results_panel") or {})
+        if self.session.concentrations and not (ui.get("results_panel") or {}).get(
+            "results_data"
+        ):
+            self.results_panel.set_quantification(self.session.concentrations)
+        fp = self.session.fp_result
+        if fp is not None:
+            self.results_panel.set_fp_live(True)
+            self.results_panel.set_quantification(fp.concentrations)
+            bits = [f"As compounds: {fp.formula_summary()}"]
+            if fp.residual < float("inf"):
+                bits.append(
+                    f"intensity residual {fp.residual:.4f} "
+                    f"({fp.iterations} iter)"
+                )
+            bits.append(f"measured cations {fp.measured_cation_pct:.1f} %")
+            self.results_panel.set_formula_summary(
+                "    |  ".join(bits),
+                empirical=empirical_formula(fp.element_wt),
+            )
+        self.spectrum_widget.restore_state(ui.get("spectrum_widget") or {})
+        if ui.get("left_tab") is not None:
+            self.analysis_left_tabs.setCurrentIndex(int(ui["left_tab"]))
+        self._displayed_element_lines = ui.get("displayed_element_lines")
+
+        self.mapping_panel.load_saved_project(
+            document.mapping_project,
+            document.mapping_ui,
+            drawn_line_scan=document.drawn_line_scan,
+        )
+        batch = document.batch or {}
+        self.batch_analysis_panel.restore_state(
+            {
+                "file_paths": batch.get("file_paths") or [],
+                "config": batch.get("config") or {},
+                "ui": batch.get("ui") or {},
+            },
+            results=batch.get("results") or [],
+            memory_spectra=batch.get("memory_spectra") or {},
+        )
+        self.composition_panel.restore_state(document.composition or {})
+
+        window = document.window or {}
+        if window.get("log_y") is not None:
+            self.toggle_log_action.blockSignals(True)
+            self.toggle_log_action.setChecked(bool(window["log_y"]))
+            self.toggle_log_action.blockSignals(False)
+            self.spectrum_widget.set_log_scale(bool(window["log_y"]))
+        if window.get("grid") is not None:
+            self.toggle_grid_action.blockSignals(True)
+            self.toggle_grid_action.setChecked(bool(window["grid"]))
+            self.toggle_grid_action.blockSignals(False)
+            self.spectrum_widget.set_grid(bool(window["grid"]))
+        if window.get("analysis_splitter") and self.analysis_splitter is not None:
+            self.analysis_splitter.setSizes([int(x) for x in window["analysis_splitter"]])
+        if window.get("calibration_tab") is not None:
+            self.calibration_tabs.setCurrentIndex(int(window["calibration_tab"]))
+        if window.get("tab") is not None:
+            self.tab_widget.setCurrentIndex(int(window["tab"]))
+
+    def save_project(self):
+        """Save the workspace to the current .xrfp path, or ask for a name."""
+        if not self._project_path:
+            return self.save_project_as()
+        return self._write_project(self._project_path)
+
+    def save_project_as(self):
+        """Save the workspace to a new .xrfp file."""
+        suggested = self._project_path or str(
+            Path(self._project_dialog_dir() or ".") / "project.xrfp"
+        )
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save XRFLab Project",
+            suggested,
+            FILE_FILTER,
+        )
+        if not file_path:
+            return False
+        if not str(file_path).lower().endswith(".xrfp"):
+            file_path = str(Path(file_path).with_suffix(".xrfp"))
+        return self._write_project(file_path)
+
+    def _write_project(self, file_path: str) -> bool:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            document = self.capture_document()
+            write_project_file(file_path, document)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self,
+                "Save Project Failed",
+                f"Could not save project:\n{exc}",
+            )
+            return False
+        QApplication.restoreOverrideCursor()
+        self._set_project_path(file_path)
+        self.status_bar.showMessage(f"Saved: {file_path}", 5000)
+        return True
+
+    def open_project(self, path=None):
+        """Replace the workspace with a saved .xrfp project."""
+        if not isinstance(path, str) or not path:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open XRFLab Project",
+                self._project_dialog_dir(),
+                FILE_FILTER,
+            )
+            if not file_path:
+                return
+            path = file_path
+        if self._workspace_has_content():
+            reply = QMessageBox.question(
+                self,
+                "Open Project",
+                "Open this project and replace the current workspace?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            document = read_project_file(path)
+            self.apply_document(document)
+        except ProjectFileError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "Open Project Failed", str(exc))
+            return
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(
+                self,
+                "Open Project Failed",
+                f"Could not open project:\n{exc}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self._set_project_path(path)
+        self.status_bar.showMessage(f"Opened: {path}", 5000)
     
     # Action handlers
     def open_spectrum(self):
@@ -947,9 +1267,12 @@ class MainWindow(QMainWindow):
             id_summary = []
             identified = []
             if fit_params.get('auto_id_after_peak_find', True):
+                energy = self.current_spectrum.energy
                 preview_peaks, identified, id_summary = auto_id_peak_positions(
                     preview_peaks,
                     excitation_kv=fit_params.get('excitation_kv', 50.0),
+                    energy_min=float(energy[0]),
+                    energy_max=float(energy[-1]),
                 )
                 if identified:
                     self.element_panel.set_selected_elements(identified)
@@ -975,6 +1298,8 @@ class MainWindow(QMainWindow):
             for p in preview_peaks:
                 if p.get('element') and p.get('line'):
                     tag = " [tube]" if p.get('is_tube_line') else ""
+                    if p.get('inferred'):
+                        tag += " [expected]"
                     lines.append(
                         f"{p['energy']:.3f} keV  {p['element']} {p['line']}{tag}"
                     )

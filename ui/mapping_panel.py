@@ -51,10 +51,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.mapping.camera import StageCamera, camera_from_image
+from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop
 from core.mapping.correlations import map_correlation, rgb_composite
 from core.mapping.display import (
     colorize_map,
+    embed_map_on_photo,
     enhance_map,
     format_acquisition,
     overlay_alpha,
@@ -113,6 +114,7 @@ class MappingPanel(QWidget):
         self._ls_plot_x: Optional[np.ndarray] = None
         self._ls_plot_order: Optional[np.ndarray] = None
         self._ls_camera_model: Optional[StageCamera] = None
+        self._cam_dest_rect_cache: dict = {}
 
         self._build_ui()
 
@@ -907,6 +909,8 @@ class MappingPanel(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "IPJ load failed", str(exc))
             return
+
+        self._cam_dest_rect_cache.clear()
 
         self._populate_trees()
         primary = self.project.primary_fov
@@ -2626,9 +2630,19 @@ class MappingPanel(QWidget):
                 note = " (registered to map area)"
             elif target == "whole_image":
                 note = " (no stage rect — stretched; check map geometry)"
-            self.canvas.set_image(
-                coord, display=blended, rgb=True, title=title + note
-            )
+            if target == "whole_image":
+                grid = embed_map_on_photo(
+                    np.asarray(coord, dtype=np.float64),
+                    np.asarray(photo).shape[:2],
+                    dest_rect,
+                )
+                self.canvas.set_image(
+                    grid, display=blended, rgb=True, title=title + note
+                )
+            else:
+                self.canvas.set_image(
+                    coord, display=blended, rgb=True, title=title + note
+                )
         except Exception as exc:
             self.status_message.emit(f"Photo overlay failed: {exc}")
             return False
@@ -2639,11 +2653,23 @@ class MappingPanel(QWidget):
         fov = self.current_fov
         if fov is None:
             return None
+        photo_arr = np.asarray(photo)
+        cache_key = None
+        if fov.optical is not None:
+            opt = np.asarray(fov.optical.data)
+            cache_key = (fov.id, tuple(photo_arr.shape), tuple(opt.shape))
+            cached = self._cam_dest_rect_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            rect = locate_image_crop(photo_arr, opt)
+            if rect is not None:
+                self._cam_dest_rect_cache[cache_key] = rect
+                return rect
         bounds = fov.stage_bounds_mm()
         if bounds is None:
             return None
         cam = self._ls_camera_model
-        if cam is None or cam.width_px != int(np.asarray(photo).shape[1]):
+        if cam is None or cam.width_px != int(photo_arr.shape[1]):
             cam = camera_from_image(photo)
         if cam is None:
             sample = self._sample_for_site(fov)
@@ -2651,7 +2677,10 @@ class MappingPanel(QWidget):
                 cam = camera_from_image(sample.whole_image)
         if cam is None:
             return None
-        return cam.stage_bounds_to_pixel_rect(bounds)
+        rect = cam.stage_bounds_to_pixel_rect(bounds)
+        if cache_key is not None:
+            self._cam_dest_rect_cache[cache_key] = rect
+        return rect
 
     def _refresh_canvas(self) -> None:
         fov = self.current_fov
@@ -3353,8 +3382,9 @@ class MappingPanel(QWidget):
         )
         n = ls.n_points
         self.ls_camera_label.setText(
-            f"{n} points on the sample camera (stage {cam.fov_width_mm:.0f}×"
-            f"{cam.fov_height_mm:.0f} mm FOV, origin at centre). "
+            f"{n} points on the sample camera "
+            f"(100×100 mm stage in {cam.fov_width_mm:.0f}×"
+            f"{cam.fov_height_mm:.0f} mm camera FOV, origin at centre). "
             "Hover the profile or click a point."
         )
         self._overlay_line_scan_on_maps_camera(ls)

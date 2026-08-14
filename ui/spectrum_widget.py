@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from core.xray_data import get_element_lines
+from core.peak_fitting import PeakFitter
 
 
 class SpectrumWidget(QWidget):
@@ -192,7 +193,9 @@ class SpectrumWidget(QWidget):
         Stick height is normalized per element: that element's strongest
         fitted line is 100%, and its other lines (Kβ, L, …) scale to their
         share of that element's area. Tube lines are a separate group.
-        Peaks without an area stay as full-height dashed markers.
+        Peak-find seeds without a fitted area use catalog relative_intensity
+        when present (so Fe Kβ still shows below the detection threshold).
+        Peaks without area or catalog intensity stay as full-height dashed markers.
 
         Args:
             peaks: List of Peak objects, or dicts with energy/element/line/is_tube_line
@@ -256,7 +259,16 @@ class SpectrumWidget(QWidget):
                 key = ("unlabeled", None)
 
             denom = max_area.get(key, 0.0)
-            rel = (area / denom) if denom > 0 and area > 0 else None
+            catalog_rel = _attr(peak, "relative_intensity", None)
+            if denom > 0 and area > 0:
+                rel = area / denom
+            elif catalog_rel is not None:
+                try:
+                    rel = max(0.0, min(1.0, float(catalog_rel)))
+                except (TypeError, ValueError):
+                    rel = None
+            else:
+                rel = None
             if rel is not None:
                 pct = int(round(100.0 * rel))
                 label = f"{label} {pct}%"
@@ -405,9 +417,12 @@ class SpectrumWidget(QWidget):
         }
         diagnostic_names = {'Kα1', 'Kα', 'Lα1', 'Lα', 'Mα1', 'Mα'}
 
-        e_min, e_max = 0.50, 40.0
+        e_min, e_max = PeakFitter.MIN_PEAK_ENERGY_KEV, 40.0
         if self.spectrum_data is not None and len(getattr(self.spectrum_data, 'energy', [])):
-            e_min = max(0.40, float(np.nanmin(self.spectrum_data.energy)))
+            e_min = max(
+                PeakFitter.MIN_PEAK_ENERGY_KEV,
+                float(np.nanmin(self.spectrum_data.energy)),
+            )
             e_max = float(np.nanmax(self.spectrum_data.energy))
 
         collected = []
@@ -610,6 +625,38 @@ class SpectrumWidget(QWidget):
                 f"{prefix}Energy: {energy:.3f} keV | Counts: {counts:.0f}"
             )
     
+    def capture_state(self) -> dict:
+        plot = self.plot_widget.getPlotItem()
+        resid = self.residuals_widget.getPlotItem()
+        xr, yr = plot.getViewBox().viewRange()
+        rx, ry = resid.getViewBox().viewRange()
+        return {
+            "log_y": bool(self.log_y_checkbox.isChecked()),
+            "view": {
+                "x": [float(xr[0]), float(xr[1])],
+                "y": [float(yr[0]), float(yr[1])],
+            },
+            "residuals_view": {
+                "x": [float(rx[0]), float(rx[1])],
+                "y": [float(ry[0]), float(ry[1])],
+            },
+            "peak_markers": list(self._peak_marker_specs or []),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        if not state:
+            return
+        if "log_y" in state:
+            self.set_log_scale(bool(state["log_y"]))
+        view = state.get("view") or {}
+        if view.get("x") and view.get("y"):
+            self.plot_widget.getPlotItem().setXRange(*view["x"], padding=0)
+            self.plot_widget.getPlotItem().setYRange(*view["y"], padding=0)
+        rview = state.get("residuals_view") or {}
+        if rview.get("x") and rview.get("y"):
+            self.residuals_widget.getPlotItem().setXRange(*rview["x"], padding=0)
+            self.residuals_widget.getPlotItem().setYRange(*rview["y"], padding=0)
+
     def export_plot(self, file_path):
         """
         Export plot to image file

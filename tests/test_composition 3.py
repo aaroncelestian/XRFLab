@@ -13,7 +13,6 @@ from core.composition import (
     convert_values,
     correlation,
     correlation_matrix,
-    numbered_replicate_names,
     oxide_label,
     ratio_points,
     rows_from_batch_results,
@@ -41,19 +40,6 @@ def test_strip_replicate_suffix():
     assert strip_replicate_suffix("B01_a") == "B01"
     assert strip_replicate_suffix("steel_sample") == "steel_sample"
     assert strip_replicate_suffix("Spectrum24") == "Spectrum24"
-
-
-def test_numbered_replicate_names():
-    assert numbered_replicate_names("B01", 1) == ["B01"]
-    assert numbered_replicate_names("B01", 4) == ["B01_1", "B01_2", "B01_3", "B01_4"]
-    assert numbered_replicate_names("B01", 12)[0] == "B01_01"
-    assert numbered_replicate_names("B01", 12)[-1] == "B01_12"
-    assert numbered_replicate_names("", 4) == []
-    assert numbered_replicate_names("B01", 0) == []
-    for name in numbered_replicate_names("Basalt01", 4):
-        assert strip_replicate_suffix(name) == "Basalt01"
-    for name in numbered_replicate_names("Basalt01", 12):
-        assert strip_replicate_suffix(name) == "Basalt01"
 
 
 def test_folder_grouping_20_basalts():
@@ -136,89 +122,6 @@ def test_regex_named_group():
     assign_samples(rows, GroupMode.REGEX, regex=r"^(?P<sample>rock[AB])")
     summaries = summarize_samples(rows)
     assert {s.sample: s.n for s in summaries} == {"rockA": 2, "rockB": 1}
-
-
-def test_sequential_10_samples_3_spots():
-    results = []
-    for i in range(1, 31):
-        results.append(
-            _batch_result(
-                f"Spectrum {i}",
-                f"/project/Spectrum {i}.txt",
-                {"Si": 50.0, "Fe": 10.0 + (i - 1) // 3},
-            )
-        )
-    rows = rows_from_batch_results(results)
-    used = assign_samples(
-        rows, GroupMode.SEQUENTIAL, spots_per_sample=3, n_samples=10
-    )
-    assert used == GroupMode.SEQUENTIAL
-    summaries = summarize_samples(rows)
-    assert [s.sample for s in summaries] == [f"Sample {i:02d}" for i in range(1, 11)]
-    assert all(s.n == 3 for s in summaries)
-    assert {r.name for r in summaries[0].rows} == {
-        "Spectrum 1",
-        "Spectrum 2",
-        "Spectrum 3",
-    }
-    assert {r.name for r in summaries[9].rows} == {
-        "Spectrum 28",
-        "Spectrum 29",
-        "Spectrum 30",
-    }
-
-
-def test_sequential_sorts_by_spectrum_number():
-    """Alphabetical Spectrum 1, 10, 2… still chunks as 1–3, 4–6, …"""
-    order = [1, 10, 11, 12, 2, 3, 4, 5, 6, 7, 8, 9]
-    results = [
-        _batch_result(f"Spectrum {i}", f"/p/Spectrum {i}.txt", {"Si": 1.0})
-        for i in order
-    ]
-    rows = rows_from_batch_results(results)
-    assign_samples(rows, GroupMode.SEQUENTIAL, spots_per_sample=3, n_samples=4)
-    summaries = summarize_samples(rows)
-    assert [s.sample for s in summaries] == [
-        "Sample 01",
-        "Sample 02",
-        "Sample 03",
-        "Sample 04",
-    ]
-    by_sample = {s.sample: {r.name for r in s.rows} for s in summaries}
-    assert by_sample["Sample 01"] == {"Spectrum 1", "Spectrum 2", "Spectrum 3"}
-    assert by_sample["Sample 04"] == {"Spectrum 10", "Spectrum 11", "Spectrum 12"}
-
-
-def test_sequential_leftover_becomes_extra_sample():
-    results = [
-        _batch_result(f"Spectrum {i}", f"/p/{i}.txt", {"Si": 1.0})
-        for i in range(1, 32)
-    ]
-    rows = rows_from_batch_results(results)
-    assign_samples(rows, GroupMode.SEQUENTIAL, spots_per_sample=3, n_samples=10)
-    summaries = summarize_samples(rows)
-    assert len(summaries) == 11
-    assert summaries[-1].sample == "Sample 11"
-    assert summaries[-1].n == 1
-    assert summaries[-1].rows[0].name == "Spectrum 31"
-
-
-def test_sequential_custom_prefix():
-    results = [
-        _batch_result(f"Spectrum {i}", f"/p/{i}.txt", {"Fe": 1.0})
-        for i in range(1, 7)
-    ]
-    rows = rows_from_batch_results(results)
-    assign_samples(
-        rows,
-        GroupMode.SEQUENTIAL,
-        spots_per_sample=2,
-        n_samples=3,
-        prefix="Pellet",
-    )
-    summaries = summarize_samples(rows)
-    assert [s.sample for s in summaries] == ["Pellet 01", "Pellet 02", "Pellet 03"]
-    assert all(s.n == 2 for s in summaries)
 
 
 def test_ternary_vertices():

@@ -154,6 +154,48 @@ class FPQuantResult:
     def formula_summary(self, max_terms: int = 8) -> str:
         return format_formula_wt(self.formula_wt, max_terms=max_terms)
 
+    def to_dict(self) -> dict:
+        residual = float(self.residual)
+        return {
+            "success": bool(self.success),
+            "element_wt": dict(self.element_wt or {}),
+            "formula_wt": dict(self.formula_wt or {}),
+            "concentrations": dict(self.concentrations or {}),
+            "iterations": int(self.iterations),
+            "residual": residual if np.isfinite(residual) else None,
+            "message": self.message,
+            "method": self.method,
+            "lines_used": dict(self.lines_used or {}),
+            "assumptions": (
+                self.assumptions.to_dict() if self.assumptions is not None else None
+            ),
+            "measured_cation_pct": float(self.measured_cation_pct),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> Optional["FPQuantResult"]:
+        if not data:
+            return None
+        residual = data.get("residual")
+        if residual is None:
+            residual = float("inf")
+        assumptions = data.get("assumptions")
+        if isinstance(assumptions, dict):
+            assumptions = MatrixAssumptions.from_dict(assumptions)
+        return cls(
+            success=bool(data.get("success", False)),
+            element_wt=dict(data.get("element_wt") or {}),
+            formula_wt=dict(data.get("formula_wt") or {}),
+            concentrations=dict(data.get("concentrations") or {}),
+            iterations=int(data.get("iterations") or 0),
+            residual=float(residual),
+            message=str(data.get("message") or ""),
+            method=str(data.get("method") or "fp_matrix"),
+            lines_used=dict(data.get("lines_used") or {}),
+            assumptions=assumptions,
+            measured_cation_pct=float(data.get("measured_cation_pct") or 0.0),
+        )
+
 
 def _concentrations_dict(
     element_wt: Dict[str, float],

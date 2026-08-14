@@ -24,6 +24,59 @@ class FitResult:
     def __post_init__(self):
         if self.tube_overlap_flags is None:
             self.tube_overlap_flags = []
+
+    def to_dict(self, include_arrays: bool = False) -> dict:
+        """Serialize fit metadata; arrays are optional (HDF5 stores them separately)."""
+        peaks = []
+        for p in self.peaks or []:
+            if hasattr(p, "to_dict"):
+                peaks.append(p.to_dict())
+            elif isinstance(p, dict):
+                peaks.append(p)
+        data = {
+            "peaks": peaks,
+            "statistics": dict(self.statistics or {}),
+            "tube_overlap_flags": list(self.tube_overlap_flags or []),
+        }
+        if include_arrays:
+            data["background"] = np.asarray(self.background).tolist()
+            data["fitted_spectrum"] = np.asarray(self.fitted_spectrum).tolist()
+            data["residuals"] = np.asarray(self.residuals).tolist()
+        return data
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+        *,
+        background=None,
+        fitted_spectrum=None,
+        residuals=None,
+    ) -> "FitResult":
+        from core.peak_fitting import Peak as PeakType
+
+        peaks = []
+        for p in data.get("peaks") or []:
+            if isinstance(p, PeakType):
+                peaks.append(p)
+            elif isinstance(p, dict):
+                peaks.append(PeakType.from_dict(p))
+        if background is None and data.get("background") is not None:
+            background = np.asarray(data["background"], dtype=np.float64)
+        if fitted_spectrum is None and data.get("fitted_spectrum") is not None:
+            fitted_spectrum = np.asarray(data["fitted_spectrum"], dtype=np.float64)
+        if residuals is None and data.get("residuals") is not None:
+            residuals = np.asarray(data["residuals"], dtype=np.float64)
+        return cls(
+            background=np.asarray(background if background is not None else []),
+            fitted_spectrum=np.asarray(
+                fitted_spectrum if fitted_spectrum is not None else []
+            ),
+            residuals=np.asarray(residuals if residuals is not None else []),
+            peaks=peaks,
+            statistics=dict(data.get("statistics") or {}),
+            tube_overlap_flags=list(data.get("tube_overlap_flags") or []),
+        )
     
     def __str__(self):
         return (f"Fit Result: {len(self.peaks)} peaks, "
@@ -93,6 +146,8 @@ class SpectrumFitter:
         """
         peak_positions = []
         elements = self._element_dicts(elements)
+        e_lo = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
+        e_hi = float(energy[-1])
 
         if elements:
             print(f"Using emission lines from {len(elements)} elements...")
@@ -115,7 +170,7 @@ class SpectrumFitter:
                             line_energy = line['energy']
 
                             if line_name in major_lines.get(series, []):
-                                if energy[0] <= line_energy <= energy[-1]:
+                                if e_lo <= line_energy <= e_hi:
                                     peak_positions.append({
                                         'energy': line_energy,
                                         'element': symbol,
@@ -133,7 +188,7 @@ class SpectrumFitter:
                     line_energy = line['energy']
 
                     if series == 'K' and line_name in ['Kα1', 'Kα2', 'Kβ1']:
-                        if energy[0] <= line_energy <= energy[-1]:
+                        if e_lo <= line_energy <= e_hi:
                             peak_positions.append({
                                 'energy': line_energy,
                                 'element': tube_element,
@@ -141,7 +196,7 @@ class SpectrumFitter:
                                 'is_tube_line': True
                             })
                     elif series == 'L' and line_name in ['Lα1', 'Lβ1']:
-                        if energy[0] <= line_energy <= energy[-1]:
+                        if e_lo <= line_energy <= e_hi:
                             peak_positions.append({
                                 'energy': line_energy,
                                 'element': tube_element,
@@ -168,7 +223,7 @@ class SpectrumFitter:
                 )
                 n_c = 0
                 for c in compton_lines:
-                    if energy[0] <= c['energy'] <= energy[-1]:
+                    if e_lo <= c['energy'] <= e_hi:
                         peak_positions.append(c)
                         n_c += 1
                 if n_c:
@@ -263,6 +318,7 @@ class SpectrumFitter:
                    if p.get('exclusion_half_width_kev') is not None else {}),
             }
             for p in (peak_positions or [])
+            if float(p.get('energy', 0.0)) >= PeakFitter.MIN_PEAK_ENERGY_KEV
         ]
 
         # Drop prior sample labels so unchecked elements cannot stick around
@@ -292,7 +348,7 @@ class SpectrumFitter:
 
         n_labeled = 0
         n_added = 0
-        e_min = float(energy[0])
+        e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
         e_max = float(energy[-1])
 
         for elem in elements:
@@ -368,7 +424,7 @@ class SpectrumFitter:
             scatter_angle_deg=scatter_angle_deg,
             fwhm_kev=compton_fwhm_kev,
         )
-        e_min = float(energy[0])
+        e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
         e_max = float(energy[-1])
         n_added = 0
         for c in compton_lines:
@@ -436,6 +492,7 @@ class SpectrumFitter:
                        if p.get('exclusion_half_width_kev') is not None else {}),
                 }
                 for p in peak_positions
+                if float(p['energy']) >= PeakFitter.MIN_PEAK_ENERGY_KEV
             ]
             print(f"Using {len(peak_positions)} caller-provided peak positions...")
             # Peak-find lists are mostly unlabeled; fold in Elements-tab selection

@@ -587,3 +587,59 @@ class ResultsPanel(QWidget):
         }
         self.results_data.append(result)
         self.set_results(self.results_data)
+
+    def set_matrix_assumptions(self, assumptions: MatrixAssumptions) -> None:
+        """Restore matrix knobs without emitting a live FP recompute."""
+        if assumptions is None:
+            return
+        kind = assumptions.kind
+        kind_val = kind.value if isinstance(kind, MatrixKind) else str(kind)
+        self._updating_controls = True
+        try:
+            idx = self.matrix_combo.findData(kind_val)
+            if idx < 0:
+                idx = self.matrix_combo.findText(str(kind_val))
+            if idx >= 0:
+                self.matrix_combo.setCurrentIndex(idx)
+            if assumptions.fe_as:
+                self.fe_combo.setCurrentText(str(assumptions.fe_as))
+            self.h2o_spin.setValue(float(assumptions.h2o_wt))
+            self.oh_spin.setValue(float(assumptions.oh_wt))
+            self.co2_spin.setValue(float(assumptions.co2_wt))
+        finally:
+            self._updating_controls = False
+        self._refresh_matrix_hint()
+
+    def capture_state(self) -> dict:
+        assumptions = self.get_matrix_assumptions()
+        return {
+            "matrix": assumptions.to_dict(),
+            "fp_live": bool(self._fp_live),
+            "results_data": list(self.results_data or []),
+            "peaks_text": self.peaks_text.toPlainText(),
+            "formula_text": (
+                self.formula_label.text() if hasattr(self, "formula_label") else ""
+            ),
+            "empirical": (
+                self.formula_empirical.text()
+                if hasattr(self, "formula_empirical")
+                else ""
+            ),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        if not state:
+            return
+        matrix = state.get("matrix")
+        if matrix:
+            self.set_matrix_assumptions(MatrixAssumptions.from_dict(matrix))
+        self.set_fp_live(bool(state.get("fp_live", False)))
+        if state.get("results_data"):
+            self.set_results(list(state["results_data"]))
+        if state.get("peaks_text"):
+            self.peaks_text.setPlainText(str(state["peaks_text"]))
+        empirical = state.get("empirical") or ""
+        if empirical.startswith("Formula:"):
+            empirical = empirical.split(":", 1)[-1].strip()
+        if hasattr(self, "formula_label") and state.get("formula_text"):
+            self.set_formula_summary(str(state["formula_text"]), empirical=empirical)

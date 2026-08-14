@@ -267,6 +267,32 @@ def test_auto_id_peak_positions():
     assert labeled[0]["element"] == "Fe"
     assert labeled[2]["is_tube_line"] is True
     assert summary and "Auto-ID" in summary[0]
+    fe_kb = [
+        p for p in labeled
+        if p.get("element") == "Fe" and p.get("line") and "β" in p["line"]
+    ]
+    assert fe_kb, "Fe Kβ should be added even without a detected peak"
+    assert fe_kb[0].get("inferred") is True
+
+
+def test_auto_id_adds_companion_lines_below_threshold():
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": 6.403, "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, summary = auto_id_peak_positions(peaks)
+    assert "Fe" in symbols
+    lines = {(p.get("element"), p.get("line")) for p in labeled}
+    assert ("Fe", "Kα1") in lines or ("Fe", "Kα") in lines
+    assert any(el == "Fe" and line and "β" in line for el, line in lines)
+    inferred = [p for p in labeled if p.get("inferred")]
+    assert inferred
+    assert any("expected line" in s for s in summary)
+    assert not any(
+        p.get("element") == "Fe" and p.get("line", "").startswith("L")
+        for p in labeled
+    )
 
 
 def test_pb_m_alpha_weaker_than_l_alpha():
@@ -305,6 +331,11 @@ def test_auto_id_pb_requires_l_alpha():
     assert "Lα" in labeled[0]["line"]
     assert labeled[1]["element"] == "Pb"
     assert labeled[1]["line"].startswith("M")
+    pb_lb = [
+        p for p in labeled
+        if p.get("element") == "Pb" and p.get("line") and "Lβ" in p["line"]
+    ]
+    assert pb_lb, "Pb Lβ should be shown even if it was below the peak-find threshold"
 
 
 def test_batch_processor_in_memory_spectrum(io_handler):
@@ -326,6 +357,57 @@ def test_batch_processor_in_memory_spectrum(io_handler):
     assert len(results) == 1
     assert results[0].spectrum_name == "steel_in_memory"
     assert results[0].fit_success or results[0].error_message
+
+
+def test_sanitize_sample_name():
+    from core.batch_processing import sanitize_sample_name
+
+    assert sanitize_sample_name("  Basalt 01  ") == "Basalt 01"
+    assert sanitize_sample_name('a/b:c*d') == "a_b_c_d"
+    assert sanitize_sample_name("...") == ""
+
+
+def test_rename_files_in_place(tmp_path):
+    from core.batch_processing import rename_files_in_place
+
+    a = tmp_path / "scan001.txt"
+    b = tmp_path / "scan002.txt"
+    a.write_text("one")
+    b.write_text("two")
+    rename_files_in_place(
+        [(a, tmp_path / "Basalt01_1.txt"), (b, tmp_path / "Basalt01_2.txt")]
+    )
+    assert (tmp_path / "Basalt01_1.txt").read_text() == "one"
+    assert (tmp_path / "Basalt01_2.txt").read_text() == "two"
+    assert not a.exists()
+    assert not b.exists()
+
+
+def test_rename_files_in_place_swap(tmp_path):
+    from core.batch_processing import rename_files_in_place
+
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("A")
+    b.write_text("B")
+    rename_files_in_place([(a, tmp_path / "b.txt"), (b, tmp_path / "a.txt")])
+    assert (tmp_path / "a.txt").read_text() == "B"
+    assert (tmp_path / "b.txt").read_text() == "A"
+
+
+def test_rename_files_in_place_collision(tmp_path):
+    from core.batch_processing import rename_files_in_place
+
+    src = tmp_path / "scan.txt"
+    other = tmp_path / "taken.txt"
+    src.write_text("data")
+    other.write_text("nope")
+    try:
+        rename_files_in_place([(src, other)])
+        raise AssertionError("expected FileExistsError")
+    except FileExistsError:
+        pass
+    assert src.read_text() == "data"
 
 
 def test_mapping_project_spectra_only_helpers():
@@ -364,3 +446,75 @@ def test_mapping_project_spectra_only_helpers():
     mapped_project = MappingProject(path="maps.ipj", fovs=[mapped])
     assert mapped_project.has_spatial_data()
     assert not mapped_project.is_spectra_only()
+
+
+def test_find_fov_for_multipoint_spectrum():
+    from core.mapping.models import LineScan, MappingFOV, MappingProject, MapSpectrum
+    from core.spectrum import Spectrum
+
+    energy = np.linspace(0.0, 10.0, 64)
+    points = [
+        MapSpectrum(
+            spectrum=Spectrum(energy=energy, counts=np.ones(64) * (i + 1)),
+            name=f"Pt {i}",
+            x=float(i),
+            y=0.0,
+            index=i,
+            kind="line_point",
+        )
+        for i in range(3)
+    ]
+    series = LineScan(name="Multipoint 1", points=points, kind="multipoint")
+    site = MappingFOV(id="s1", name="Site 1", line_scans=[series])
+    project = MappingProject(path="multi.ipj", fovs=[site])
+
+    found = project.find_fov_for_spectrum(points[1])
+    assert found is site
+    assert project.find_fov_for_spectrum(points[0]) is site
+
+
+def test_find_peaks_rejects_below_min_energy():
+    from core.peak_fitting import PeakFitter
+
+    energy = np.linspace(-0.40, 2.0, 241)
+    counts = np.zeros_like(energy)
+    # Electronic zero/noise near 0 keV, C Kα, Na Kα
+    for e0, amp, sig in ((0.00, 800.0, 0.04), (0.277, 200.0, 0.04), (1.041, 300.0, 0.04)):
+        counts += amp * np.exp(-((energy - e0) ** 2) / (2 * sig**2))
+
+    peaks = PeakFitter.find_peaks(energy, counts, prominence=20)
+    peak_e = [e for e, _ in peaks]
+    assert all(e >= PeakFitter.MIN_PEAK_ENERGY_KEV for e in peak_e)
+    assert not any(e < 0.17 for e in peak_e)
+    assert any(abs(e - 0.277) < 0.05 for e in peak_e)
+    assert any(abs(e - 1.041) < 0.05 for e in peak_e)
+
+
+def test_fit_single_peak_rejects_below_min_energy():
+    from core.peak_fitting import PeakFitter
+
+    energy = np.linspace(-0.2, 0.4, 120)
+    counts = 500.0 * np.exp(-((energy - 0.05) ** 2) / (2 * 0.03**2))
+    assert PeakFitter.fit_single_peak(energy, counts, 0.05) is None
+
+
+def test_build_peak_positions_keeps_c_drops_be():
+    from core.fitting import SpectrumFitter
+
+    energy = np.linspace(-0.40, 5.0, 540)
+    counts = np.ones_like(energy)
+    fitter = SpectrumFitter()
+    positions = fitter.build_peak_positions(
+        energy,
+        counts_bg_subtracted=counts,
+        elements=["Be", "C", "Na"],
+        auto_find_peaks=False,
+        include_tube_lines=False,
+        include_compton=False,
+        tube_element=None,
+    )
+    symbols = {p["element"] for p in positions if p.get("element")}
+    assert "Be" not in symbols
+    assert "C" in symbols
+    assert "Na" in symbols
+    assert all(p["energy"] >= 0.17 for p in positions)

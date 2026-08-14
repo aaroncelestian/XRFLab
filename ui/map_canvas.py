@@ -223,13 +223,25 @@ class MapCanvas(QWidget):
         title: str = "",
         auto_levels: bool = True,
         display: Optional[np.ndarray] = None,
+        reset_view: bool = False,
     ) -> None:
         """Single-panel mode (overview, RGB, or one map).
 
         ``data`` defines the click/line coordinate grid. ``display`` may be a
         finer interpolated image; it is stretched to the original map size.
+
+        When ``reset_view`` is False (default) and the coordinate grid size is
+        unchanged, the current zoom/pan is kept (e.g. opacity slider updates).
         """
         self._rgb_mode = rgb
+        prev_range = None
+        prev_shape = None
+        if self._panels and self._primary_data is not None:
+            prev_shape = tuple(self._primary_data.shape[:2])
+            try:
+                prev_range = self._panels[0]["view"].viewRange()
+            except Exception:
+                prev_range = None
         self._ensure_panel_count(1)
         panel = self._panels[0]
         arr = np.asarray(data)
@@ -270,7 +282,17 @@ class MapCanvas(QWidget):
         panel["label"].setText(panel["title"])
         h, w = self._primary_data.shape[:2]
         self._fit_image_rect(panel, w, h)
-        panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
+        keep_view = (
+            not reset_view
+            and prev_range is not None
+            and prev_shape == (h, w)
+        )
+        if keep_view:
+            panel["view"].setRange(
+                xRange=prev_range[0], yRange=prev_range[1], padding=0.0
+            )
+        else:
+            panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
         self._restore_overlays()
 
     def set_images(
@@ -278,6 +300,7 @@ class MapCanvas(QWidget):
         panels: Sequence[tuple],
         *,
         auto_levels: bool = True,
+        reset_view: bool = False,
     ) -> None:
         """
         Multi-panel subplot mode.
@@ -295,11 +318,24 @@ class MapCanvas(QWidget):
             items.append((title, data, shown))
         if not items:
             return
+
+        prev_ranges = []
+        for panel in self._panels:
+            try:
+                prev_ranges.append(panel["view"].viewRange())
+            except Exception:
+                prev_ranges.append(None)
+        prev_primary = (
+            tuple(self._primary_data.shape[:2])
+            if self._primary_data is not None
+            else None
+        )
+
         self._rgb_mode = False
         self._ensure_panel_count(len(items))
         self._primary_data = items[0][1]
 
-        for panel, (title, data, shown) in zip(self._panels, items):
+        for i, (panel, (title, data, shown)) in enumerate(zip(self._panels, items)):
             panel["title"] = title
             panel["data"] = data
             panel["label"].setText(title)
@@ -312,7 +348,20 @@ class MapCanvas(QWidget):
             )
             h, w = data.shape[:2]
             self._fit_image_rect(panel, w, h)
-            panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
+            keep = (
+                not reset_view
+                and prev_primary == (h, w)
+                and i < len(prev_ranges)
+                and prev_ranges[i] is not None
+            )
+            if keep:
+                panel["view"].setRange(
+                    xRange=prev_ranges[i][0],
+                    yRange=prev_ranges[i][1],
+                    padding=0.0,
+                )
+            else:
+                panel["view"].setRange(QRectF(0, 0, w, h), padding=0.02)
 
         # Link all viewboxes to the first
         master = self._panels[0]["view"]

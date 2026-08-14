@@ -653,6 +653,10 @@ class ElementPanel(QWidget):
                     entry['exclusion_half_width_kev'] = float(
                         p['exclusion_half_width_kev']
                     )
+                if p.get('inferred'):
+                    entry['inferred'] = True
+                if p.get('relative_intensity') is not None:
+                    entry['relative_intensity'] = float(p['relative_intensity'])
             self._peak_list_data.append(entry)
             self.peak_list_widget.addItem(self._format_peak_item(entry))
 
@@ -680,6 +684,8 @@ class ElementPanel(QWidget):
         tags = []
         if is_tube:
             tags.append("tube")
+        if entry.get('inferred'):
+            tags.append("expected")
         if fixed is not None:
             tags.append(f"wide {fixed*1000:.0f} eV")
         tag_txt = f" [{', '.join(tags)}]" if tags else ""
@@ -732,7 +738,7 @@ class ElementPanel(QWidget):
         self._drop_unselected_peak_labels()
 
     def _drop_unselected_peak_labels(self):
-        """Unlabeled peak-list rows for elements the user just unchecked."""
+        """Drop labels (and expected seeds) for elements the user just unchecked."""
         if not getattr(self, "_peak_list_data", None):
             return
         if not hasattr(self, "peak_list_widget"):
@@ -743,16 +749,24 @@ class ElementPanel(QWidget):
             if e.get("symbol")
         }
         changed = False
+        kept = []
         for entry in self._peak_list_data:
             if entry.get("is_tube_line"):
+                kept.append(entry)
                 continue
             el = entry.get("element")
             if el and el not in allowed:
+                if entry.get("inferred"):
+                    changed = True
+                    continue
                 entry["element"] = None
                 entry["line"] = None
+                entry.pop("relative_intensity", None)
                 changed = True
+            kept.append(entry)
         if not changed:
             return
+        self._peak_list_data = kept
         self.peak_list_widget.clear()
         for entry in self._peak_list_data:
             self.peak_list_widget.addItem(self._format_peak_item(entry))
@@ -998,3 +1012,95 @@ class ElementPanel(QWidget):
             'fwhm_excess_ev': self.fwhm_excess_spin.value(),
             'smart_id_apply': self.smart_id_apply_check.isChecked(),
         }
+
+    def capture_state(self) -> dict:
+        """Snapshot of Sample / Peak Find / Elements / Fitting controls."""
+        symbols = []
+        for item in self.selected_elements or []:
+            if isinstance(item, dict):
+                sym = item.get("symbol")
+            else:
+                sym = item
+            if sym:
+                symbols.append(str(sym))
+        return {
+            "sample_name": self.sample_name_edit.text(),
+            "sample_type": self.sample_type_combo.currentText(),
+            "thickness": float(self.thickness_spin.value()),
+            "experimental": self.get_experimental_params(),
+            "selected_elements": symbols,
+            "peak_list": list(self._peak_list_data or []),
+            "background": self.background_combo.currentText(),
+            "peak_shape": self.peak_shape_combo.currentText(),
+            "escape_peaks": self.escape_peaks_check.isChecked(),
+            "pileup": self.pileup_check.isChecked(),
+            "tube_lines": self.tube_lines_check.isChecked(),
+            "tube_element": self.tube_element_combo.currentText(),
+            "compton": self.compton_check.isChecked(),
+            "scatter_angle": float(self.scatter_angle_spin.value()),
+            "compton_fwhm_ev": float(self.compton_fwhm_spin.value()),
+            "auto_find": self.auto_find_check.isChecked(),
+            "prominence": float(self.prominence_spin.value()),
+            "min_height": float(self.min_height_spin.value()),
+            "min_separation_ev": float(self.min_separation_spin.value()),
+            "show_markers": self.show_markers_check.isChecked(),
+            "use_peak_list": self.use_peak_list_check.isChecked(),
+            "auto_id": bool(
+                hasattr(self, "auto_id_check") and self.auto_id_check.isChecked()
+            ),
+            "smart_id": self.smart_id_check.isChecked(),
+            "fwhm_excess_ev": float(self.fwhm_excess_spin.value()),
+            "smart_id_apply": self.smart_id_apply_check.isChecked(),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        if not state:
+            return
+        self.sample_name_edit.setText(str(state.get("sample_name") or ""))
+        sample_type = state.get("sample_type")
+        if sample_type:
+            self.sample_type_combo.setCurrentText(str(sample_type))
+        if state.get("thickness") is not None:
+            self.thickness_spin.setValue(float(state["thickness"]))
+        exp = state.get("experimental") or {}
+        if "excitation_energy" in exp:
+            self.excitation_spin.setValue(float(exp["excitation_energy"]))
+        if "tube_current" in exp:
+            self.current_spin.setValue(float(exp["tube_current"]))
+        if "live_time" in exp:
+            self.live_time_spin.setValue(float(exp["live_time"]))
+        if exp.get("detector_type"):
+            self.detector_combo.setCurrentText(str(exp["detector_type"]))
+        if "incident_angle" in exp:
+            self.angle_spin.setValue(float(exp["incident_angle"]))
+        self.set_selected_elements(state.get("selected_elements") or [])
+        if state.get("background"):
+            self.background_combo.setCurrentText(str(state["background"]))
+        if state.get("peak_shape"):
+            self.peak_shape_combo.setCurrentText(str(state["peak_shape"]))
+        self.escape_peaks_check.setChecked(bool(state.get("escape_peaks", True)))
+        self.pileup_check.setChecked(bool(state.get("pileup", False)))
+        self.tube_lines_check.setChecked(bool(state.get("tube_lines", True)))
+        if state.get("tube_element"):
+            self.tube_element_combo.setCurrentText(str(state["tube_element"]))
+        self.compton_check.setChecked(bool(state.get("compton", True)))
+        if state.get("scatter_angle") is not None:
+            self.scatter_angle_spin.setValue(float(state["scatter_angle"]))
+        if state.get("compton_fwhm_ev") is not None:
+            self.compton_fwhm_spin.setValue(float(state["compton_fwhm_ev"]))
+        self.auto_find_check.setChecked(bool(state.get("auto_find", True)))
+        if state.get("prominence") is not None:
+            self.prominence_spin.setValue(float(state["prominence"]))
+        if state.get("min_height") is not None:
+            self.min_height_spin.setValue(float(state["min_height"]))
+        if state.get("min_separation_ev") is not None:
+            self.min_separation_spin.setValue(float(state["min_separation_ev"]))
+        self.show_markers_check.setChecked(bool(state.get("show_markers", True)))
+        if hasattr(self, "auto_id_check"):
+            self.auto_id_check.setChecked(bool(state.get("auto_id", True)))
+        self.smart_id_check.setChecked(bool(state.get("smart_id", True)))
+        if state.get("fwhm_excess_ev") is not None:
+            self.fwhm_excess_spin.setValue(float(state["fwhm_excess_ev"]))
+        self.smart_id_apply_check.setChecked(bool(state.get("smart_id_apply", False)))
+        peaks = state.get("peak_list") or []
+        self.set_peak_list(peaks, enable_use_list=bool(state.get("use_peak_list")))

@@ -302,3 +302,10 @@ class TubeProfilePanel(QWidget):
 
     def get_library(self) -> TubeProfileLibrary:
         return self.library
+
+    def restore_library(self, library: TubeProfileLibrary) -> None:
+        """Install a tube-profile library from a project file (no AppData write)."""
+        if library is None:
+            return
+        self.library = library
+        self._refresh_status()

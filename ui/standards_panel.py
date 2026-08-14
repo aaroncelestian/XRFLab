@@ -1249,3 +1249,15 @@ class StandardsPanel(QWidget):
                     "Load Error",
                     f"Failed to load calibration:\n{str(e)}"
                 )
+
+    def restore_calibration(self, result) -> None:
+        """Install a standards calibration from a project file (no AppData write)."""
+        self.calibration_result = result
+        if result is None:
+            return
+        self.apply_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+        try:
+            self._display_calibration_results(result)
+        except Exception:
+            pass

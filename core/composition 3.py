@@ -71,7 +71,6 @@ class GroupMode(str, Enum):
     FOLDER = "folder"
     PREFIX = "prefix"
     REGEX = "regex"
-    SEQUENTIAL = "sequential"
     NONE = "none"
 
 
@@ -85,29 +84,6 @@ class CompositionRow:
     values: Dict[str, float]
     success: bool = True
     metadata: Dict[str, object] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "source_id": self.source_id,
-            "sample": self.sample,
-            "values": {str(k): float(v) for k, v in (self.values or {}).items()},
-            "success": bool(self.success),
-            "metadata": dict(self.metadata or {}),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "CompositionRow":
-        return cls(
-            name=str(data.get("name") or ""),
-            source_id=str(data.get("source_id") or ""),
-            sample=str(data.get("sample") or data.get("name") or ""),
-            values={
-                str(k): float(v) for k, v in (data.get("values") or {}).items()
-            },
-            success=bool(data.get("success", True)),
-            metadata=dict(data.get("metadata") or {}),
-        )
 
 
 @dataclass
@@ -162,23 +138,6 @@ def strip_replicate_suffix(stem: str) -> str:
     return text
 
 
-def numbered_replicate_names(base: str, count: int, start: int = 1) -> List[str]:
-    """Build ``Name`` (count=1) or ``Name_1`` … ``Name_n`` (padded when n >= 10).
-
-    These names round-trip through ``strip_replicate_suffix``, so Composition
-    can group the spots as one sample.
-    """
-    base = str(base).strip()
-    count = int(count)
-    if count <= 0 or not base:
-        return []
-    if count == 1:
-        return [base]
-    last = int(start) + count - 1
-    width = len(str(last))
-    return [f"{base}_{i:0{width}d}" for i in range(int(start), last + 1)]
-
-
 def sample_from_folder(source_id: str, fallback: str) -> str:
     path = Path(source_id)
     parent = path.parent.name if path.parent.name else ""
@@ -200,67 +159,6 @@ def sample_from_regex(name: str, pattern: str) -> Optional[str]:
     if match.lastindex and match.group(1):
         return match.group(1).strip()
     return None
-
-
-_TRAILING_INDEX = re.compile(r"(\d+)\s*$")
-
-
-def _trailing_index(text: str) -> Optional[int]:
-    match = _TRAILING_INDEX.search(str(text).strip())
-    return int(match.group(1)) if match else None
-
-
-def _natural_key(text: str):
-    parts = re.split(r"(\d+)", str(text).lower())
-    return [int(p) if p.isdigit() else p for p in parts]
-
-
-def sequential_sample_name(index: int, n_groups: int, prefix: str = "Sample") -> str:
-    """1-based sample label, zero-padded (Sample 01 … Sample 10)."""
-    width = max(2, len(str(max(int(n_groups), 1))))
-    label = f"{int(index):0{width}d}"
-    prefix = str(prefix or "").strip()
-    return f"{prefix} {label}".strip() if prefix else label
-
-
-def assign_sequential(
-    rows: Sequence[CompositionRow],
-    spots_per_sample: int,
-    n_samples: Optional[int] = None,
-    prefix: str = "Sample",
-) -> None:
-    """
-    Chunk spectra in collection order into N samples × M spots.
-
-    Order is trailing Spectrum N when every name has one (so Spectrum 10
-    follows Spectrum 9, not Spectrum 1). Otherwise list order is kept.
-    Extra spectra past N×M become additional samples.
-    """
-    spots = max(1, int(spots_per_sample or 1))
-    n = len(rows)
-    if n == 0:
-        return
-
-    keys: List[Optional[int]] = []
-    for row in rows:
-        idx = _trailing_index(row.name)
-        if idx is None:
-            idx = _trailing_index(Path(row.source_id).stem if row.source_id else "")
-        keys.append(idx)
-    if all(k is not None for k in keys):
-        order = sorted(range(n), key=lambda i: (keys[i], i))
-    else:
-        order = list(range(n))
-
-    n_groups = max(1, (n + spots - 1) // spots)
-    if n_samples and int(n_samples) > 0:
-        n_groups = max(n_groups, int(n_samples))
-
-    for rank, row_i in enumerate(order):
-        sample_i = rank // spots
-        rows[row_i].sample = sequential_sample_name(
-            sample_i + 1, n_groups, prefix
-        )
 
 
 def resolve_group_mode(rows: Sequence[CompositionRow], mode: GroupMode) -> GroupMode:
@@ -285,21 +183,9 @@ def assign_samples(
     rows: Sequence[CompositionRow],
     mode: GroupMode = GroupMode.AUTO,
     regex: str = DEFAULT_GROUP_REGEX,
-    *,
-    spots_per_sample: int = 1,
-    n_samples: Optional[int] = None,
-    prefix: str = "Sample",
 ) -> GroupMode:
     """Set row.sample from path/name. Returns the mode actually used."""
     used = resolve_group_mode(rows, mode)
-    if used == GroupMode.SEQUENTIAL:
-        assign_sequential(
-            rows,
-            spots_per_sample=spots_per_sample,
-            n_samples=n_samples,
-            prefix=prefix,
-        )
-        return used
     for row in rows:
         stem = Path(row.source_id).stem if row.source_id else row.name
         if used == GroupMode.NONE:
@@ -321,7 +207,7 @@ def group_counts(rows: Sequence[CompositionRow]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for row in rows:
         counts[row.sample] = counts.get(row.sample, 0) + 1
-    return dict(sorted(counts.items(), key=lambda kv: _natural_key(kv[0])))
+    return dict(sorted(counts.items(), key=lambda kv: kv[0].lower()))
 
 
 def all_elements(rows: Sequence[CompositionRow]) -> List[str]:
@@ -344,7 +230,7 @@ def summarize_samples(
         buckets.setdefault(row.sample, []).append(row)
 
     summaries: List[SampleSummary] = []
-    for sample in sorted(buckets.keys(), key=_natural_key):
+    for sample in sorted(buckets.keys(), key=str.lower):
         members = buckets[sample]
         elements = all_elements(members)
         mean: Dict[str, float] = {}

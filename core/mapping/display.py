@@ -372,6 +372,41 @@ def overlay_on_photo(
     return out
 
 
+def embed_map_on_photo(
+    src: np.ndarray,
+    photo_hw: Tuple[int, int],
+    dest_rect: Optional[Tuple[float, float, float, float]] = None,
+) -> np.ndarray:
+    """
+    Resize a 2D map onto a photo-sized canvas.
+
+    Used so sample-camera overlays keep the photo's native aspect while
+    cursor coordinates still carry map values inside ``dest_rect``.
+    """
+    h, w = int(photo_hw[0]), int(photo_hw[1])
+    arr = np.asarray(src, dtype=np.float64)
+    if arr.ndim > 2:
+        arr = arr[:, :, 0]
+    if h <= 0 or w <= 0:
+        raise ValueError("embed_map_on_photo requires a positive photo size")
+    if dest_rect is None:
+        return resize_to(arr, h, w, order=0)
+    x0 = int(np.floor(min(dest_rect[0], dest_rect[2])))
+    x1 = int(np.ceil(max(dest_rect[0], dest_rect[2])))
+    y0 = int(np.floor(min(dest_rect[1], dest_rect[3])))
+    y1 = int(np.ceil(max(dest_rect[1], dest_rect[3])))
+    x0 = int(np.clip(x0, 0, w))
+    x1 = int(np.clip(x1, 0, w))
+    y0 = int(np.clip(y0, 0, h))
+    y1 = int(np.clip(y1, 0, h))
+    out = np.zeros((h, w), dtype=np.float64)
+    rh, rw = y1 - y0, x1 - x0
+    if rh < 1 or rw < 1:
+        return out
+    out[y0:y1, x0:x1] = resize_to(arr, rh, rw, order=0)
+    return out
+
+
 def format_acquisition(meta: Optional[dict]) -> str:
     """One- or two-line summary of map live time, dwell, and tube settings."""
     if not meta:

@@ -151,6 +151,129 @@ def _primary_lines(line_map: Dict[str, float]) -> List[Tuple[str, float]]:
     return found
 
 
+# Major lines shown/seeded once an element is identified (even if undetected)
+_MAJOR_LINE_NAMES = {
+    'K': {'Kα1', 'Kα2', 'Kα', 'Kβ1', 'Kβ'},
+    'L': {'Lα1', 'Lα2', 'Lα', 'Lβ1', 'Lβ2', 'Lβ'},
+    'M': {'Mα1', 'Mα2', 'Mα'},
+}
+
+
+def _line_relative_intensities(symbol: str, z: int) -> Dict[str, float]:
+    """Map line name -> element-wide relative intensity (0–1)."""
+    out: Dict[str, float] = {}
+    lines = get_element_lines(symbol, z)
+    for series in ('K', 'L', 'M'):
+        for line in lines.get(series, []) or []:
+            name = line.get('name')
+            if not name:
+                continue
+            out[str(name)] = float(line.get('relative_intensity', 1.0) or 1.0)
+    return out
+
+
+def _major_lines_in_range(
+    symbol: str,
+    z: int,
+    e_min_kev: float,
+    e_max_kev: float,
+) -> List[Tuple[str, float, float]]:
+    """Return [(name, energy, relative_intensity), ...] for major lines in range."""
+    lines = get_element_lines(symbol, z)
+    found: List[Tuple[str, float, float]] = []
+    for series in ('K', 'L', 'M'):
+        allowed = _MAJOR_LINE_NAMES.get(series, set())
+        for line in lines.get(series, []) or []:
+            name = line.get('name')
+            if name not in allowed:
+                continue
+            energy = float(line.get('energy', 0.0))
+            if energy < e_min_kev or energy > e_max_kev:
+                continue
+            rel = float(line.get('relative_intensity', 1.0) or 1.0)
+            found.append((str(name), energy, rel))
+    return found
+
+
+def add_missing_element_lines(
+    positions: Sequence[dict],
+    identified: Sequence[str],
+    symbol_z: Dict[str, int],
+    energy_tol_kev: float = 0.080,
+    e_min_kev: float = PeakFitter.MIN_PEAK_ENERGY_KEV,
+    e_max_kev: float = 40.0,
+) -> Tuple[List[dict], int]:
+    """
+    Append theoretical seeds for identified-element lines with no nearby peak.
+
+    Used after peak-find auto-ID so e.g. Fe Kβ is shown (and available to Fit)
+    even when it is below the detection threshold. Only major lines in a
+    series that was already identified (K if Kα was found) are added.
+    """
+    out = [dict(p) for p in (positions or [])]
+    n_added = 0
+    if not identified:
+        return out, n_added
+
+    def _series_of(line_name: str) -> str:
+        if not line_name:
+            return ''
+        if line_name.startswith('K'):
+            return 'K'
+        if line_name.startswith('L'):
+            return 'L'
+        if line_name.startswith('M'):
+            return 'M'
+        return ''
+
+    for symbol in identified:
+        z = symbol_z.get(symbol)
+        if not z:
+            continue
+        observed_series = {
+            _series_of(p.get('line'))
+            for p in out
+            if p.get('element') == symbol and p.get('line') and not p.get('is_tube_line')
+        }
+        observed_series.discard('')
+        if not observed_series:
+            continue
+        for line_name, line_e, rel in _major_lines_in_range(
+            symbol, int(z), e_min_kev, e_max_kev
+        ):
+            if _series_of(line_name) not in observed_series:
+                continue
+            near = False
+            for pos in out:
+                if pos.get('is_tube_line'):
+                    continue
+                if abs(float(pos.get('energy', 0.0)) - line_e) <= energy_tol_kev:
+                    near = True
+                    if pos.get('element') == symbol and not pos.get('line'):
+                        pos['line'] = line_name
+                    if pos.get('element') == symbol and pos.get('line') == line_name:
+                        pos.setdefault('relative_intensity', rel)
+                    break
+            if near:
+                continue
+            already = any(
+                p.get('element') == symbol and p.get('line') == line_name
+                for p in out
+            )
+            if already:
+                continue
+            out.append({
+                'energy': line_e,
+                'element': symbol,
+                'line': line_name,
+                'is_tube_line': False,
+                'inferred': True,
+                'relative_intensity': rel,
+            })
+            n_added += 1
+    return out, n_added
+
+
 def _confirming_partners(line_name: str, line_map: Dict[str, float]) -> List[Tuple[str, float]]:
     """Other lines that help confirm an ID for this primary line."""
     partners = []
@@ -602,6 +725,8 @@ def auto_id_peak_positions(
     energy_tol_kev: float = 0.080,
     require_confirming_line: bool = False,
     excitation_kv: float = 50.0,
+    energy_min: Optional[float] = None,
+    energy_max: Optional[float] = None,
 ) -> Tuple[List[dict], List[str], List[str]]:
     """
     Label unknown peak-find seeds by matching energies to element emission lines.
@@ -614,12 +739,18 @@ def auto_id_peak_positions(
     it can be excited, otherwise Lα, else Mα). Minor lines such as Pb Mα
     are labeled only after that diagnostic match — never used to introduce Pb.
 
+    After an element is identified, its other major lines (e.g. Fe Kβ when
+    Fe Kα was found) are added at theoretical energies even if they were
+    below the peak-find threshold.
+
     Args:
         peak_positions: Peak seed dicts (energy, element, line, is_tube_line, ...)
         candidate_elements: Optional [{symbol, z}, ...]; defaults to common XRF
         energy_tol_kev: Max |E_peak - E_line| for a match
         require_confirming_line: If True, only accept IDs with a second line nearby
         excitation_kv: Tube kV; lines above ~0.95× this cannot be diagnostic
+        energy_min: Optional spectrum low-energy bound for companion lines
+        energy_max: Optional spectrum high-energy bound for companion lines
 
     Returns:
         (updated_positions, identified_symbols, summary_lines)
@@ -631,17 +762,29 @@ def auto_id_peak_positions(
     ]
 
     e_max_kev = min(40.0, float(excitation_kv) * 0.95)
+    e_min_obs = (
+        PeakFitter.MIN_PEAK_ENERGY_KEV
+        if energy_min is None
+        else max(float(energy_min), PeakFitter.MIN_PEAK_ENERGY_KEV)
+    )
+    e_max_obs = e_max_kev if energy_max is None else min(e_max_kev, float(energy_max))
 
     # Diagnostic line per element, plus full primary-line catalog
     diag_catalog: List[Tuple[str, int, str, float]] = []
     line_catalog: Dict[str, List[Tuple[int, str, float]]] = {}
     line_maps: Dict[str, Dict[str, float]] = {}
+    symbol_z: Dict[str, int] = {}
+    rel_by_symbol: Dict[str, Dict[str, float]] = {}
     for elem in candidates:
         symbol = elem['symbol']
         z = int(elem['z'])
+        symbol_z[symbol] = z
         line_map = _line_lookup(symbol, z)
         line_maps[symbol] = line_map
-        diagnostic = _diagnostic_line(line_map, e_max_kev=e_max_kev)
+        rel_by_symbol[symbol] = _line_relative_intensities(symbol, z)
+        diagnostic = _diagnostic_line(
+            line_map, e_max_kev=e_max_kev, e_min_kev=e_min_obs
+        )
         if diagnostic:
             diag_catalog.append((symbol, z, diagnostic[0], float(diagnostic[1])))
         line_catalog[symbol] = [
@@ -649,7 +792,10 @@ def auto_id_peak_positions(
             for name, energy in _primary_lines(line_map)
         ]
 
-    positions = [dict(p) for p in (peak_positions or [])]
+    positions = [
+        dict(p) for p in (peak_positions or [])
+        if float(p.get('energy', 0.0)) >= PeakFitter.MIN_PEAK_ENERGY_KEV
+    ]
     all_energies = [float(p.get('energy', 0.0)) for p in positions]
 
     def _partners_ok(symbol: str, line_name: str) -> bool:
@@ -694,6 +840,9 @@ def auto_id_peak_positions(
         if pos.get('element') and pos.get('line'):
             if pos['element'] not in identified:
                 identified.append(pos['element'])
+            rel = rel_by_symbol.get(pos['element'], {}).get(pos['line'])
+            if rel is not None:
+                pos.setdefault('relative_intensity', rel)
             continue
 
         e_peak = float(pos.get('energy', 0.0))
@@ -712,12 +861,28 @@ def auto_id_peak_positions(
         dist, symbol, z, line_name = best
         pos['element'] = symbol
         pos['line'] = line_name
+        rel = rel_by_symbol.get(symbol, {}).get(line_name)
+        if rel is not None:
+            pos['relative_intensity'] = rel
         n_labeled += 1
         if symbol not in identified:
             identified.append(symbol)
         summary.append(
             f"  {e_peak:.3f} keV → {symbol} {line_name} "
             f"(Δ={dist*1000:.0f} eV)"
+        )
+
+    positions, n_expected = add_missing_element_lines(
+        positions,
+        identified,
+        symbol_z,
+        energy_tol_kev=energy_tol_kev,
+        e_min_kev=e_min_obs,
+        e_max_kev=e_max_obs,
+    )
+    if n_expected:
+        summary.append(
+            f"  Added {n_expected} expected line(s) below detection threshold"
         )
 
     header = [
