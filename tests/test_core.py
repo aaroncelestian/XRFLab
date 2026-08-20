@@ -338,6 +338,23 @@ def test_auto_id_pb_requires_l_alpha():
     assert pb_lb, "Pb Lβ should be shown even if it was below the peak-find threshold"
 
 
+def test_auto_id_finds_hg_l_lines():
+    from core.smart_peak_id import COMMON_XRF_SYMBOLS, auto_id_peak_positions
+
+    assert "Hg" in COMMON_XRF_SYMBOLS
+    # Measured peaks matching the user's spectrum (Hg Lα ~9.989 keV, Lβ ~11.823 keV)
+    peaks = [
+        {"energy": 9.970, "element": None, "line": None, "is_tube_line": False},
+        {"energy": 11.830, "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Hg" in symbols
+    assert labeled[0]["element"] == "Hg"
+    assert "Lα" in labeled[0]["line"]
+    assert labeled[1]["element"] == "Hg"
+    assert "Lβ" in labeled[1]["line"]
+
+
 def test_batch_processor_in_memory_spectrum(io_handler):
     from core.batch_processing import BatchProcessor, BatchProcessingConfig
 

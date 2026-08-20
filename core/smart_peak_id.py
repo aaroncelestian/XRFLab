@@ -662,7 +662,7 @@ COMMON_XRF_SYMBOLS = (
     'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K', 'Ca',
     'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
     'As', 'Se', 'Br', 'Rb', 'Sr', 'Y', 'Zr', 'Nb', 'Mo',
-    'Ag', 'Cd', 'Sn', 'Sb', 'Ba', 'W', 'Pb', 'Bi',
+    'Ag', 'Cd', 'Sn', 'Sb', 'Ba', 'W', 'Au', 'Hg', 'Pb', 'Bi',
 )
 
 

@@ -485,12 +485,9 @@ class PeriodicTableWidget(QWidget):
     
     def _select_common_xrf(self):
         """Select commonly analyzed elements in XRF"""
-        common_elements = [
-            'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K', 'Ca',
-            'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
-            'As', 'Se', 'Br', 'Rb', 'Sr', 'Y', 'Zr', 'Nb', 'Mo',
-            'Ag', 'Cd', 'Sn', 'Sb', 'Ba', 'W', 'Pb', 'Bi'
-        ]
+        from core.smart_peak_id import COMMON_XRF_SYMBOLS
+
+        common_elements = COMMON_XRF_SYMBOLS
         
         # Clear all first
         self._clear_all()
