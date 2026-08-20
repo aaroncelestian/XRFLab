@@ -7,16 +7,24 @@ from typing import Optional, Tuple
 import numpy as np
 
 try:
-    from scipy.ndimage import gaussian_filter, median_filter, uniform_filter, zoom
+    from scipy.ndimage import (
+        gaussian_filter,
+        grey_opening,
+        median_filter,
+        uniform_filter,
+        zoom,
+    )
 except ImportError:  # pragma: no cover
     gaussian_filter = None
+    grey_opening = None
     median_filter = None
     uniform_filter = None
     zoom = None
 
 
-SMOOTH_METHODS = ("none", "mean", "median", "gaussian")
+SMOOTH_METHODS = ("none", "mean", "median", "gaussian", "bilateral")
 INTENSITY_SCALES = ("linear", "sqrt", "asinh", "log")
+CONTRAST_METHODS = ("none", "percentile", "clahe", "tophat")
 BIN_FACTORS = (1, 2, 4)
 INTERP_METHODS = ("none", "nearest", "bilinear", "cubic", "quintic")
 INTERP_ORDERS = {
@@ -42,12 +50,15 @@ def enhance_map(
     neighborhood: int = 1,
     bin_factor: int = 1,
     scale: str = "linear",
+    contrast: str = "none",
 ) -> np.ndarray:
     """
-    Return a same-shape copy of ``data`` after optional smooth, block-bin, and scale.
+    Return a same-shape copy of ``data`` after optional smooth, block-bin,
+    intensity scale, and contrast stretch.
 
     Spatial binning averages each N×N block, then expands back so map coordinates
     (pick pixel, line tools) stay aligned with the original grid.
+    Display-only — does not mutate the source cube or stored maps.
     """
     arr = np.asarray(data, dtype=np.float64)
     if arr.ndim != 2:
@@ -58,6 +69,9 @@ def enhance_map(
     scale_name = (scale or "linear").lower()
     if scale_name not in INTENSITY_SCALES:
         raise ValueError(f"Unknown intensity scale: {scale}")
+    contrast_name = (contrast or "none").lower()
+    if contrast_name not in CONTRAST_METHODS:
+        raise ValueError(f"Unknown contrast method: {contrast}")
     factor = max(1, int(bin_factor))
     kernel = odd_kernel(neighborhood)
 
@@ -67,7 +81,187 @@ def enhance_map(
         arr = block_bin(arr, factor)
     if scale_name != "linear":
         arr = apply_intensity_scale(arr, scale_name)
+    if contrast_name != "none":
+        arr = apply_contrast(arr, contrast_name, neighborhood=kernel)
     return arr
+
+
+def apply_contrast(
+    data: np.ndarray,
+    method: str = "percentile",
+    *,
+    neighborhood: int = 3,
+    percentile: Tuple[float, float] = (2.0, 98.0),
+    clahe_tiles: int = 8,
+    clahe_clip: float = 0.01,
+) -> np.ndarray:
+    """Draw attention to features via stretch / adaptive / local contrast."""
+    arr = np.asarray(data, dtype=np.float64)
+    name = (method or "none").lower()
+    if name == "none":
+        return arr
+    if name == "percentile":
+        return percentile_stretch(arr, percentile=percentile)
+    if name == "clahe":
+        return clahe_2d(arr, tile_grid=clahe_tiles, clip_limit=clahe_clip)
+    if name == "tophat":
+        return tophat_enhance(arr, size=odd_kernel(neighborhood))
+    raise ValueError(f"Unknown contrast method: {method}")
+
+
+def percentile_stretch(
+    data: np.ndarray,
+    percentile: Tuple[float, float] = (2.0, 98.0),
+) -> np.ndarray:
+    """Linear stretch between percentiles into [0, 1] (finite pixels only)."""
+    arr = np.asarray(data, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.zeros_like(arr)
+    lo, hi = np.percentile(arr[finite], percentile)
+    if hi <= lo:
+        hi = lo + 1.0
+    out = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    return np.where(finite, out, 0.0)
+
+
+def clahe_2d(
+    data: np.ndarray,
+    *,
+    tile_grid: int = 8,
+    clip_limit: float = 0.01,
+    nbins: int = 256,
+) -> np.ndarray:
+    """
+    Contrast-limited adaptive histogram equalization on a 2D map.
+
+    Equalizes each tile, then bilinear-blends neighboring tile results so
+    weak features stand out without requiring OpenCV.
+    """
+    arr = percentile_stretch(np.asarray(data, dtype=np.float64))
+    h, w = arr.shape
+    tiles = max(2, int(tile_grid))
+    th = max(1, h // tiles)
+    tw = max(1, w // tiles)
+    n_ty = max(1, (h + th - 1) // th)
+    n_tx = max(1, (w + tw - 1) // tw)
+
+    eq_tiles: list[list[np.ndarray]] = []
+    for ty in range(n_ty):
+        row: list[np.ndarray] = []
+        for tx in range(n_tx):
+            y0, y1 = ty * th, min(h, (ty + 1) * th)
+            x0, x1 = tx * tw, min(w, (tx + 1) * tw)
+            tile = arr[y0:y1, x0:x1]
+            hist, _ = np.histogram(tile, bins=nbins, range=(0.0, 1.0))
+            hist = hist.astype(np.float64)
+            limit = max(1.0, float(clip_limit) * tile.size)
+            excess = np.maximum(hist - limit, 0.0).sum()
+            hist = np.minimum(hist, limit)
+            hist += excess / nbins
+            cdf = np.cumsum(hist)
+            cdf = cdf / max(cdf[-1], 1.0)
+            idx = np.clip((tile * (nbins - 1)).astype(np.int32), 0, nbins - 1)
+            row.append(cdf[idx])
+        eq_tiles.append(row)
+
+    # Assemble full equalized image by placing tiles, then blur seams lightly
+    assembled = np.zeros_like(arr)
+    for ty in range(n_ty):
+        for tx in range(n_tx):
+            y0, y1 = ty * th, min(h, (ty + 1) * th)
+            x0, x1 = tx * tw, min(w, (tx + 1) * tw)
+            assembled[y0:y1, x0:x1] = eq_tiles[ty][tx]
+
+    # Soften tile boundaries with a small mean filter
+    if uniform_filter is not None and min(h, w) >= 4:
+        soft = uniform_filter(assembled, size=3, mode="nearest")
+        # Keep most of the CLAHE response; blend a little for continuity
+        return 0.75 * assembled + 0.25 * soft
+    return assembled
+
+
+def tophat_enhance(data: np.ndarray, size: int = 5) -> np.ndarray:
+    """White top-hat: highlight small bright features on uneven background."""
+    arr = np.asarray(data, dtype=np.float64)
+    kernel = odd_kernel(size)
+    if grey_opening is None:
+        blurred = _box_mean_numpy(arr, kernel)
+        return np.clip(arr - blurred, 0.0, None)
+    opened = grey_opening(arr, size=kernel)
+    return np.clip(arr - opened, 0.0, None)
+
+
+def ratio_map(
+    numerator: np.ndarray,
+    denominator: np.ndarray,
+    *,
+    eps: Optional[float] = None,
+) -> np.ndarray:
+    """Element ratio map num/den; zeros where denominator is near zero."""
+    num = np.asarray(numerator, dtype=np.float64)
+    den = np.asarray(denominator, dtype=np.float64)
+    if num.shape != den.shape:
+        raise ValueError("ratio_map inputs must share the same shape")
+    if eps is None:
+        positive = den[den > 0]
+        eps = float(np.percentile(positive, 1.0)) if positive.size else 1.0
+        eps = max(eps, 1e-12)
+    out = np.zeros_like(num)
+    ok = den > eps
+    out[ok] = num[ok] / den[ok]
+    return out
+
+
+def difference_map(
+    map_a: np.ndarray,
+    map_b: np.ndarray,
+) -> np.ndarray:
+    """Simple A − B difference (same shape required)."""
+    a = np.asarray(map_a, dtype=np.float64)
+    b = np.asarray(map_b, dtype=np.float64)
+    if a.shape != b.shape:
+        raise ValueError("difference_map inputs must share the same shape")
+    return a - b
+
+
+def bilateral_filter(
+    data: np.ndarray,
+    size: int = 5,
+    *,
+    sigma_spatial: Optional[float] = None,
+    sigma_range: Optional[float] = None,
+) -> np.ndarray:
+    """
+    Edge-preserving bilateral smooth (numpy, no OpenCV).
+
+    Suitable for modest XRF map sizes. Kernel is odd and clamped.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    arr = np.asarray(data, dtype=np.float64)
+    kernel = odd_kernel(size)
+    if kernel <= 1:
+        return arr.copy()
+    pad = kernel // 2
+    if sigma_spatial is None:
+        sigma_spatial = max(0.5, (kernel - 1) / 4.0)
+    if sigma_range is None:
+        finite = arr[np.isfinite(arr)]
+        sigma_range = float(np.std(finite)) if finite.size else 1.0
+        sigma_range = max(sigma_range * 0.1, 1e-6)
+
+    yy, xx = np.mgrid[-pad : pad + 1, -pad : pad + 1]
+    spatial = np.exp(-(xx * xx + yy * yy) / (2.0 * sigma_spatial * sigma_spatial))
+    padded = np.pad(arr, pad, mode="edge")
+    windows = sliding_window_view(padded, (kernel, kernel))
+    # windows: H x W x k x k
+    center = arr[:, :, None, None]
+    range_w = np.exp(-((windows - center) ** 2) / (2.0 * sigma_range * sigma_range))
+    weights = spatial * range_w
+    wsum = weights.sum(axis=(2, 3))
+    weighted = (windows * weights).sum(axis=(2, 3))
+    return np.where(wsum > 0, weighted / wsum, arr)
 
 
 def upsample_map(
@@ -121,6 +315,8 @@ def _smooth(arr: np.ndarray, method: str, kernel: int) -> np.ndarray:
         if gaussian_filter is None:
             return _box_mean_numpy(arr, kernel)
         return gaussian_filter(arr, sigma=sigma, mode="nearest")
+    if method == "bilateral":
+        return bilateral_filter(arr, size=kernel)
     return arr
 
 

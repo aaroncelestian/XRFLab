@@ -140,6 +140,75 @@ def locate_image_crop(
     return float(x0), float(y0), float(x0 + tw), float(y0 + th)
 
 
+def locate_scaled_template(
+    image,
+    template,
+    target_width_px: float,
+    target_height_px: float,
+    *,
+    center_xy: Optional[Tuple[float, float]] = None,
+    search_px: float = 300.0,
+    min_score: float = 0.45,
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Locate a resized ``template`` inside ``image`` by normalized cross-correlation.
+
+    Used when MapAreaImage is a magnified optical of the map FOV (not an exact
+    crop of the sample camera). Prefer a search window around ``center_xy``
+    (typically the stage-predicted centre) to avoid false matches.
+    """
+    img = np.asarray(image)
+    templ = np.asarray(template)
+    if img.ndim < 2 or templ.ndim < 2:
+        return None
+    ih, iw = int(img.shape[0]), int(img.shape[1])
+    th = max(8, int(round(target_height_px)))
+    tw = max(8, int(round(target_width_px)))
+    if th >= ih or tw >= iw:
+        return None
+    try:
+        from scipy.ndimage import zoom
+        from scipy.signal import fftconvolve
+    except ImportError:  # pragma: no cover
+        return None
+
+    gi = _as_gray_u8(img).astype(np.float64)
+    gt = _as_gray_u8(templ).astype(np.float64)
+    scaled = zoom(gt, (th / gt.shape[0], tw / gt.shape[1]), order=1)
+    t = scaled - scaled.mean()
+    denom_t = float(np.sqrt((t * t).sum()))
+    if denom_t < 1e-9:
+        return None
+
+    if center_xy is None:
+        ya, yb, xa, xb = 0, ih, 0, iw
+    else:
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        half = float(search_px)
+        ya = max(0, int(np.floor(cy - half - th * 0.5)))
+        yb = min(ih, int(np.ceil(cy + half + th * 0.5)))
+        xa = max(0, int(np.floor(cx - half - tw * 0.5)))
+        xb = min(iw, int(np.ceil(cx + half + tw * 0.5)))
+    region = gi[ya:yb, xa:xb]
+    if region.shape[0] < th or region.shape[1] < tw:
+        return None
+
+    ones = np.ones_like(t)
+    corr = fftconvolve(region, t[::-1, ::-1], mode="valid")
+    sum_p = fftconvolve(region, ones, mode="valid")
+    sum_p2 = fftconvolve(region * region, ones, mode="valid")
+    n = float(t.size)
+    var = np.maximum(sum_p2 - (sum_p * sum_p) / n, 0.0)
+    ncc = corr / (np.sqrt(var) * denom_t + 1e-12)
+    ncc = np.clip(ncc, -1.0, 1.0)
+    iy, ix = np.unravel_index(int(np.argmax(ncc)), ncc.shape)
+    if float(ncc[iy, ix]) < float(min_score):
+        return None
+    x0 = float(xa + ix)
+    y0 = float(ya + iy)
+    return x0, y0, x0 + float(tw), y0 + float(th)
+
+
 def _locate_exact_gray_crop(
     image: np.ndarray, crop: np.ndarray
 ) -> Optional[Tuple[int, int]]:
@@ -194,3 +263,242 @@ def _locate_ncc_gray_crop(
     if float(ncc[iy, ix]) < float(min_score):
         return None
     return int(ix), int(iy)
+
+
+def _as_rgb_u8(image) -> Optional[np.ndarray]:
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        return None
+    rgb = arr[:, :, :3]
+    if rgb.dtype == np.uint8:
+        return np.ascontiguousarray(rgb)
+    g = rgb.astype(np.float64)
+    if g.size and g.max() <= 1.5:
+        g = g * 255.0
+    return np.clip(np.rint(g), 0, 255).astype(np.uint8)
+
+
+def locate_red_map_rect(
+    image,
+    *,
+    min_side_px: int = 12,
+    max_aspect: float = 3.0,
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Locate the Horiba-drawn red map-area rectangle on a sample-camera BMP.
+
+    Returns interior pixel bounds ``(x0, y0, x1, y1)`` (inside the stroke), or
+    None if no suitable hollow red rectangle is found.
+    """
+    rgb = _as_rgb_u8(image)
+    if rgb is None:
+        return None
+    r = rgb[:, :, 0].astype(np.int16)
+    g = rgb[:, :, 1].astype(np.int16)
+    b = rgb[:, :, 2].astype(np.int16)
+    mask = (r > 180) & (g < 100) & (b < 100) & (r > g + 60) & (r > b + 60)
+    if int(mask.sum()) < 4 * int(min_side_px):
+        return None
+
+    try:
+        from scipy import ndimage
+    except ImportError:  # pragma: no cover
+        return _red_rect_from_bbox(mask, min_side_px=min_side_px, max_aspect=max_aspect)
+
+    labeled, n_labels = ndimage.label(mask)
+    best = None
+    best_score = -1.0
+    for lab in range(1, int(n_labels) + 1):
+        ys, xs = np.where(labeled == lab)
+        if ys.size < 4 * int(min_side_px):
+            continue
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        w, h = x1 - x0, y1 - y0
+        if w < min_side_px or h < min_side_px:
+            continue
+        aspect = max(w, h) / max(min(w, h), 1)
+        if aspect > max_aspect:
+            continue
+        sub = mask[y0:y1, x0:x1]
+        # Hollow outline: edges red, interior mostly not
+        edge = np.zeros_like(sub, dtype=bool)
+        edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+        if w > 6 and h > 6:
+            edge[:2, :] = edge[-2:, :] = edge[:, :2] = edge[:, -2:] = True
+        edge_frac = float(sub[edge].mean()) if edge.any() else 0.0
+        inner = sub[2:-2, 2:-2] if h > 6 and w > 6 else sub
+        inner_frac = float(inner.mean()) if inner.size else 1.0
+        if edge_frac < 0.15 or inner_frac > 0.45:
+            continue
+        # Prefer square-ish, strong outline, larger boxes
+        score = edge_frac * (1.0 - inner_frac) * min(w, h) / (1.0 + abs(aspect - 1.0))
+        if score > best_score:
+            best_score = score
+            # Inset by ~1 px so overlay sits inside the stroke
+            best = (
+                float(x0 + 1),
+                float(y0 + 1),
+                float(x1 - 1),
+                float(y1 - 1),
+            )
+    if best is not None and best[2] > best[0] + 2 and best[3] > best[1] + 2:
+        return best
+    return _red_rect_from_bbox(mask, min_side_px=min_side_px, max_aspect=max_aspect)
+
+
+def _red_rect_from_bbox(
+    mask: np.ndarray,
+    *,
+    min_side_px: int,
+    max_aspect: float,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Fallback: single bbox of all red pixels if it looks like a hollow rect."""
+    ys, xs = np.where(mask)
+    if ys.size == 0:
+        return None
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    w, h = x1 - x0, y1 - y0
+    if w < min_side_px or h < min_side_px:
+        return None
+    aspect = max(w, h) / max(min(w, h), 1)
+    if aspect > max_aspect:
+        return None
+    sub = mask[y0:y1, x0:x1]
+    if float(sub.mean()) > 0.45:
+        return None
+    return float(x0 + 1), float(y0 + 1), float(x1 - 1), float(y1 - 1)
+
+
+def calibrate_stage_camera(
+    image,
+    stage_center_mm: Tuple[float, float],
+    pixel_rect: Tuple[float, float, float, float],
+    stage_size_mm: Optional[Tuple[float, float]] = None,
+    *,
+    stage_travel_mm: float = XGT_STAGE_TRAVEL_MM,
+) -> Optional[StageCamera]:
+    """
+    Build a StageCamera whose stage origin matches a known map rectangle.
+
+    XGT sum-spectrum XY and the overview BMP do not always share the same
+    origin as a naive image-centred model. Given one correspondence
+    (stage centre ↔ pixel rect from MapAreaImage crop or red ROI), solve for
+    ``origin_x_mm`` / ``origin_y_mm`` (and refine mm/px from rect size when
+    ``stage_size_mm`` is known).
+    """
+    data = getattr(image, "data", image)
+    arr = np.asarray(data)
+    if arr.ndim < 2:
+        return None
+    height, width = int(arr.shape[0]), int(arr.shape[1])
+    if width < 2 or height < 2:
+        return None
+    x0, y0, x1, y1 = (float(v) for v in pixel_rect)
+    rw = max(x1 - x0, 1e-6)
+    rh = max(y1 - y0, 1e-6)
+    short = min(width, height)
+    mpp = float(stage_travel_mm) / float(short)
+    if stage_size_mm is not None:
+        sw, sh = float(stage_size_mm[0]), float(stage_size_mm[1])
+        if sw > 0 and sh > 0:
+            mpp = 0.5 * (sw / rw + sh / rh)
+    if not np.isfinite(mpp) or mpp <= 0:
+        return None
+    cx0 = (width - 1) * 0.5
+    cy0 = (height - 1) * 0.5
+    pcx = 0.5 * (x0 + x1)
+    pcy = 0.5 * (y0 + y1)
+    sx, sy = float(stage_center_mm[0]), float(stage_center_mm[1])
+    if not (np.isfinite(sx) and np.isfinite(sy)):
+        return None
+    # stage_to_pixel: px = cx0 + (x - ox)/mpp, py = cy0 - (y - oy)/mpp
+    ox = sx - (pcx - cx0) * mpp
+    oy = sy - (cy0 - pcy) * mpp
+    return StageCamera(
+        width_px=width,
+        height_px=height,
+        fov_width_mm=mpp * width,
+        fov_height_mm=mpp * height,
+        origin_x_mm=float(ox),
+        origin_y_mm=float(oy),
+    )
+
+
+def camera_from_sample_sites(
+    image,
+    sites,
+    *,
+    stage_travel_mm: float = XGT_STAGE_TRAVEL_MM,
+) -> Optional[StageCamera]:
+    """
+    StageCamera for a sample overview, calibrated when a site provides a
+    MapAreaImage match (exact crop or scaled optical) or red ROI plus stage
+    geometry.
+
+    Falls back to the default image-centred 100 mm model when no
+    correspondence is available (multipoint-only projects without a map photo).
+    """
+    base = camera_from_image(image, stage_travel_mm=stage_travel_mm)
+    photo = getattr(image, "data", image)
+    photo_arr = np.asarray(photo)
+    if base is None:
+        return None
+
+    best_cam = None
+    best_rank = -1  # exact crop (3) > scaled optical (2) > red (1)
+    for site in sites or []:
+        center = getattr(site, "stage_center_mm", None)
+        size = getattr(site, "stage_size_mm", None)
+        if center is None:
+            continue
+        rect = None
+        rank = 0
+        optical = getattr(site, "optical", None)
+        if optical is not None:
+            opt = getattr(optical, "data", optical)
+            rect = locate_image_crop(photo_arr, opt)
+            if rect is not None:
+                rank = 3
+            elif size is not None:
+                tw = float(size[0]) / base.mm_per_px_x
+                th = float(size[1]) / base.mm_per_px_y
+                cx, cy = base.stage_to_pixel(float(center[0]), float(center[1]))
+                rect = locate_scaled_template(
+                    photo_arr,
+                    opt,
+                    tw,
+                    th,
+                    center_xy=(cx, cy),
+                )
+                if rect is not None:
+                    rank = 2
+        if rect is None:
+            red = locate_red_map_rect(photo_arr)
+            if red is None:
+                continue
+            if size is not None:
+                rw = red[2] - red[0]
+                rh = red[3] - red[1]
+                exp_w = float(size[0]) / base.mm_per_px_x
+                exp_h = float(size[1]) / base.mm_per_px_y
+                if exp_w > 1 and exp_h > 1:
+                    scale_err = abs(rw - exp_w) / exp_w + abs(rh - exp_h) / exp_h
+                    if scale_err > 0.75:
+                        continue
+            rect = red
+            rank = 1
+        cam = calibrate_stage_camera(
+            photo_arr,
+            center,
+            rect,
+            size,
+            stage_travel_mm=stage_travel_mm,
+        )
+        if cam is not None and rank > best_rank:
+            best_cam = cam
+            best_rank = rank
+            if rank >= 3:
+                break
+    return best_cam if best_cam is not None else base

@@ -473,6 +473,71 @@ def test_find_fov_for_multipoint_spectrum():
     assert project.find_fov_for_spectrum(points[0]) is site
 
 
+def test_site_contents_tags():
+    from core.mapping.models import (
+        ElementMap,
+        LineScan,
+        MappingFOV,
+        MapSpectrum,
+    )
+    from core.spectrum import Spectrum
+
+    energy = np.linspace(0.0, 10.0, 16)
+    spec = Spectrum(energy=energy, counts=np.ones(16))
+    spot = MapSpectrum(spectrum=spec, name="Spectrum 1", kind="spot")
+    summed = MapSpectrum(
+        spectrum=Spectrum(energy=energy, counts=np.ones(16) * 2),
+        name="Sum Spectrum",
+        kind="sum",
+    )
+    empty = MappingFOV(id="e", name="Empty", spectra=[summed])
+    assert empty.contents_tags() == []
+
+    mapped = MappingFOV(
+        id="m",
+        name="Mapped",
+        element_maps=[ElementMap(name="Fe Ka1", data=np.zeros((4, 4)))],
+        spectra=[spot, summed],
+    )
+    assert mapped.contents_label() == "1 map · 1 spot"
+
+    line_pts = [
+        MapSpectrum(
+            spectrum=Spectrum(energy=energy, counts=np.ones(16) * (i + 1)),
+            name=f"Pt {i}",
+            kind="line_point",
+        )
+        for i in range(5)
+    ]
+    multi_pts = [
+        MapSpectrum(
+            spectrum=Spectrum(energy=energy, counts=np.ones(16) * (i + 1)),
+            name=f"M {i}",
+            kind="line_point",
+        )
+        for i in range(3)
+    ]
+    mixed = MappingFOV(
+        id="x",
+        name="Mixed",
+        element_maps=[
+            ElementMap(name="Ca Ka1", data=np.zeros((2, 2))),
+            ElementMap(name="Fe Ka1", data=np.zeros((2, 2))),
+        ],
+        line_scans=[
+            LineScan(name="Line 1", points=line_pts, kind="line_scan"),
+            LineScan(name="Multi 1", points=multi_pts, kind="multipoint"),
+        ],
+        metadata={"has_smartmap": True},
+    )
+    assert mixed.contents_tags() == [
+        "SmartMap",
+        "2 maps",
+        "5-pt line",
+        "3-pt multi",
+    ]
+
+
 def test_find_peaks_rejects_below_min_energy():
     from core.peak_fitting import PeakFitter
 

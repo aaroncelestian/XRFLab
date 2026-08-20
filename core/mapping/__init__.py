@@ -17,9 +17,30 @@ from core.mapping.profiles import (
     extract_multi_element_profiles,
     line_distances,
 )
-from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop
-from core.mapping.correlations import map_correlation, rgb_composite
-from core.mapping.display import enhance_map, format_acquisition, upsample_map, overlay_on_photo, overlay_alpha, colorize_map, resize_to, embed_map_on_photo
+from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop, locate_red_map_rect, locate_scaled_template, camera_from_sample_sites, calibrate_stage_camera
+from core.mapping.correlations import map_correlation, map_correlation_matrix, rgb_composite
+from core.mapping.display import (
+    enhance_map,
+    format_acquisition,
+    upsample_map,
+    overlay_on_photo,
+    overlay_alpha,
+    colorize_map,
+    resize_to,
+    embed_map_on_photo,
+    apply_contrast,
+    ratio_map,
+    difference_map,
+    bilateral_filter,
+)
+from core.mapping.multivariate import (
+    PCAResult,
+    Particle,
+    ParticleResult,
+    pca_element_maps,
+    find_particles,
+    particle_label_map_as_element,
+)
 from core.mapping.regions import circle_mask, polygon_mask, rect_mask, region_mask
 
 __all__ = [
@@ -35,12 +56,17 @@ __all__ = [
     "decode_listdata",
     "StageCamera",
     "camera_from_image",
+    "camera_from_sample_sites",
+    "calibrate_stage_camera",
     "locate_image_crop",
+    "locate_scaled_template",
+    "locate_red_map_rect",
     "extract_line_profile",
     "extract_multi_element_profiles",
     "extract_cube_element_profiles",
     "line_distances",
     "map_correlation",
+    "map_correlation_matrix",
     "rgb_composite",
     "enhance_map",
     "format_acquisition",
@@ -50,6 +76,16 @@ __all__ = [
     "overlay_alpha",
     "overlay_on_photo",
     "embed_map_on_photo",
+    "apply_contrast",
+    "ratio_map",
+    "difference_map",
+    "bilateral_filter",
+    "PCAResult",
+    "Particle",
+    "ParticleResult",
+    "pca_element_maps",
+    "find_particles",
+    "particle_label_map_as_element",
     "rect_mask",
     "circle_mask",
     "polygon_mask",

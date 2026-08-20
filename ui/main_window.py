@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         self.open_action.setStatusTip("Open an XRF spectrum file")
         self.open_action.triggered.connect(self.open_spectrum)
 
-        self.open_ipj_action = QAction("Open &IPJ Mapping Project...", self)
+        self.open_ipj_action = QAction("Open &IPJ Project...", self)
         self.open_ipj_action.setStatusTip(
             "Open an Oxford INCA / Horiba XGT .ipj mapping project"
         )

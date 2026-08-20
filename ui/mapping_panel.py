@@ -1,7 +1,8 @@
 """
 Mapping workspace: load INCA/XGT .ipj projects.
 
-Maps tab: element maps, RGB, correlations, and drawn intensity profiles.
+Maps tab: element maps, RGB, correlations / correlation matrix, display
+enhancement, PCA / ratio / particle analysis, and drawn intensity profiles.
 Line scan tab: collected line / multipoint spectra, ROI profiles, and
 area-normalized semi-quant along that series.
 
@@ -17,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -43,6 +45,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QTreeWidget,
@@ -51,15 +55,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop
-from core.mapping.correlations import map_correlation, rgb_composite
+from core.mapping.camera import (
+    StageCamera,
+    camera_from_image,
+    camera_from_sample_sites,
+    locate_image_crop,
+    locate_red_map_rect,
+    locate_scaled_template,
+)
+from core.mapping.correlations import (
+    map_correlation,
+    map_correlation_matrix,
+    rgb_composite,
+)
 from core.mapping.display import (
     colorize_map,
+    difference_map,
     embed_map_on_photo,
     enhance_map,
     format_acquisition,
     overlay_alpha,
     overlay_on_photo,
+    ratio_map,
     upsample_map,
 )
 from core.mapping.models import (
@@ -70,6 +87,11 @@ from core.mapping.models import (
     MapSpectrum,
     coerce_element_symbols,
 )
+from core.mapping.multivariate import (
+    find_particles,
+    particle_label_map_as_element,
+    pca_element_maps,
+)
 from core.mapping.profiles import (
     extract_cube_element_profiles,
     extract_multi_element_profiles,
@@ -77,6 +99,18 @@ from core.mapping.profiles import (
 from ui.collapsible_section import CollapsibleSection
 from ui.map_canvas import MapCanvas
 from ui.pixel_spectrum_popup import PixelSpectrumPopup
+
+
+def _diverging_lut():
+    """Blue–white–red lookup table for r in [-1, 1]."""
+    lut = np.zeros((256, 3), dtype=np.ubyte)
+    for i in range(128):
+        t = i / 127.0
+        lut[i] = (int(30 + 225 * t), int(70 + 185 * t), int(180 + 75 * t))
+    for i in range(128, 256):
+        t = (i - 128) / 127.0
+        lut[i] = (int(255), int(255 - 180 * t), int(255 - 200 * t))
+    return lut
 
 
 class MappingPanel(QWidget):
@@ -115,6 +149,8 @@ class MappingPanel(QWidget):
         self._ls_plot_order: Optional[np.ndarray] = None
         self._ls_camera_model: Optional[StageCamera] = None
         self._cam_dest_rect_cache: dict = {}
+        self._particle_result = None  # ParticleResult | None
+        self._matrix_names: list[str] = []
 
         self._build_ui()
 
@@ -158,16 +194,24 @@ class MappingPanel(QWidget):
         sites_layout = QVBoxLayout(sites_page)
         sites_layout.setContentsMargins(0, 0, 0, 0)
         self.sites_tree = QTreeWidget()
-        self.sites_tree.setHeaderLabels(["Sites"])
+        self.sites_tree.setHeaderLabels(["Sites", "Data"])
+        self.sites_tree.setColumnCount(2)
         self.sites_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.sites_tree.setEditTriggers(QAbstractItemView.EditKeyPressed)
         self.sites_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sites_tree.setAllColumnsShowFocus(True)
+        sites_header = self.sites_tree.header()
+        sites_header.setStretchLastSection(False)
+        sites_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        sites_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.sites_tree.customContextMenuRequested.connect(self._on_sites_context_menu)
         self.sites_tree.itemSelectionChanged.connect(self._on_sites_selection)
         self.sites_tree.itemDoubleClicked.connect(self._on_site_activated)
         self.sites_tree.itemChanged.connect(self._on_sites_tree_item_changed)
         sites_layout.addWidget(self.sites_tree)
-        sites_hint = QLabel("F2 or right-click → Rename · Double-click site to activate")
+        sites_hint = QLabel(
+            "Data column: maps / line / multi. F2 rename · Double-click to activate"
+        )
         sites_hint.setWordWrap(True)
         sites_hint.setStyleSheet("color: #666; font-size: 11px;")
         sites_layout.addWidget(sites_hint)
@@ -244,15 +288,14 @@ class MappingPanel(QWidget):
 
         # ---- Display ----
         display_sec = CollapsibleSection("Display", expanded=True)
-        display_sec.addWidget(QLabel("View"))
-        self.map_combo = QComboBox()
-        self.map_combo.setToolTip(
-            "Choose an element map, Map Area Photo, or sample camera.\n"
-            "RGB composite is turned off automatically when you pick a photo."
-        )
+        # Hidden view state: Data tree selection drives the canvas, not a combo.
+        self.map_combo = QComboBox(self)
+        self.map_combo.hide()
         self.map_combo.currentIndexChanged.connect(self._on_map_combo_changed)
-        display_sec.addWidget(self.map_combo)
-        hint = QLabel("Tip: check element maps in the Data tree to show subplots.")
+        hint = QLabel(
+            "Tip: check maps in the Data tree to plot them. "
+            "Click a photo or Trans. x-ray there to view it."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 11px;")
         display_sec.addWidget(hint)
@@ -267,8 +310,8 @@ class MappingPanel(QWidget):
         self.overlay_check = QCheckBox("Overlay on photo")
         self.overlay_check.setToolTip(
             "Blend the current element map (or RGB composite) onto a camera "
-            "photo. Pixels with 0 counts stay fully transparent. Pick / line "
-            "tools stay on the map pixel grid."
+            "photo or Trans. x-ray image. Pixels with 0 counts stay fully "
+            "transparent. Pick / line tools stay on the map pixel grid."
         )
         self.overlay_check.toggled.connect(self._refresh_canvas)
         display_sec.addWidget(self.overlay_check)
@@ -277,10 +320,12 @@ class MappingPanel(QWidget):
         target_row.addWidget(QLabel("Photo"))
         self.overlay_target = QComboBox()
         self.overlay_target.addItem("Map area photo", "optical")
+        self.overlay_target.addItem("Trans. x-ray image", "overview")
         self.overlay_target.addItem("Sample camera", "whole_image")
         self.overlay_target.setToolTip(
-            "Background photo for the overlay. Map area is the mapped FOV; "
-            "sample camera is the whole-sample photo."
+            "Background for the overlay. Map area is the mapped FOV photo; "
+            "Trans. x-ray is the transmission image; sample camera is the "
+            "whole-sample photo."
         )
         self.overlay_target.currentIndexChanged.connect(self._refresh_canvas)
         target_row.addWidget(self.overlay_target, stretch=1)
@@ -358,7 +403,7 @@ class MappingPanel(QWidget):
             self.neighborhood_combo.addItem(label, size)
         self.neighborhood_combo.setToolTip(
             "Neighborhood used for Pick pixel spectrum (sum of neighbors) "
-            "and for Mean / Median / Gaussian map smoothing."
+            "and for Mean / Median / Gaussian / Bilateral map smoothing."
         )
         self.neighborhood_combo.currentIndexChanged.connect(self._on_enhance_changed)
 
@@ -368,11 +413,13 @@ class MappingPanel(QWidget):
             ("mean", "Mean (boxcar)"),
             ("median", "Median (despeckle)"),
             ("gaussian", "Gaussian"),
+            ("bilateral", "Bilateral (edge-preserving)"),
         ):
             self.smooth_combo.addItem(label, key)
         self.smooth_combo.setToolTip(
             "Spatial filter on element maps and RGB.\n"
-            "Median is best for sparse photon noise; Gaussian is smoother for figures."
+            "Median is best for sparse photon noise; Gaussian is smoother for figures.\n"
+            "Bilateral keeps grain boundaries while reducing noise."
         )
         self.smooth_combo.currentIndexChanged.connect(self._on_enhance_changed)
 
@@ -400,6 +447,20 @@ class MappingPanel(QWidget):
             "Compress hot pixels so weak features show up in publication figures."
         )
         self.scale_combo.currentIndexChanged.connect(self._on_enhance_changed)
+
+        self.contrast_combo = QComboBox()
+        for key, label in (
+            ("none", "None"),
+            ("percentile", "Percentile stretch"),
+            ("clahe", "CLAHE (adaptive)"),
+            ("tophat", "Top-hat (small bright)"),
+        ):
+            self.contrast_combo.addItem(label, key)
+        self.contrast_combo.setToolTip(
+            "Draw attention to features without changing stored counts.\n"
+            "CLAHE boosts local contrast; top-hat highlights small bright particles."
+        )
+        self.contrast_combo.currentIndexChanged.connect(self._on_enhance_changed)
 
         self.interp_combo = QComboBox()
         for key, label in (
@@ -437,6 +498,7 @@ class MappingPanel(QWidget):
             ("Smooth", self.smooth_combo),
             ("Spatial bin", self.bin_combo),
             ("Intensity", self.scale_combo),
+            ("Contrast", self.contrast_combo),
             ("Interpolate", self.interp_combo),
             ("Upsample", self.upsample_combo),
         ):
@@ -555,7 +617,104 @@ class MappingPanel(QWidget):
         self.corr_btn = QPushButton("Plot correlation")
         self.corr_btn.clicked.connect(self._plot_correlation)
         tools_sec.addWidget(self.corr_btn)
+        self.corr_matrix_btn = QPushButton("Correlation matrix (checked maps)")
+        self.corr_matrix_btn.setToolTip(
+            "Pearson r heatmap for all element maps checked in the Data tree"
+        )
+        self.corr_matrix_btn.clicked.connect(self._plot_correlation_matrix)
+        tools_sec.addWidget(self.corr_matrix_btn)
         scroll_layout.addWidget(tools_sec)
+
+        # ---- Map analysis (PCA, ratios, particles) ----
+        analysis_sec = CollapsibleSection("Map analysis", expanded=False)
+        analysis_hint = QLabel(
+            "Derived maps are added to the Data tree (display tools stay separate)."
+        )
+        analysis_hint.setWordWrap(True)
+        analysis_hint.setStyleSheet("color: #666; font-size: 11px;")
+        analysis_sec.addWidget(analysis_hint)
+
+        analysis_sec.addWidget(QLabel("Ratio / difference map"))
+        ratio_row = QHBoxLayout()
+        self.ratio_num = QComboBox()
+        self.ratio_den = QComboBox()
+        ratio_row.addWidget(self.ratio_num)
+        ratio_row.addWidget(QLabel("/"))
+        ratio_row.addWidget(self.ratio_den)
+        analysis_sec.addLayout(ratio_row)
+        ratio_btn_row = QHBoxLayout()
+        self.ratio_btn = QPushButton("Add ratio map")
+        self.ratio_btn.clicked.connect(self._add_ratio_map)
+        self.diff_btn = QPushButton("Add A − B map")
+        self.diff_btn.clicked.connect(self._add_difference_map)
+        ratio_btn_row.addWidget(self.ratio_btn)
+        ratio_btn_row.addWidget(self.diff_btn)
+        analysis_sec.addLayout(ratio_btn_row)
+
+        analysis_sec.addWidget(QLabel("PCA on checked maps"))
+        pca_row = QHBoxLayout()
+        pca_row.addWidget(QLabel("Components"))
+        self.pca_n_spin = QSpinBox()
+        self.pca_n_spin.setRange(1, 12)
+        self.pca_n_spin.setValue(3)
+        pca_row.addWidget(self.pca_n_spin)
+        analysis_sec.addLayout(pca_row)
+        self.pca_btn = QPushButton("Run PCA → add PC maps")
+        self.pca_btn.setToolTip(
+            "PCA on checked Data-tree maps. Adds PC1…PCk score maps; "
+            "optionally set RGB to the first three PCs."
+        )
+        self.pca_btn.clicked.connect(self._run_pca)
+        analysis_sec.addWidget(self.pca_btn)
+        self.pca_rgb_check = QCheckBox("Set RGB to PC1 / PC2 / PC3")
+        self.pca_rgb_check.setChecked(True)
+        analysis_sec.addWidget(self.pca_rgb_check)
+
+        analysis_sec.addWidget(QLabel("Particle finding"))
+        part_map_row = QHBoxLayout()
+        part_map_row.addWidget(QLabel("Map"))
+        self.particle_map_combo = QComboBox()
+        part_map_row.addWidget(self.particle_map_combo, stretch=1)
+        analysis_sec.addLayout(part_map_row)
+        part_thr_row = QHBoxLayout()
+        part_thr_row.addWidget(QLabel("Threshold %ile"))
+        self.particle_thr_spin = QDoubleSpinBox()
+        self.particle_thr_spin.setRange(50.0, 99.9)
+        self.particle_thr_spin.setDecimals(1)
+        self.particle_thr_spin.setValue(90.0)
+        part_thr_row.addWidget(self.particle_thr_spin)
+        analysis_sec.addLayout(part_thr_row)
+        part_area_row = QHBoxLayout()
+        part_area_row.addWidget(QLabel("Min area"))
+        self.particle_min_area = QSpinBox()
+        self.particle_min_area.setRange(1, 10000)
+        self.particle_min_area.setValue(5)
+        self.particle_min_area.setSuffix(" px")
+        part_area_row.addWidget(self.particle_min_area)
+        analysis_sec.addLayout(part_area_row)
+        self.particle_btn = QPushButton("Find particles")
+        self.particle_btn.setToolTip(
+            "Threshold + watershed on the selected map. "
+            "Centroids mark the canvas; double-click a row to sum spectrum from the cube."
+        )
+        self.particle_btn.clicked.connect(self._find_particles)
+        analysis_sec.addWidget(self.particle_btn)
+        self.clear_particles_btn = QPushButton("Clear particles")
+        self.clear_particles_btn.clicked.connect(self._clear_particles)
+        analysis_sec.addWidget(self.clear_particles_btn)
+        self.particle_table = QTableWidget(0, 4)
+        self.particle_table.setHorizontalHeaderLabels(
+            ["#", "Area", "Mean", "Centroid"]
+        )
+        self.particle_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.particle_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.particle_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.particle_table.setMaximumHeight(140)
+        self.particle_table.cellDoubleClicked.connect(self._on_particle_activated)
+        analysis_sec.addWidget(self.particle_table)
+        scroll_layout.addWidget(analysis_sec)
 
         # ---- Cube ROI ----
         cube_sec = CollapsibleSection("Cube ROI map", expanded=False)
@@ -677,16 +836,49 @@ class MappingPanel(QWidget):
         self.plot_tabs_label = QLabel("Drawn transect & correlations")
         right_layout.addWidget(self.plot_tabs_label)
 
+        self.map_plot_tabs = QTabWidget()
+
+        profile_tab = QWidget()
+        profile_layout = QVBoxLayout(profile_tab)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
         self.profile_plot = pg.PlotWidget(title="Map line profile")
         self.profile_plot.setLabel("bottom", "Distance (pixels)")
         self.profile_plot.setLabel("left", "Intensity")
         self.profile_plot.addLegend(offset=(10, 10))
-        right_layout.addWidget(self.profile_plot, stretch=1)
+        profile_layout.addWidget(self.profile_plot)
+        self.map_plot_tabs.addTab(profile_tab, "Profile")
 
+        corr_tab = QWidget()
+        corr_layout = QVBoxLayout(corr_tab)
+        corr_layout.setContentsMargins(0, 0, 0, 0)
         self.corr_plot = pg.PlotWidget(title="Element correlation")
         self.corr_plot.setLabel("bottom", "Map A")
         self.corr_plot.setLabel("left", "Map B")
-        right_layout.addWidget(self.corr_plot, stretch=1)
+        corr_layout.addWidget(self.corr_plot)
+        self.map_plot_tabs.addTab(corr_tab, "Correlate")
+
+        matrix_tab = QWidget()
+        matrix_layout = QVBoxLayout(matrix_tab)
+        matrix_layout.setContentsMargins(0, 0, 0, 0)
+        matrix_hint = QLabel(
+            "Pearson r of checked maps. Click a cell to open that pair on Correlate."
+        )
+        matrix_hint.setStyleSheet("color: #555; font-size: 11px;")
+        matrix_hint.setWordWrap(True)
+        matrix_layout.addWidget(matrix_hint)
+        self.matrix_plot = pg.PlotWidget()
+        self.matrix_plot.setBackground("w")
+        self.matrix_plot.setAspectLocked(True)
+        self.matrix_plot.invertY(True)
+        self.matrix_image = pg.ImageItem()
+        self.matrix_image.setLookupTable(_diverging_lut())
+        self.matrix_image.setLevels((-1.0, 1.0))
+        self.matrix_plot.addItem(self.matrix_image)
+        self.matrix_plot.scene().sigMouseClicked.connect(self._on_matrix_clicked)
+        matrix_layout.addWidget(self.matrix_plot, stretch=1)
+        self.map_plot_tabs.addTab(matrix_tab, "Matrix")
+
+        right_layout.addWidget(self.map_plot_tabs, stretch=1)
 
         self.info_label = QLabel("Open an .ipj mapping project to begin.")
         self.info_label.setWordWrap(True)
@@ -1209,13 +1401,16 @@ class MappingPanel(QWidget):
                 cam.setToolTip(0, "Optical camera photo of the sample")
                 sample_item.addChild(cam)
             for site in sample.sites:
-                site_item = QTreeWidgetItem([site.name])
+                site_item = QTreeWidgetItem([site.name, site.contents_label()])
                 site_item.setData(0, Qt.UserRole, ("site", sample.id, site.id))
                 site_item.setFlags(
                     (site_item.flags() | Qt.ItemIsEditable | Qt.ItemIsSelectable)
                     & ~Qt.ItemIsUserCheckable
                 )
-                site_item.setToolTip(0, self._site_tooltip(site))
+                tip = self._site_tooltip(site)
+                site_item.setToolTip(0, tip)
+                site_item.setToolTip(1, tip)
+                site_item.setForeground(1, QColor("#555555"))
                 sample_item.addChild(site_item)
 
         root.setExpanded(True)
@@ -1273,10 +1468,18 @@ class MappingPanel(QWidget):
             root.addChild(it)
 
         vendor_maps = [
-            m for m in fov.element_maps if m.metadata.get("source") not in ("cube_total", "cube_roi")
+            m
+            for m in fov.element_maps
+            if m.metadata.get("source")
+            not in ("cube_total", "cube_roi", "pca", "ratio", "difference", "particles")
         ]
         cube_maps = [
             m for m in fov.element_maps if m.metadata.get("source") in ("cube_total", "cube_roi")
+        ]
+        derived_maps = [
+            m
+            for m in fov.element_maps
+            if m.metadata.get("source") in ("pca", "ratio", "difference", "particles")
         ]
 
         # Preserve checks across rebuilds; default-check first few vendor maps
@@ -1313,6 +1516,27 @@ class MappingPanel(QWidget):
                 )
                 it.setData(0, Qt.UserRole, ("map", fov.id, m.name))
                 cube_item.addChild(it)
+        if derived_maps:
+            der_item = QTreeWidgetItem(["Derived maps (PCA / ratio / particles)"])
+            der_item.setData(0, Qt.UserRole, ("maps_folder", fov.id))
+            root.addChild(der_item)
+            for m in derived_maps:
+                label = m.name
+                pct = m.metadata.get("explained_variance_pct")
+                if pct is not None:
+                    label = f"{m.name} ({pct:.1f}%)"
+                it = QTreeWidgetItem([label])
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable)
+                it.setCheckState(
+                    0,
+                    Qt.Checked if m.name in self._checked_map_names else Qt.Unchecked,
+                )
+                it.setData(0, Qt.UserRole, ("map", fov.id, m.name))
+                tip = m.metadata.get("source", "derived")
+                if m.metadata.get("input_maps"):
+                    tip += ": " + ", ".join(m.metadata["input_maps"][:8])
+                it.setToolTip(0, tip)
+                der_item.addChild(it)
 
         sum_spec = fov.sum_spectrum()
         other_specs = [s for s in fov.spectra if s is not sum_spec]
@@ -1390,10 +1614,18 @@ class MappingPanel(QWidget):
             self._apply_rename_from_item(item, payload)
 
     def _on_sites_tree_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        if self._tree_updating or column != 0:
+        if self._tree_updating:
             return
         payload = item.data(0, Qt.UserRole)
         if not payload:
+            return
+        if column != 0:
+            if payload[0] == "site":
+                site = self._find_fov(payload[2])
+                if site is not None:
+                    self._tree_updating = True
+                    item.setText(1, site.contents_label())
+                    self._tree_updating = False
             return
         if payload[0] in ("sample", "site"):
             self._apply_rename_from_item(item, payload)
@@ -1432,7 +1664,10 @@ class MappingPanel(QWidget):
                 return
             site.name = new_name
             site.metadata["site_name"] = new_name
-            item.setToolTip(0, self._site_tooltip(site))
+            tip = self._site_tooltip(site)
+            item.setToolTip(0, tip)
+            item.setToolTip(1, tip)
+            item.setText(1, site.contents_label())
             self._sync_labels_after_rename()
             self.status_message.emit(f"Renamed site → {new_name}")
             return
@@ -1621,42 +1856,9 @@ class MappingPanel(QWidget):
     @staticmethod
     def _site_tooltip(site: MappingFOV) -> str:
         bits = [site.name, "F2 / right-click to rename"]
-        if site.cube is not None or site.metadata.get("has_smartmap"):
-            bits.append("SmartMap")
+        bits.extend(site.contents_tags())
         if site.optical is not None:
             bits.append("photo")
-        n_maps = len(
-            [m for m in site.element_maps if m.metadata.get("source") != "cube_roi"]
-        )
-        if n_maps:
-            bits.append(f"{n_maps} maps")
-        if site.line_scans:
-            ls = site.line_scans[0]
-            tag = "line" if ls.is_line_scan else "multipoint"
-            bits.append(f"{ls.n_points}-pt {tag}")
-        elif site.spectra:
-            bits.append(f"{len(site.spectra)} spectra")
-        return " · ".join(bits)
-
-    @staticmethod
-    def _site_label(site: MappingFOV) -> str:
-        bits = [site.name]
-        if site.cube is not None:
-            bits.append("SmartMap")
-        elif site.metadata.get("has_smartmap"):
-            bits.append("SmartMap")
-        n_maps = len(
-            [m for m in site.element_maps if m.metadata.get("source") != "cube_roi"]
-        )
-        if n_maps:
-            bits.append(f"{n_maps} maps")
-        if site.line_scans:
-            ls = site.line_scans[0]
-            tag = "line" if ls.is_line_scan else "multipoint"
-            bits.append(f"{ls.n_points}-pt {tag}")
-        n_spec = len(site.spectra)
-        if n_spec and not site.line_scans:
-            bits.append(f"{n_spec} spectra")
         return " · ".join(bits)
 
     def _find_fov(self, fov_id: str) -> Optional[MappingFOV]:
@@ -1717,6 +1919,10 @@ class MappingPanel(QWidget):
             self._activate_site(site, switch_to_data=True)
 
     def _activate_site(self, site: MappingFOV, *, switch_to_data: bool = False) -> None:
+        self._particle_result = None
+        if hasattr(self, "particle_table"):
+            self.particle_table.setRowCount(0)
+        self._matrix_names = []
         self._set_fov(site)
         self.active_site_label.setText(
             f"Active site: {self._sample_name_for_site(site)} → {site.name}"
@@ -1775,9 +1981,10 @@ class MappingPanel(QWidget):
             self.rgb_check.blockSignals(True)
             self.rgb_check.setChecked(False)
             self.rgb_check.blockSignals(False)
+        avail = self._photo_availability()
         if fov.optical is not None:
             self._select_combo_kind("optical")
-        elif has_photo:
+        elif avail.get("whole_image"):
             self._select_combo_kind("whole_image")
         else:
             self._refresh_canvas()
@@ -2352,6 +2559,9 @@ class MappingPanel(QWidget):
             self.b_combo,
             self.corr_a,
             self.corr_b,
+            self.ratio_num,
+            self.ratio_den,
+            self.particle_map_combo,
         ):
             combo.blockSignals(True)
             combo.clear()
@@ -2364,6 +2574,9 @@ class MappingPanel(QWidget):
                 self.b_combo,
                 self.corr_a,
                 self.corr_b,
+                self.ratio_num,
+                self.ratio_den,
+                self.particle_map_combo,
             ):
                 combo.blockSignals(False)
             return
@@ -2379,16 +2592,28 @@ class MappingPanel(QWidget):
             self.map_combo.addItem(f"Camera: {fov.optical.name}", ("optical",))
         for m in fov.element_maps:
             self.map_combo.addItem(m.name, ("map", m.name))
-            for combo in (self.r_combo, self.g_combo, self.b_combo, self.corr_a, self.corr_b):
+            for combo in (
+                self.r_combo,
+                self.g_combo,
+                self.b_combo,
+                self.corr_a,
+                self.corr_b,
+                self.ratio_num,
+                self.ratio_den,
+                self.particle_map_combo,
+            ):
                 combo.addItem(m.name, m.name)
 
         # Sensible RGB defaults: first three maps
         maps = fov.element_maps
         if len(maps) >= 1:
             self.r_combo.setCurrentIndex(0)
+            self.ratio_num.setCurrentIndex(0)
+            self.particle_map_combo.setCurrentIndex(0)
         if len(maps) >= 2:
             self.g_combo.setCurrentIndex(1)
             self.corr_b.setCurrentIndex(1)
+            self.ratio_den.setCurrentIndex(1)
         if len(maps) >= 3:
             self.b_combo.setCurrentIndex(2)
 
@@ -2399,6 +2624,9 @@ class MappingPanel(QWidget):
             self.b_combo,
             self.corr_a,
             self.corr_b,
+            self.ratio_num,
+            self.ratio_den,
+            self.particle_map_combo,
         ):
             combo.blockSignals(False)
 
@@ -2413,6 +2641,7 @@ class MappingPanel(QWidget):
             "neighborhood": self._neighborhood_size(),
             "bin_factor": int(self.bin_combo.currentData() or 1),
             "scale": self.scale_combo.currentData() or "linear",
+            "contrast": self.contrast_combo.currentData() or "none",
         }
 
     def _process_map_array(self, data: np.ndarray) -> np.ndarray:
@@ -2451,13 +2680,12 @@ class MappingPanel(QWidget):
         return ""
 
     def _on_map_combo_changed(self, _index: int = 0) -> None:
-        """Honor the View selector even if RGB or Data-tree map checks are on."""
+        """Honor Data-tree image selection even if RGB or map checks are on."""
         kind = self._combo_kind()
         if kind in ("optical", "whole_image", "overview"):
             self.rgb_check.blockSignals(True)
             self.rgb_check.setChecked(False)
             self.rgb_check.blockSignals(False)
-        if kind in ("optical", "whole_image"):
             self._select_overlay_target(kind)
         if kind == "overview":
             self.overlay_check.blockSignals(True)
@@ -2499,14 +2727,25 @@ class MappingPanel(QWidget):
             return fov.element_maps[0]
         return None
 
-    def _photo_availability(self) -> tuple:
-        """Return (has_map_area, has_sample_camera)."""
+    def _photo_availability(self) -> dict:
+        """Which overlay backgrounds exist for the active site."""
         fov = self.current_fov
         if fov is None:
-            return False, False
+            return {"optical": False, "overview": False, "whole_image": False}
         sample = self._sample_for_site(fov)
         has_camera = sample is not None and sample.whole_image is not None
-        return fov.optical is not None, has_camera
+        return {
+            "optical": fov.optical is not None,
+            "overview": fov.overview is not None,
+            "whole_image": has_camera,
+        }
+
+    def _preferred_overlay_target(self) -> str:
+        avail = self._photo_availability()
+        for key in ("optical", "overview", "whole_image"):
+            if avail.get(key):
+                return key
+        return "optical"
 
     def _select_overlay_target(self, kind: str) -> None:
         for i in range(self.overlay_target.count()):
@@ -2522,8 +2761,8 @@ class MappingPanel(QWidget):
 
     def _sync_overlay_photo_controls(self) -> bool:
         """Enable overlay widgets from available photos. Returns True if any photo exists."""
-        has_optical, has_camera = self._photo_availability()
-        has_photo = has_optical or has_camera
+        avail = self._photo_availability()
+        has_photo = any(avail.values())
         for w in (
             self.overlay_check,
             self.overlay_target,
@@ -2535,19 +2774,13 @@ class MappingPanel(QWidget):
         model = self.overlay_target.model()
         for i in range(self.overlay_target.count()):
             key = self.overlay_target.itemData(i)
-            enabled = (key == "optical" and has_optical) or (
-                key == "whole_image" and has_camera
-            )
             item = model.item(i)
             if item is not None:
-                item.setEnabled(enabled)
+                item.setEnabled(bool(avail.get(key)))
         if has_photo:
             current = self.overlay_target.currentData()
-            current_ok = (current == "optical" and has_optical) or (
-                current == "whole_image" and has_camera
-            )
-            if not current_ok:
-                self._select_overlay_target("optical" if has_optical else "whole_image")
+            if not avail.get(current):
+                self._select_overlay_target(self._preferred_overlay_target())
         return has_photo
 
     def _overlay_photo(self):
@@ -2561,8 +2794,14 @@ class MappingPanel(QWidget):
             if sample is not None and sample.whole_image is not None:
                 return sample.whole_image.data, "sample camera"
             return None, ""
+        if target == "overview":
+            if fov.overview is not None:
+                return fov.overview.data, "trans. x-ray"
+            return None, ""
         if fov.optical is not None:
             return fov.optical.data, "map area photo"
+        if fov.overview is not None:
+            return fov.overview.data, "trans. x-ray"
         return None, ""
 
     def _show_photo_overlay(self) -> bool:
@@ -2615,9 +2854,10 @@ class MappingPanel(QWidget):
 
         try:
             dest_rect = None
+            reg_how = None
             target = self.overlay_target.currentData() or "optical"
             if target == "whole_image":
-                dest_rect = self._map_dest_rect_on_sample_camera(photo)
+                dest_rect, reg_how = self._map_dest_rect_on_sample_camera(photo)
             blended = overlay_on_photo(
                 photo,
                 overlay_rgb,
@@ -2627,7 +2867,7 @@ class MappingPanel(QWidget):
             )
             note = ""
             if target == "whole_image" and dest_rect is not None:
-                note = " (registered to map area)"
+                note = f" (registered via {reg_how})" if reg_how else " (registered)"
             elif target == "whole_image":
                 note = " (no stage rect — stretched; check map geometry)"
             if target == "whole_image":
@@ -2648,39 +2888,88 @@ class MappingPanel(QWidget):
             return False
         return True
 
-    def _map_dest_rect_on_sample_camera(self, photo) -> Optional[tuple]:
-        """Pixel rect for the active map FOV on the sample-camera photo."""
+    def _stage_camera_for_photo(self, photo) -> Optional[StageCamera]:
+        """Calibrated StageCamera for this sample overview (crop/red when possible)."""
+        fov = self.current_fov
+        sample = self._sample_for_site(fov) if fov is not None else None
+        sites = list(sample.sites) if sample is not None else (
+            [fov] if fov is not None else []
+        )
+        cam = camera_from_sample_sites(photo, sites)
+        if cam is not None:
+            self._ls_camera_model = cam
+            return cam
+        cam = camera_from_image(photo)
+        if cam is not None:
+            self._ls_camera_model = cam
+        return cam
+
+    def _map_dest_rect_on_sample_camera(self, photo) -> tuple:
+        """Pixel rect + registration method for the active map on the sample camera.
+
+        Returns ``(rect, method)`` where method is ``map-area photo``, ``red ROI``,
+        ``stage``, or ``None`` if placement is unknown.
+        """
         fov = self.current_fov
         if fov is None:
-            return None
+            return None, None
         photo_arr = np.asarray(photo)
-        cache_key = None
+        opt_shape = None
+        if fov.optical is not None:
+            opt_shape = tuple(np.asarray(fov.optical.data).shape)
+        cache_key = (fov.id, tuple(photo_arr.shape), opt_shape)
+        cached = self._cam_dest_rect_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        # 1) Exact MapAreaImage crop of the sample camera
         if fov.optical is not None:
             opt = np.asarray(fov.optical.data)
-            cache_key = (fov.id, tuple(photo_arr.shape), tuple(opt.shape))
-            cached = self._cam_dest_rect_cache.get(cache_key)
-            if cached is not None:
-                return cached
             rect = locate_image_crop(photo_arr, opt)
             if rect is not None:
-                self._cam_dest_rect_cache[cache_key] = rect
-                return rect
+                result = (rect, "map-area photo")
+                self._cam_dest_rect_cache[cache_key] = result
+                return result
+
+            # 2) Magnified map-area optical resized to stage size, searched
+            #    near the stage-predicted centre (common on newer XGT IPJs)
+            size = fov.stage_size_mm
+            if size is not None and fov.stage_center_mm is not None:
+                cam0 = camera_from_image(photo_arr)
+                if cam0 is not None:
+                    tw = float(size[0]) / cam0.mm_per_px_x
+                    th = float(size[1]) / cam0.mm_per_px_y
+                    cx, cy = cam0.stage_to_pixel(*fov.stage_center_mm)
+                    rect = locate_scaled_template(
+                        photo_arr,
+                        opt,
+                        tw,
+                        th,
+                        center_xy=(cx, cy),
+                    )
+                    if rect is not None:
+                        result = (rect, "map-area optical")
+                        self._cam_dest_rect_cache[cache_key] = result
+                        return result
+
+        # 3) Instrument-drawn red map box on the overview BMP
+        red = locate_red_map_rect(photo_arr)
+        if red is not None:
+            result = (red, "red ROI")
+            self._cam_dest_rect_cache[cache_key] = result
+            return result
+
+        # 4) Stage mm → pixels (uses crop/optical/red-calibrated camera when available)
         bounds = fov.stage_bounds_mm()
         if bounds is None:
-            return None
-        cam = self._ls_camera_model
-        if cam is None or cam.width_px != int(photo_arr.shape[1]):
-            cam = camera_from_image(photo)
+            return None, None
+        cam = self._stage_camera_for_photo(photo_arr)
         if cam is None:
-            sample = self._sample_for_site(fov)
-            if sample is not None and sample.whole_image is not None:
-                cam = camera_from_image(sample.whole_image)
-        if cam is None:
-            return None
+            return None, None
         rect = cam.stage_bounds_to_pixel_rect(bounds)
-        if cache_key is not None:
-            self._cam_dest_rect_cache[cache_key] = rect
-        return rect
+        result = (rect, "stage")
+        self._cam_dest_rect_cache[cache_key] = result
+        return result
 
     def _refresh_canvas(self) -> None:
         fov = self.current_fov
@@ -2691,16 +2980,13 @@ class MappingPanel(QWidget):
         if kind != "whole_image":
             self.canvas.clear_series_markers()
         photo, _label = self._overlay_photo()
-        overlay_ok = (
-            self.overlay_check.isChecked()
-            and photo is not None
-            and kind != "overview"
-        )
+        overlay_ok = self.overlay_check.isChecked() and photo is not None
         if overlay_ok:
             if self._show_photo_overlay():
+                self._show_particle_markers()
                 return
 
-        # Photo / overview from the View selector beat RGB and Data-tree checks
+        # Photo / Trans. x-ray from the Data tree beat RGB and map checks
         if kind == "overview" and fov.overview is not None:
             self.canvas.set_image(
                 fov.overview.data, rgb=False, title=fov.overview.name or "Overview"
@@ -2725,6 +3011,7 @@ class MappingPanel(QWidget):
                 self.canvas.set_images(panels)
             except Exception as exc:
                 self.status_message.emit(f"Map display failed: {exc}")
+            self._show_particle_markers()
             return
 
         if self.rgb_check.isChecked() and fov.element_maps:
@@ -2738,6 +3025,7 @@ class MappingPanel(QWidget):
                 )
             except Exception as exc:
                 self.status_message.emit(f"RGB composite failed: {exc}")
+            self._show_particle_markers()
             return
 
         data = self.map_combo.currentData()
@@ -2755,6 +3043,7 @@ class MappingPanel(QWidget):
                     rgb=False,
                     title=m.name,
                 )
+            self._show_particle_markers()
             return
         if data[0] == "map":
             m = fov.find_map(data[1])
@@ -2766,6 +3055,7 @@ class MappingPanel(QWidget):
                     rgb=False,
                     title=m.name,
                 )
+            self._show_particle_markers()
 
     def _show_photo(self, image) -> None:
         arr = image.data
@@ -2777,8 +3067,7 @@ class MappingPanel(QWidget):
             return
         kind = (getattr(image, "metadata", {}) or {}).get("kind")
         if kind == "whole_image" or self._combo_kind() == "whole_image":
-            if self._ls_camera_model is None:
-                self._ls_camera_model = camera_from_image(image)
+            self._stage_camera_for_photo(image)
             self._overlay_line_scan_on_maps_camera()
         else:
             self.canvas.clear_series_markers()
@@ -3344,7 +3633,9 @@ class MappingPanel(QWidget):
                 "No sample camera in this project — overlay needs the overview photo."
             )
             return
-        cam = camera_from_image(image)
+        sample = self._sample_for_site(self.current_fov) if self.current_fov else None
+        sites = list(sample.sites) if sample is not None else []
+        cam = camera_from_sample_sites(image, sites) or camera_from_image(image)
         self._ls_camera_model = cam
         rgb = image.data.ndim == 3 and image.data.shape[-1] >= 3
         try:
@@ -3381,11 +3672,19 @@ class MappingPanel(QWidget):
             px, py, highlight=hi_plot, connect=True
         )
         n = ls.n_points
+        cal = (
+            abs(float(cam.origin_x_mm)) > 1e-6
+            or abs(float(cam.origin_y_mm)) > 1e-6
+        )
+        origin_note = (
+            "origin calibrated from map/ROI"
+            if cal
+            else "origin at image centre (uncalibrated)"
+        )
         self.ls_camera_label.setText(
             f"{n} points on the sample camera "
-            f"(100×100 mm stage in {cam.fov_width_mm:.0f}×"
-            f"{cam.fov_height_mm:.0f} mm camera FOV, origin at centre). "
-            "Hover the profile or click a point."
+            f"({cam.fov_width_mm:.0f}×{cam.fov_height_mm:.0f} mm FOV, "
+            f"{origin_note}). Hover the profile or click a point."
         )
         self._overlay_line_scan_on_maps_camera(ls)
 
@@ -3639,7 +3938,292 @@ class MappingPanel(QWidget):
         self.corr_plot.setLabel("bottom", a.name)
         self.corr_plot.setLabel("left", b.name)
         self.corr_plot.setTitle(f"Correlation  r={r:.3f}  ρ={rho:.3f}")
+        self.map_plot_tabs.setCurrentIndex(1)
         self.status_message.emit(f"{a.name} vs {b.name}: Pearson r={r:.3f}, Spearman ρ={rho:.3f}")
+
+    def _plot_correlation_matrix(self) -> None:
+        maps = self._checked_display_maps()
+        if len(maps) < 2:
+            QMessageBox.information(
+                self,
+                "Correlation matrix",
+                "Check at least two element maps in the Data tree.",
+            )
+            return
+        try:
+            matrix, names = map_correlation_matrix(maps, method="pearson")
+        except Exception as exc:
+            QMessageBox.warning(self, "Correlation matrix", str(exc))
+            return
+        self._matrix_names = list(names)
+        n = len(names)
+        filled = np.nan_to_num(np.asarray(matrix, dtype=float), nan=0.0)
+        self.matrix_image.setImage(filled, autoLevels=False)
+        self.matrix_image.setLevels((-1.0, 1.0))
+        ticks = [(i + 0.5, names[i]) for i in range(n)]
+        self.matrix_plot.getAxis("bottom").setTicks([ticks])
+        self.matrix_plot.getAxis("left").setTicks([ticks])
+        self.matrix_plot.setTitle(f"Pearson r ({n} maps)")
+        self.matrix_plot.setXRange(0, n, padding=0)
+        self.matrix_plot.setYRange(0, n, padding=0)
+        self.map_plot_tabs.setCurrentIndex(2)
+        self.status_message.emit(f"Correlation matrix for {n} checked maps")
+
+    def _on_matrix_clicked(self, event) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        names = self._matrix_names
+        n = len(names)
+        if n == 0:
+            return
+        view = self.matrix_plot.getViewBox()
+        pos = view.mapSceneToView(event.scenePos())
+        i = int(pos.x())
+        j = int(pos.y())
+        if not (0 <= i < n and 0 <= j < n) or i == j:
+            return
+        # Set corr combos to this pair and plot scatter
+        self._set_combo_by_data(self.corr_a, names[i])
+        self._set_combo_by_data(self.corr_b, names[j])
+        self._plot_correlation()
+
+    def _set_combo_by_data(self, combo: QComboBox, data) -> None:
+        for i in range(combo.count()):
+            if combo.itemData(i) == data:
+                combo.setCurrentIndex(i)
+                return
+
+    def _maps_after_upsert(self) -> None:
+        """Refresh UI after adding derived maps."""
+        self._fill_map_combos()
+        self._populate_data_tree()
+        self._fill_profile_map_list()
+        self._refresh_canvas()
+
+    def _add_ratio_map(self) -> None:
+        fov = self.current_fov
+        if fov is None:
+            return
+        a = fov.find_map(self.ratio_num.currentData() or "")
+        b = fov.find_map(self.ratio_den.currentData() or "")
+        if a is None or b is None:
+            QMessageBox.information(self, "Ratio map", "Select two element maps.")
+            return
+        if a.name == b.name:
+            QMessageBox.information(self, "Ratio map", "Choose different maps for A and B.")
+            return
+        try:
+            data = ratio_map(a.data, b.data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ratio map", str(exc))
+            return
+        name = f"{a.name}/{b.name}"
+        em = ElementMap(
+            name=name,
+            data=data,
+            line=name,
+            element="",
+            metadata={"source": "ratio", "numerator": a.name, "denominator": b.name},
+        )
+        fov.upsert_map(em)
+        self._checked_map_names.add(name)
+        self._maps_after_upsert()
+        self.status_message.emit(f"Added ratio map {name}")
+
+    def _add_difference_map(self) -> None:
+        fov = self.current_fov
+        if fov is None:
+            return
+        a = fov.find_map(self.ratio_num.currentData() or "")
+        b = fov.find_map(self.ratio_den.currentData() or "")
+        if a is None or b is None:
+            QMessageBox.information(self, "Difference map", "Select two element maps.")
+            return
+        try:
+            data = difference_map(a.data, b.data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Difference map", str(exc))
+            return
+        name = f"{a.name}−{b.name}"
+        em = ElementMap(
+            name=name,
+            data=data,
+            line=name,
+            element="",
+            metadata={"source": "difference", "a": a.name, "b": b.name},
+        )
+        fov.upsert_map(em)
+        self._checked_map_names.add(name)
+        self._maps_after_upsert()
+        self.status_message.emit(f"Added difference map {name}")
+
+    def _run_pca(self) -> None:
+        fov = self.current_fov
+        if fov is None:
+            return
+        maps = self._checked_display_maps()
+        # Prefer non-derived maps for PCA input
+        maps = [
+            m
+            for m in maps
+            if m.metadata.get("source") not in ("pca", "particles")
+        ]
+        if len(maps) < 2:
+            QMessageBox.information(
+                self,
+                "PCA",
+                "Check at least two element maps in the Data tree "
+                "(exclude previous PC maps).",
+            )
+            return
+        n_comp = int(self.pca_n_spin.value())
+        try:
+            result = pca_element_maps(maps, n_components=n_comp)
+        except Exception as exc:
+            QMessageBox.warning(self, "PCA", str(exc))
+            return
+        fov.remove_maps_by_source("pca")
+        for em in result.score_maps:
+            fov.upsert_map(em)
+            self._checked_map_names.add(em.name)
+        self._maps_after_upsert()
+        if self.pca_rgb_check.isChecked() and len(result.score_maps) >= 1:
+            self._set_combo_by_data(self.r_combo, result.score_maps[0].name)
+            if len(result.score_maps) >= 2:
+                self._set_combo_by_data(self.g_combo, result.score_maps[1].name)
+            if len(result.score_maps) >= 3:
+                self._set_combo_by_data(self.b_combo, result.score_maps[2].name)
+            self.rgb_check.blockSignals(True)
+            self.rgb_check.setChecked(True)
+            self.rgb_check.blockSignals(False)
+            self._refresh_canvas()
+        pcts = ", ".join(
+            f"PC{i + 1}={p * 100:.1f}%"
+            for i, p in enumerate(result.explained_variance_ratio)
+        )
+        self.status_message.emit(f"PCA on {len(maps)} maps: {pcts}")
+
+    def _find_particles(self) -> None:
+        fov = self.current_fov
+        if fov is None:
+            return
+        name = self.particle_map_combo.currentData() or ""
+        em = fov.find_map(name)
+        if em is None:
+            QMessageBox.information(self, "Particles", "Select a map.")
+            return
+        try:
+            result = find_particles(
+                em.data,
+                threshold_percentile=float(self.particle_thr_spin.value()),
+                min_area=int(self.particle_min_area.value()),
+                source_map=em.name,
+                element_maps=fov.element_maps[:12],
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Particles", str(exc))
+            return
+        self._particle_result = result
+        label_em = particle_label_map_as_element(result, name="Particles")
+        fov.upsert_map(label_em)
+        self._checked_map_names.add(label_em.name)
+        self._fill_particle_table(result)
+        self._maps_after_upsert()
+        self._show_particle_markers()
+        self.status_message.emit(
+            f"Found {len(result.particles)} particles on {em.name} "
+            f"(threshold={result.threshold:.3g})"
+        )
+
+    def _fill_particle_table(self, result) -> None:
+        self.particle_table.setRowCount(0)
+        for p in result.particles:
+            row = self.particle_table.rowCount()
+            self.particle_table.insertRow(row)
+            cx, cy = p.centroid_xy
+            vals = [
+                str(p.id),
+                str(p.area_px),
+                f"{p.mean_intensity:.3g}",
+                f"({cx:.1f}, {cy:.1f})",
+            ]
+            for col, text in enumerate(vals):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, p.id)
+                self.particle_table.setItem(row, col, item)
+
+    def _show_particle_markers(self) -> None:
+        result = self._particle_result
+        if result is None or not result.particles:
+            self.canvas.clear_series_markers()
+            return
+        xs = [p.centroid_xy[0] for p in result.particles]
+        ys = [p.centroid_xy[1] for p in result.particles]
+        self.canvas.set_series_markers(xs, ys, connect=False)
+
+    def _clear_particles(self) -> None:
+        self._particle_result = None
+        self.particle_table.setRowCount(0)
+        self.canvas.clear_series_markers()
+        fov = self.current_fov
+        if fov is not None:
+            fov.remove_maps_by_source("particles")
+            self._checked_map_names.discard("Particles")
+            self._maps_after_upsert()
+        self.status_message.emit("Cleared particles")
+
+    def _on_particle_activated(self, row: int, _col: int) -> None:
+        result = self._particle_result
+        fov = self.current_fov
+        if result is None or fov is None:
+            return
+        item = self.particle_table.item(row, 0)
+        if item is None:
+            return
+        pid = item.data(Qt.UserRole)
+        particle = next((p for p in result.particles if p.id == pid), None)
+        if particle is None:
+            return
+        self.canvas.set_series_highlight(row)
+        if fov.cube is None:
+            self.status_message.emit(
+                f"Particle {particle.id}: area={particle.area_px} px "
+                f"(no cube for spectrum sum)"
+            )
+            return
+        mask = result.label_map == particle.id
+        try:
+            counts, n_pix = fov.cube.spectrum_in_mask(mask)
+        except Exception as exc:
+            QMessageBox.warning(self, "Particle spectrum", str(exc))
+            return
+        if n_pix < 1:
+            return
+        from core.spectrum import Spectrum
+
+        energy = fov.cube.energy_axis_kev()
+        dwell = fov.estimated_dwell_s() or 1.0
+        sum_ms = fov.sum_spectrum()
+        ms = MapSpectrum(
+            spectrum=Spectrum(
+                energy=energy,
+                counts=counts.astype(np.float64),
+                live_time=float(dwell) * float(n_pix),
+                real_time=float(dwell) * float(n_pix),
+                metadata={"name": f"Particle {particle.id}"},
+            ),
+            name=f"Particle {particle.id}",
+            x=particle.centroid_xy[0],
+            y=particle.centroid_xy[1],
+            kind="roi",
+            peak_labels=list(sum_ms.peak_labels) if sum_ms else [],
+        )
+        self._picked_spectrum = ms
+        self._show_pixel_spectrum(ms)
+        self.status_message.emit(
+            f"Particle {particle.id}: {particle.area_px} px, "
+            f"mean={particle.mean_intensity:.3g}"
+        )
 
     # ----------------------------------------------- send / fit / export
     def _selected_map_spectrum(self) -> Optional[MapSpectrum]:

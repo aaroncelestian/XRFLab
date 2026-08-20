@@ -291,6 +291,52 @@ class MappingFOV:
             or self.optical is not None
         )
 
+    def contents_tags(self) -> List[str]:
+        """Compact labels for the Sites tree: maps, line scan, multipoint, spots."""
+        tags: List[str] = []
+        if self.cube is not None or self.metadata.get("has_smartmap"):
+            tags.append("SmartMap")
+        n_maps = len(
+            [
+                m
+                for m in self.element_maps
+                if m.metadata.get("source") != "cube_roi"
+            ]
+        )
+        if n_maps:
+            tags.append("1 map" if n_maps == 1 else f"{n_maps} maps")
+        n_line = 0
+        n_line_pts = 0
+        n_multi = 0
+        n_multi_pts = 0
+        for ls in self.line_scans:
+            if ls.is_multipoint:
+                n_multi += 1
+                n_multi_pts += ls.n_points
+            else:
+                n_line += 1
+                n_line_pts += ls.n_points
+        if n_line == 1:
+            tags.append(f"{n_line_pts}-pt line")
+        elif n_line > 1:
+            tags.append(f"{n_line} lines")
+        if n_multi == 1:
+            tags.append(f"{n_multi_pts}-pt multi")
+        elif n_multi > 1:
+            tags.append(f"{n_multi} multi")
+        line_point_ids = {id(s) for ls in self.line_scans for s in ls.points}
+        n_spots = sum(
+            1
+            for s in self.spectra
+            if id(s) not in line_point_ids and not self._is_sum_spectrum(s)
+        )
+        if n_spots:
+            tags.append("1 spot" if n_spots == 1 else f"{n_spots} spots")
+        return tags
+
+    def contents_label(self) -> str:
+        return " · ".join(self.contents_tags())
+
     @staticmethod
     def _is_sum_spectrum(ms: MapSpectrum) -> bool:
         if ms.kind == "sum":
@@ -350,6 +396,24 @@ class MappingFOV:
         self.element_maps.append(em)
         self.element_maps.sort(key=lambda m: m.name)
         return em
+
+    def upsert_map(self, em: ElementMap) -> ElementMap:
+        """Replace an existing map with the same name, or append."""
+        self.element_maps = [m for m in self.element_maps if m.name != em.name]
+        self.element_maps.append(em)
+        self.element_maps.sort(key=lambda m: m.name)
+        if not self.width or not self.height:
+            self.height, self.width = em.shape
+        return em
+
+    def remove_maps_by_source(self, *sources: str) -> int:
+        """Drop maps whose metadata source is in ``sources``. Returns count removed."""
+        before = len(self.element_maps)
+        wanted = set(sources)
+        self.element_maps = [
+            m for m in self.element_maps if m.metadata.get("source") not in wanted
+        ]
+        return before - len(self.element_maps)
 
     def pixel_count(self) -> int:
         if self.width and self.height:
