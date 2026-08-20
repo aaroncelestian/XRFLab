@@ -252,3 +252,15 @@ def _install_linux_desktop() -> ShortcutResult:
 def _ps_escape(path: Path | str) -> str:
     """Escape a path for embedding inside single-quoted PowerShell strings."""
     return str(path).replace("'", "''")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry: ``python -m utils.desktop_shortcut``."""
+    _ = argv  # reserved for future flags
+    result = install_desktop_shortcut()
+    print(result.message)
+    return 0 if result.success else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -95,7 +95,11 @@ conda create -n xrflab python=3.12 -y
 conda activate xrflab
 conda install -c conda-forge xraylib -y
 pip install -r requirements.txt
+python -m utils.sample_data
+python -m utils.desktop_shortcut
 ```
+
+That last command puts an **XRFLab** icon on your Desktop (macOS `.app`, Windows `.lnk`). You can recreate it later with **Help → Install Desktop Shortcut**.
 
 The prompt should show `(xrflab)`. Stay in that environment for every later command.
 
@@ -117,13 +121,7 @@ python main.py
 
 On Windows, if `conda activate` is not found in a normal Command Prompt, open **Anaconda Prompt** (or “Miniconda Prompt”) from the Start menu and run the same commands there.
 
-Optional sample spectra:
-
-```bash
-python -m utils.sample_data
-```
-
-After the window opens: **Help → Install Desktop Shortcut** adds an XRFLab icon to your Desktop.
+Or double-click the **XRFLab** Desktop icon.
 
 Each new session:
 
@@ -169,10 +167,12 @@ python3 -m venv venv
 source venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m utils.sample_data
+python -m utils.desktop_shortcut
 python main.py
 ```
 
-One-shot helper (venv + deps + sample data):
+One-shot helper (venv + deps + sample data + Desktop shortcut):
 
 ```bash
 chmod +x setup.sh
@@ -202,6 +202,16 @@ python -m venv venv
 venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+python -m utils.sample_data
+python -m utils.desktop_shortcut
+python main.py
+```
+
+One-shot helper (venv + deps + sample data + Desktop shortcut):
+
+```bat
+setup.bat
+venv\Scripts\activate
 python main.py
 ```
 
@@ -211,7 +221,7 @@ In PowerShell, activate with `.\venv\Scripts\Activate.ps1`. If scripts are block
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-Each new session: `source venv/bin/activate` (macOS) or `venv\Scripts\activate` (Windows), then `python main.py`.
+Each new session: `source venv/bin/activate` (macOS) or `venv\Scripts\activate` (Windows), then `python main.py` — or use the Desktop icon.
 
 ---
 
@@ -226,7 +236,7 @@ Each new session: `source venv/bin/activate` (macOS) or `venv\Scripts\activate` 
 | Window never appears / Qt plugin error | Install from a local disk path, not iCloud/OneDrive. On Windows avoid Store Python; use Miniconda or python.org 64-bit. |
 | `python` not found (venv path) | Open a new terminal; on macOS use `python3`. On Windows enable PATH or use `python -m pip …`. |
 | macOS “unidentified developer” | System Settings → Privacy & Security → Open Anyway. |
-| Want a Desktop icon | Launch once, then **Help → Install Desktop Shortcut**. |
+| Want a Desktop icon | Run `python -m utils.desktop_shortcut` with the env active, or use **Help → Install Desktop Shortcut**. |
 
 ---
 
