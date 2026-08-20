@@ -128,10 +128,38 @@ def test_fp_ignores_tube_lines():
         peaks,
         MatrixAssumptions(kind=MatrixKind.MEASURED),
         {"excitation_energy": 50.0, "incident_angle": 45.0},
+        tube_element="Rh",
+        sample_contains_tube_element=False,
     )
     assert result.success
     assert "Fe" in result.element_wt
     assert "Rh" not in result.element_wt
+
+
+def test_fp_excludes_sample_rh_without_opt_in():
+    peaks = [
+        _peak("Fe", "Kα1", 1000, 6.4),
+        _peak("Rh", "Kα1", 500, 20.2, tube=False),
+    ]
+    excluded = quantify_from_peaks(
+        peaks,
+        MatrixAssumptions(kind=MatrixKind.MEASURED),
+        {"excitation_energy": 50.0, "incident_angle": 45.0},
+        tube_element="Rh",
+        sample_contains_tube_element=False,
+    )
+    assert excluded.success
+    assert "Rh" not in excluded.element_wt
+
+    included = quantify_from_peaks(
+        peaks,
+        MatrixAssumptions(kind=MatrixKind.MEASURED),
+        {"excitation_energy": 50.0, "incident_angle": 45.0},
+        tube_element="Rh",
+        sample_contains_tube_element=True,
+    )
+    assert included.success
+    assert "Rh" in included.element_wt
 
 
 def test_fp_roundtrip_quartz():

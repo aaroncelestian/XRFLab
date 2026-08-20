@@ -130,7 +130,7 @@ def test_calibrate_stage_camera_aligns_center_and_size():
     photo = np.zeros((1944, 2592, 3), dtype=np.uint8)
     # Fake map rect on the right side of the photo
     rect = (1684.0, 873.0, 1726.0, 909.0)
-    center = (6.56756591796875, 5.240478515625)
+    center = (18.598, 3.033)
     size = (2.304, 1.962)
     cam = calibrate_stage_camera(photo, center, rect, size)
     assert cam is not None

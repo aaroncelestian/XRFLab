@@ -75,13 +75,20 @@ def _atomic_number(symbol: str) -> Optional[int]:
         return None
 
 
-def observed_areas_from_peaks(peaks) -> Dict[str, Tuple[float, str, float]]:
+def observed_areas_from_peaks(
+    peaks,
+    *,
+    tube_element=None,
+    sample_contains_tube_element=False,
+) -> Dict[str, Tuple[float, str, float]]:
     """
     Strongest non-tube sample peak per element.
 
     Returns:
         {element: (area, line, energy)}
     """
+    anode = tube_element
+    include_anode = bool(sample_contains_tube_element)
     best: Dict[str, Tuple[float, str, float]] = {}
     for peak in peaks or []:
         if getattr(peak, "is_tube_line", False):
@@ -89,10 +96,14 @@ def observed_areas_from_peaks(peaks) -> Dict[str, Tuple[float, str, float]]:
         element = getattr(peak, "element", None)
         if not element or element in _LIGHT:
             continue
+        line = getattr(peak, "line", None) or "Kα1"
+        if str(line).startswith("Compton"):
+            continue
+        if anode and element == anode and not include_anode:
+            continue
         area = float(getattr(peak, "area", 0.0) or 0.0)
         if area <= 0:
             continue
-        line = getattr(peak, "line", None) or "Kα1"
         energy = float(getattr(peak, "energy", 0.0) or 0.0)
         prev = best.get(element)
         if prev is None or area > prev[0]:
@@ -241,6 +252,8 @@ def quantify_from_peaks(
     max_iter: int = 20,
     damp: float = 0.7,
     tol: float = 1e-4,
+    tube_element=None,
+    sample_contains_tube_element: bool = False,
 ) -> FPQuantResult:
     """
     Invert fitted peak areas to wt% using relative fundamental parameters.
@@ -252,10 +265,17 @@ def quantify_from_peaks(
         max_iter: FP iteration cap
         damp: mixing factor toward the new cation estimate (0-1)
         tol: max relative cation change for convergence
+        tube_element: Anode symbol excluded unless sample_contains_tube_element
+        sample_contains_tube_element: Opt-in to quantify the tube anode
     """
     assumptions = assumptions or MatrixAssumptions()
     params = experimental_params or {}
-    observed = observed_areas_from_peaks(peaks)
+    observed = observed_areas_from_peaks(
+        peaks,
+        tube_element=tube_element or params.get("tube_element"),
+        sample_contains_tube_element=sample_contains_tube_element
+        or bool(params.get("sample_contains_tube_element")),
+    )
     if not observed:
         return FPQuantResult(
             success=False,

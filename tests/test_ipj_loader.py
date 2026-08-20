@@ -108,21 +108,37 @@ def test_dylan_point_series_and_maps(dylan):
     assert ls.n_points >= 30
     assert ls.points[0].spectrum.num_channels == 4096
     assert ls.points[0].x is not None and ls.points[0].y is not None
-    # Stage XY from XGT2Data float32@154/162 — mm-scale on the 100 mm stage
+    # Stage XY from XGT2Data float64@150/158 (µm → mm)
     assert abs(ls.points[0].x) < 150 and abs(ls.points[0].y) < 150
-    # Dylan Site 2 has irregular stage steps → multipoint, not line scan
+    # Correct µm→mm positions: early dylan points are an equal-step transect
+    from utils.ipj_loader import classify_point_series_kind
+
+    early = ls.points[:12]
+    assert classify_point_series_kind(early) == "line_scan"
+    # Full series then wanders → multipoint overall
     assert ls.kind == "multipoint"
     assert ls.is_multipoint
     assert "Multipoint" in ls.name
-    # Collection order zigzags (~55 mm travel); the spots only span ~11 mm
+    # Correct µm positions: early steps ~0.4 mm; full path travels tens of mm
     path = ls.path_distances()
     proj = ls.distances()
     assert float(path[-1]) > 40.0
-    assert 10.0 < float(proj.max()) < 15.0
+    assert float(proj.max()) > 10.0
     np.testing.assert_allclose(proj, ls.projected_positions())
     # Plot order is spatial, so the abscissa is monotonic
     order = ls.plot_order()
     assert np.all(np.diff(proj[order]) >= -1e-12)
+
+
+def test_map_sum_stage_matches_map_extra_um(dylan, barstow):
+    """Sum-spectrum stage centre matches MapExtra micrometre centre / 1000."""
+    dylan_map = dylan.primary_fov
+    assert dylan_map.stage_center_mm is not None
+    np.testing.assert_allclose(dylan_map.stage_center_mm, (18.598, 3.033), atol=1e-3)
+
+    barstow_map = next(f for f in barstow.fovs if f.element_maps or f.cube)
+    assert barstow_map.stage_center_mm is not None
+    np.testing.assert_allclose(barstow_map.stage_center_mm, (0.512, -12.57), atol=1e-3)
 
 
 def test_barstow_point_series_is_multipoint(barstow):

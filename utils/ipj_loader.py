@@ -46,12 +46,11 @@ _SPECTRUM_HEADER = 10
 _DEFAULT_EV_PER_CHANNEL = 10.0
 _DEFAULT_N_CHANNELS = 4096
 _XGT_ZERO_CHANNEL = 40.0
-# XGT2Data stage X/Y: float32 at these offsets (4-byte zero pad after each).
-# Empirically stage millimetres for spot / line / multipoint spectra and for
-# the map Sum Spectrum (map FOV centre). Nearby doubles at 150/158 are a
-# different field (often large encoder-like values on map FOVs) — do not use.
-_XGT2_STAGE_X_OFF = 154
-_XGT2_STAGE_Y_OFF = 162
+# XGT2Data stage X/Y: float64 micrometres at these offsets (contiguous).
+# Older code mis-read float32 at 154/162 — those bytes are the high half of
+# these doubles and only *look* like plausible millimetre coordinates.
+_XGT2_STAGE_X_OFF = 150
+_XGT2_STAGE_Y_OFF = 158
 # Max relative deviation from median step for "equal spacing" line scans
 _LINE_SCAN_STEP_REL_TOL = 0.15
 # XGT-7200 stage travel is 100 mm; reject absurd stage readings
@@ -604,7 +603,7 @@ def _parse_spectra(
 
         kind = "sum" if "sum" in name.lower() else "spot"
         # Numbered spectra belong to an ordered point series (line or multipoint)
-        if re.fullmatch(r"Spectrum\s+\d+", name, flags=re.I):
+        if _is_series_point_name(name):
             kind = "line_point"
 
         em = _read_em_conditions(
@@ -677,28 +676,33 @@ def _read_xgt2_stage_xy(
 
     Layout (little-endian), observed on XGT-7200 IPJs::
 
-        offset 154: float32 X (mm)
-        offset 158: 4 zero pad bytes
-        offset 162: float32 Y (mm)
-        offset 166: 4 zero pad bytes
+        offset 150: float64 X (micrometres)
+        offset 158: float64 Y (micrometres)
 
-    The doubles that start at 150/158 on some map FOVs are a different
-    quantity (often thousands) and must not be used as stage millimetres.
+    Values are converted to millimetres. When both absolute values already
+    fall inside the stage travel they are treated as millimetres (rare).
+
+    Note: float32 reads at 154/162 alias the high bytes of these doubles and
+    must not be used — they look like mm-scale numbers but are wrong.
     """
     path = spe_base + ["XGT2Data", "XGT2Data"]
     if not ole.exists(path):
         return None, None
     raw = ole.openstream(path).read()
-    need = max(_XGT2_STAGE_X_OFF, _XGT2_STAGE_Y_OFF) + 4
+    need = max(_XGT2_STAGE_X_OFF, _XGT2_STAGE_Y_OFF) + 8
     if len(raw) < need:
         return None, None
-    x = struct.unpack_from("<f", raw, _XGT2_STAGE_X_OFF)[0]
-    y = struct.unpack_from("<f", raw, _XGT2_STAGE_Y_OFF)[0]
+    x = struct.unpack_from("<d", raw, _XGT2_STAGE_X_OFF)[0]
+    y = struct.unpack_from("<d", raw, _XGT2_STAGE_Y_OFF)[0]
     if not (np.isfinite(x) and np.isfinite(y)):
         return None, None
+    # Typical storage is micrometres (e.g. 21511.0). MapExtra centres match.
+    if abs(x) > _STAGE_XY_ABS_MAX_MM or abs(y) > _STAGE_XY_ABS_MAX_MM:
+        x = float(x) / 1000.0
+        y = float(y) / 1000.0
     if abs(x) > _STAGE_XY_ABS_MAX_MM or abs(y) > _STAGE_XY_ABS_MAX_MM:
         return None, None
-    if abs(x) < 1e-6 and abs(y) < 1e-6:
+    if abs(x) < 1e-9 and abs(y) < 1e-9:
         return None, None
     return float(x), float(y)
 
@@ -777,6 +781,37 @@ def _parse_map_extra_geometry(
     return out
 
 
+def _is_series_point_name(name: str) -> bool:
+    """True for vendor labels that mark ordered line/multipoint points."""
+    text = (name or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:Spectrum|Point|Spot|Pos(?:ition)?)\s*\d+",
+            text,
+            flags=re.I,
+        )
+        or re.fullmatch(r"\d+", text)
+    )
+
+
+def _stage_steps_equal(
+    coords: np.ndarray,
+    rel_tol: float = _LINE_SCAN_STEP_REL_TOL,
+) -> bool:
+    """True if consecutive Euclidean steps are equal within ``rel_tol``."""
+    if coords.shape[0] < 3:
+        return False
+    steps = np.hypot(np.diff(coords[:, 0]), np.diff(coords[:, 1]))
+    if not np.all(np.isfinite(steps)):
+        return False
+    med = float(np.median(steps))
+    if med <= 0:
+        return False
+    return float(np.max(np.abs(steps - med))) <= rel_tol * med
+
+
 def classify_point_series_kind(
     points: Sequence[MapSpectrum],
     rel_tol: float = _LINE_SCAN_STEP_REL_TOL,
@@ -784,8 +819,9 @@ def classify_point_series_kind(
     """
     Classify ordered points as line_scan (equal step size) or multipoint.
 
-    Uses consecutive Euclidean distances in stage X/Y. Without usable
-    coordinates we cannot verify equal spacing, so the series is multipoint.
+    Uses stage X/Y. A series is a line scan when consecutive steps are equal
+    in collection order, or (fallback) after sorting along the best-fit
+    stage axis. Without usable coordinates → multipoint.
     """
     coords = [
         (float(p.x), float(p.y))
@@ -796,13 +832,17 @@ def classify_point_series_kind(
     if len(coords) < 3:
         return "multipoint"
     arr = np.asarray(coords, dtype=np.float64)
-    steps = np.hypot(np.diff(arr[:, 0]), np.diff(arr[:, 1]))
-    if not np.all(np.isfinite(steps)):
+    if _stage_steps_equal(arr, rel_tol=rel_tol):
+        return "line_scan"
+    # Collection order may jump; try spatial order along the principal axis
+    centered = arr - arr.mean(axis=0)
+    gram = centered.T @ centered
+    evals, evecs = np.linalg.eigh(gram)
+    if float(np.max(evals)) <= 1e-18:
         return "multipoint"
-    med = float(np.median(steps))
-    if med <= 0:
-        return "multipoint"
-    if float(np.max(np.abs(steps - med))) <= rel_tol * med:
+    axis = evecs[:, int(np.argmax(evals))]
+    order = np.argsort(arr @ axis, kind="mergesort")
+    if _stage_steps_equal(arr[order], rel_tol=rel_tol):
         return "line_scan"
     return "multipoint"
 
@@ -810,7 +850,20 @@ def classify_point_series_kind(
 def _maybe_attach_line_scan(fov: MappingFOV) -> None:
     """Group numbered spectra as a line scan or multipoint series."""
     points = [s for s in fov.spectra if s.kind == "line_point"]
-    if len(points) < 3:
+    # Also promote plain spots when a site has several non-sum spectra and
+    # none were tagged as line_point (alternate vendor naming).
+    if len(points) < 2:
+        spots = [
+            s
+            for s in fov.spectra
+            if s.kind != "sum" and "sum" not in (s.name or "").lower()
+        ]
+        if len(spots) >= 2 and len(points) < 2:
+            points = spots
+            for s in points:
+                if s.kind == "spot":
+                    s.kind = "line_point"
+    if len(points) < 2:
         return
     points = sorted(points, key=lambda s: (s.index is None, s.index or 0, s.name))
     kind = classify_point_series_kind(points)

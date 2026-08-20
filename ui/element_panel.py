@@ -406,7 +406,9 @@ class ElementPanel(QWidget):
         self.tube_lines_check = QCheckBox("Include Tube Lines:")
         self.tube_lines_check.setChecked(True)
         self.tube_lines_check.setToolTip(
-            "Include X-ray tube characteristic lines in the peak list"
+            "Include X-ray tube characteristic lines in the peak list.\n"
+            "Tube lines (and Compton) are fitted but excluded from wt%\n"
+            "unless “Sample contains …” is checked."
         )
         tube_layout.addWidget(self.tube_lines_check)
 
@@ -414,11 +416,25 @@ class ElementPanel(QWidget):
         self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
         self.tube_element_combo.setCurrentText("Rh")
         tube_layout.addWidget(self.tube_element_combo)
+
+        self.sample_contains_anode_check = QCheckBox("Sample contains Rh")
+        self.sample_contains_anode_check.setChecked(False)
+        self.sample_contains_anode_check.setToolTip(
+            "Tube anode lines (and Compton) are always fitted when Include Tube\n"
+            "Lines is on. Check this only if the sample itself contains that\n"
+            "element — then it enters composition / wt% analysis."
+        )
+        tube_layout.addWidget(self.sample_contains_anode_check)
         layout.addLayout(tube_layout)
 
         compton_row = QHBoxLayout()
         self.compton_check = QCheckBox("Include Compton:")
         self.compton_check.setChecked(True)
+        self.compton_check.setToolTip(
+            "Fit inelastic (Compton) tube scatter. Requires tube kV high enough\n"
+            "to produce anode K lines (Rh K needs ≥ ~23 keV) and a spectrum\n"
+            "that covers the Compton energy (~19 keV for Rh Kα)."
+        )
         compton_row.addWidget(self.compton_check)
         compton_row.addWidget(QLabel("θ:"))
         self.scatter_angle_spin = QDoubleSpinBox()
@@ -430,15 +446,26 @@ class ElementPanel(QWidget):
         compton_row.addWidget(self.scatter_angle_spin)
         compton_row.addWidget(QLabel("FWHM:"))
         self.compton_fwhm_spin = QDoubleSpinBox()
-        self.compton_fwhm_spin.setRange(100.0, 800.0)
+        self.compton_fwhm_spin.setRange(100.0, 1500.0)
         self.compton_fwhm_spin.setDecimals(0)
         self.compton_fwhm_spin.setSingleStep(25.0)
-        self.compton_fwhm_spin.setValue(250.0)
+        self.compton_fwhm_spin.setValue(500.0)
         self.compton_fwhm_spin.setSuffix(" eV")
+        self.compton_fwhm_spin.setToolTip(
+            "Locked width for Compton humps (broader than fluorescence).\n"
+            "Default 500 eV; raise if the scatter feature is very wide."
+        )
         compton_row.addWidget(self.compton_fwhm_spin)
         layout.addLayout(compton_row)
 
         self.tube_lines_check.toggled.connect(self._on_tube_lines_toggled)
+        self.tube_element_combo.currentTextChanged.connect(
+            self._on_tube_anode_changed
+        )
+        self.sample_contains_anode_check.toggled.connect(
+            self._on_sample_contains_anode_toggled
+        )
+        self._on_tube_anode_changed(self.tube_element_combo.currentText())
         self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
 
         find_button = QPushButton("Find Peaks + Auto-ID")
@@ -563,6 +590,9 @@ class ElementPanel(QWidget):
             self.tube_element_combo.addItems(["Rh", "W", "Mo", "Ag", "Cr", "Cu"])
             self.tube_element_combo.setCurrentText("Rh")
             tube_layout.addWidget(self.tube_element_combo)
+            self.sample_contains_anode_check = QCheckBox("Sample contains Rh")
+            self.sample_contains_anode_check.setChecked(False)
+            tube_layout.addWidget(self.sample_contains_anode_check)
             layout.addLayout(tube_layout)
             self.compton_check = QCheckBox("Include Compton:")
             self.compton_check.setChecked(True)
@@ -571,8 +601,8 @@ class ElementPanel(QWidget):
             self.scatter_angle_spin.setRange(30.0, 150.0)
             self.scatter_angle_spin.setValue(90.0)
             self.compton_fwhm_spin = QDoubleSpinBox()
-            self.compton_fwhm_spin.setRange(100.0, 800.0)
-            self.compton_fwhm_spin.setValue(250.0)
+            self.compton_fwhm_spin.setRange(100.0, 1500.0)
+            self.compton_fwhm_spin.setValue(500.0)
 
         smart_group = QGroupBox("Post-fit Smart ID")
         smart_layout = QFormLayout(smart_group)
@@ -707,11 +737,57 @@ class ElementPanel(QWidget):
         self.compton_check.setEnabled(checked)
         self.scatter_angle_spin.setEnabled(checked and self.compton_check.isChecked())
         self.compton_fwhm_spin.setEnabled(checked and self.compton_check.isChecked())
+        if hasattr(self, 'sample_contains_anode_check'):
+            self.sample_contains_anode_check.setEnabled(True)
         if not hasattr(self, '_compton_angle_linked'):
             self.compton_check.toggled.connect(
                 lambda c: self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
             )
             self._compton_angle_linked = True
+
+    def _on_tube_anode_changed(self, anode):
+        """Update Sample contains label when tube anode changes."""
+        anode = str(anode or "Rh")
+        if hasattr(self, 'sample_contains_anode_check'):
+            self.sample_contains_anode_check.setText(f"Sample contains {anode}")
+            # Re-sync selection if opt-in is on (anode symbol may have changed)
+            if self.sample_contains_anode_check.isChecked():
+                self._sync_anode_in_selection(include=True)
+
+    def _on_sample_contains_anode_toggled(self, checked):
+        self._sync_anode_in_selection(include=bool(checked))
+
+    def _sync_anode_in_selection(self, include: bool):
+        """Add or remove the tube anode from the Elements selection."""
+        if not hasattr(self, 'tube_element_combo') or not hasattr(self, 'periodic_table'):
+            return
+        anode = self.tube_element_combo.currentText()
+        if not anode:
+            return
+        current = [
+            e.get('symbol') for e in (self.get_selected_elements() or [])
+            if e.get('symbol')
+        ]
+        # Drop any previous common anodes when switching anode with opt-in on
+        anodes = {"Rh", "W", "Mo", "Ag", "Cr", "Cu"}
+        if include:
+            current = [s for s in current if s not in anodes or s == anode]
+            if anode not in current:
+                current.append(anode)
+        else:
+            current = [s for s in current if s != anode]
+        self._suppress_anode_selection_sync = True
+        try:
+            self.set_selected_elements(current)
+        finally:
+            self._suppress_anode_selection_sync = False
+
+    def sample_contains_tube_element(self) -> bool:
+        """True if the user opted in to quantify the tube anode as a sample element."""
+        return bool(
+            hasattr(self, 'sample_contains_anode_check')
+            and self.sample_contains_anode_check.isChecked()
+        )
 
     def _delete_selected_peaks(self):
         rows = sorted(
@@ -741,6 +817,21 @@ class ElementPanel(QWidget):
         self.selected_elements = elements
         self.elements_changed.emit(self.selected_elements)
         self._drop_unselected_peak_labels()
+        # Keep Sample contains {anode} in sync when user toggles anode on the table
+        if (
+            hasattr(self, 'sample_contains_anode_check')
+            and hasattr(self, 'tube_element_combo')
+            and not getattr(self, '_suppress_anode_selection_sync', False)
+        ):
+            anode = self.tube_element_combo.currentText()
+            symbols = {
+                e.get('symbol') for e in (elements or []) if e.get('symbol')
+            }
+            want = anode in symbols
+            if self.sample_contains_anode_check.isChecked() != want:
+                self.sample_contains_anode_check.blockSignals(True)
+                self.sample_contains_anode_check.setChecked(want)
+                self.sample_contains_anode_check.blockSignals(False)
 
     def _drop_unselected_peak_labels(self):
         """Drop labels (and expected seeds) for elements the user just unchecked."""
@@ -845,8 +936,18 @@ class ElementPanel(QWidget):
 
         Used by Peak Find / Auto-ID to seed the Elements tab. Fitting does
         not overwrite this list — unchecking an element must stick.
+        When “Sample contains {anode}” is checked, the anode stays selected.
         """
         symbols = [s for s in (symbols or []) if s]
+        if (
+            hasattr(self, 'sample_contains_anode_check')
+            and self.sample_contains_anode_check.isChecked()
+            and hasattr(self, 'tube_element_combo')
+            and not getattr(self, '_suppress_anode_selection_sync', False)
+        ):
+            anode = self.tube_element_combo.currentText()
+            if anode and anode not in symbols:
+                symbols = list(symbols) + [anode]
         self.periodic_table.set_selected_elements(symbols)
         # Keep local cache in sync (periodic table emits elements_changed)
         self.selected_elements = self.periodic_table.get_selected_elements()
@@ -1005,6 +1106,7 @@ class ElementPanel(QWidget):
             'pileup_correction': self.pileup_check.isChecked(),
             'include_tube_lines': self.tube_lines_check.isChecked(),
             'tube_element': self.tube_element_combo.currentText(),
+            'sample_contains_tube_element': self.sample_contains_tube_element(),
             'excitation_kv': self.excitation_spin.value(),
             'include_compton': (
                 self.tube_lines_check.isChecked() and self.compton_check.isChecked()
@@ -1048,6 +1150,7 @@ class ElementPanel(QWidget):
             "pileup": self.pileup_check.isChecked(),
             "tube_lines": self.tube_lines_check.isChecked(),
             "tube_element": self.tube_element_combo.currentText(),
+            "sample_contains_tube_element": self.sample_contains_tube_element(),
             "compton": self.compton_check.isChecked(),
             "scatter_angle": float(self.scatter_angle_spin.value()),
             "compton_fwhm_ev": float(self.compton_fwhm_spin.value()),
@@ -1095,11 +1198,42 @@ class ElementPanel(QWidget):
         self.tube_lines_check.setChecked(bool(state.get("tube_lines", True)))
         if state.get("tube_element"):
             self.tube_element_combo.setCurrentText(str(state["tube_element"]))
+        if hasattr(self, "sample_contains_anode_check"):
+            self.sample_contains_anode_check.blockSignals(True)
+            self.sample_contains_anode_check.setChecked(
+                bool(state.get("sample_contains_tube_element", False))
+            )
+            self.sample_contains_anode_check.blockSignals(False)
+            self._on_tube_anode_changed(self.tube_element_combo.currentText())
+            if self.sample_contains_anode_check.isChecked():
+                self._sync_anode_in_selection(include=True)
+            else:
+                # Drop anode from a restored selection unless opted in
+                anode = self.tube_element_combo.currentText()
+                symbols = [
+                    e.get("symbol")
+                    for e in (self.get_selected_elements() or [])
+                    if e.get("symbol") and e.get("symbol") != anode
+                ]
+                # Only rewrite if anode was present
+                had_anode = any(
+                    e.get("symbol") == anode
+                    for e in (self.get_selected_elements() or [])
+                )
+                if had_anode:
+                    self._suppress_anode_selection_sync = True
+                    try:
+                        self.set_selected_elements(symbols)
+                    finally:
+                        self._suppress_anode_selection_sync = False
         self.compton_check.setChecked(bool(state.get("compton", True)))
         if state.get("scatter_angle") is not None:
             self.scatter_angle_spin.setValue(float(state["scatter_angle"]))
         if state.get("compton_fwhm_ev") is not None:
             self.compton_fwhm_spin.setValue(float(state["compton_fwhm_ev"]))
+        else:
+            # Prefer wider default for Compton if older sessions omit the field
+            self.compton_fwhm_spin.setValue(500.0)
         self.auto_find_check.setChecked(bool(state.get("auto_find", True)))
         if state.get("prominence") is not None:
             self.prominence_spin.setValue(float(state["prominence"]))

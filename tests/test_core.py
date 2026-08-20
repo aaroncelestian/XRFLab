@@ -600,3 +600,140 @@ def test_build_peak_positions_keeps_c_drops_be():
     assert "C" in symbols
     assert "Na" in symbols
     assert all(p["energy"] >= 0.17 for p in positions)
+
+
+def test_rh_compton_seeds_at_50kv_empty_at_20kv():
+    from core.xray_data import get_tube_compton_lines, compton_seed_diagnostics
+
+    seeds_50 = get_tube_compton_lines("Rh", excitation_kv=50.0, fwhm_kev=0.500)
+    assert any(s["line"] == "Compton Kα" for s in seeds_50)
+    assert any(s["line"] == "Compton Kβ" for s in seeds_50)
+    # Rh Kα Compton at ~90° is near 19.2 keV
+    ka = next(s for s in seeds_50 if s["line"] == "Compton Kα")
+    assert 18.5 < ka["energy"] < 20.0
+
+    seeds_20 = get_tube_compton_lines("Rh", excitation_kv=20.0, fwhm_kev=0.500)
+    assert seeds_20 == []
+
+    _empty, warn = compton_seed_diagnostics(
+        tube_element="Rh",
+        excitation_kv=20.0,
+        energy_min=0.5,
+        energy_max=25.0,
+    )
+    assert warn and "23" in warn
+
+
+def test_fit_includes_compton_tube_peaks():
+    from core.fitting import SpectrumFitter
+    from core.xray_data import get_tube_compton_lines
+
+    energy = np.linspace(0.5, 25.0, 2500)
+    counts = np.full_like(energy, 30.0)
+    # Broad Compton-like hump near Rh Compton Kα
+    seeds = get_tube_compton_lines("Rh", excitation_kv=50.0, fwhm_kev=0.500)
+    e_c = seeds[0]["energy"]
+    sigma = 0.500 / 2.355
+    counts = counts + 400.0 * np.exp(-((energy - e_c) ** 2) / (2 * sigma**2))
+
+    fitter = SpectrumFitter()
+    result = fitter.fit_spectrum(
+        energy=energy,
+        counts=counts,
+        elements=[],
+        background_method="none",
+        peak_shape="gaussian",
+        auto_find_peaks=False,
+        include_tube_lines=True,
+        include_compton=True,
+        tube_element="Rh",
+        excitation_kv=50.0,
+        compton_fwhm_kev=0.500,
+        sample_contains_tube_element=False,
+    )
+    compton = [
+        p for p in result.peaks
+        if p.is_tube_line and p.line and str(p.line).startswith("Compton")
+    ]
+    assert compton, "expected at least one fitted Compton peak"
+    quant = fitter.quantify_elements(
+        result.peaks,
+        tube_element="Rh",
+        sample_contains_tube_element=False,
+    )
+    assert "Rh" not in quant
+
+
+def test_sample_contains_rh_opt_in_for_quant():
+    from core.fitting import SpectrumFitter
+    from core.peak_fitting import Peak
+
+    fitter = SpectrumFitter()
+    peaks = [
+        Peak(energy=6.4, amplitude=100, fwhm=0.15, area=1000, element="Fe", line="Kα1"),
+        Peak(
+            energy=20.2,
+            amplitude=50,
+            fwhm=0.20,
+            area=400,
+            element="Rh",
+            line="Kα1",
+            is_tube_line=False,
+        ),
+        Peak(
+            energy=19.2,
+            amplitude=30,
+            fwhm=0.50,
+            area=200,
+            element="Rh",
+            line="Compton Kα",
+            is_tube_line=True,
+        ),
+    ]
+    excluded = fitter.quantify_elements(
+        peaks, tube_element="Rh", sample_contains_tube_element=False
+    )
+    assert "Rh" not in excluded
+    assert "Fe" in excluded
+
+    included = fitter.quantify_elements(
+        peaks, tube_element="Rh", sample_contains_tube_element=True
+    )
+    assert "Rh" in included
+    assert "Fe" in included
+    # Compton still excluded via is_tube_line
+    assert abs(
+        included["Rh"]["relative_intensity_pct"]
+        - (400 / 1400) * 100
+    ) < 1e-6
+
+
+def test_build_peak_positions_skips_sample_rh_without_opt_in():
+    from core.fitting import SpectrumFitter
+
+    energy = np.linspace(0.5, 25.0, 1000)
+    counts = np.ones_like(energy)
+    fitter = SpectrumFitter()
+    positions = fitter.build_peak_positions(
+        energy,
+        counts_bg_subtracted=counts,
+        elements=[{"symbol": "Rh", "z": 45}, {"symbol": "Fe", "z": 26}],
+        auto_find_peaks=False,
+        include_tube_lines=True,
+        include_compton=True,
+        tube_element="Rh",
+        excitation_kv=50.0,
+        compton_fwhm_kev=0.500,
+        sample_contains_tube_element=False,
+    )
+    sample_rh = [
+        p for p in positions
+        if p.get("element") == "Rh" and not p.get("is_tube_line")
+    ]
+    tube_rh = [
+        p for p in positions
+        if p.get("element") == "Rh" and p.get("is_tube_line")
+    ]
+    assert sample_rh == []
+    assert tube_rh
+    assert any(str(p.get("line", "")).startswith("Compton") for p in tube_rh)

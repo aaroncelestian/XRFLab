@@ -8,7 +8,12 @@ from dataclasses import dataclass
 
 from core.background import BackgroundModeler
 from core.peak_fitting import PeakFitter, Peak
-from core.xray_data import get_element_lines, get_tube_lines, get_tube_compton_lines
+from core.xray_data import (
+    get_element_lines,
+    get_tube_lines,
+    get_tube_compton_lines,
+    compton_seed_diagnostics,
+)
 
 
 @dataclass
@@ -92,6 +97,7 @@ class SpectrumFitter:
         self.peak_fitter = PeakFitter(detector=detector)
         self.tube_profile_library = None  # Optional TubeProfileLibrary
         self.peak_fitter.activate()
+        self.last_compton_warning = None  # Set by build_peak_positions / fit
 
     def set_tube_profile_library(self, library):
         """Attach per-kV tube profile library for ratio constraints / flags."""
@@ -136,7 +142,8 @@ class SpectrumFitter:
                              auto_find_peaks=True, tube_element='Rh',
                              excitation_kv=50.0, include_tube_lines=True,
                              include_compton=True, scatter_angle_deg=90.0,
-                             compton_fwhm_kev=0.250, **kwargs):
+                             compton_fwhm_kev=0.500,
+                             sample_contains_tube_element=False, **kwargs):
         """
         Build the list of peak seed positions (element lines, tube lines, auto-find).
 
@@ -145,7 +152,18 @@ class SpectrumFitter:
             (optional fixed_fwhm / exclusion_half_width_kev for Compton)
         """
         peak_positions = []
+        self.last_compton_warning = None
         elements = self._element_dicts(elements)
+        # Tube anode is sample fluorescence only when the user opts in
+        if (
+            tube_element
+            and not sample_contains_tube_element
+            and elements
+        ):
+            elements = [
+                e for e in elements
+                if e.get('symbol') != tube_element
+            ]
         e_lo = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
         e_hi = float(energy[-1])
 
@@ -215,17 +233,21 @@ class SpectrumFitter:
                         scatter_angle_deg = profile.scatter_angle_deg
                         compton_fwhm_kev = profile.compton_fwhm_kev
 
-                compton_lines = get_tube_compton_lines(
+                in_range, warning = compton_seed_diagnostics(
                     tube_element=tube_element,
                     excitation_kv=excitation_kv,
                     scatter_angle_deg=scatter_angle_deg,
                     fwhm_kev=compton_fwhm_kev,
+                    energy_min=e_lo,
+                    energy_max=e_hi,
                 )
+                if warning:
+                    self.last_compton_warning = warning
+                    print(warning)
                 n_c = 0
-                for c in compton_lines:
-                    if e_lo <= c['energy'] <= e_hi:
-                        peak_positions.append(c)
-                        n_c += 1
+                for c in in_range:
+                    peak_positions.append(dict(c))
+                    n_c += 1
                 if n_c:
                     print(
                         f"Including {n_c} {tube_element} Compton line(s) "
@@ -414,22 +436,25 @@ class SpectrumFitter:
         tube_element='Rh',
         excitation_kv=50.0,
         scatter_angle_deg=90.0,
-        compton_fwhm_kev=0.250,
+        compton_fwhm_kev=0.500,
     ):
         """Add missing Compton tube seeds to an existing peak list."""
         positions = list(peak_positions or [])
-        compton_lines = get_tube_compton_lines(
+        e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
+        e_max = float(energy[-1])
+        in_range, warning = compton_seed_diagnostics(
             tube_element=tube_element,
             excitation_kv=excitation_kv,
             scatter_angle_deg=scatter_angle_deg,
             fwhm_kev=compton_fwhm_kev,
+            energy_min=e_min,
+            energy_max=e_max,
         )
-        e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
-        e_max = float(energy[-1])
+        if warning:
+            self.last_compton_warning = warning
+            print(warning)
         n_added = 0
-        for c in compton_lines:
-            if not (e_min <= c['energy'] <= e_max):
-                continue
+        for c in in_range:
             already = any(
                 p.get('is_tube_line')
                 and p.get('line') == c['line']
@@ -479,6 +504,13 @@ class SpectrumFitter:
         )
         
         # Step 3: Identify peak positions (or use caller-provided list)
+        sample_contains = bool(kwargs.get('sample_contains_tube_element', False))
+        fit_elements = self._element_dicts(elements)
+        if tube_element and not sample_contains and fit_elements:
+            fit_elements = [
+                e for e in fit_elements if e.get('symbol') != tube_element
+            ]
+
         if peak_positions is not None:
             peak_positions = [
                 {
@@ -500,8 +532,17 @@ class SpectrumFitter:
             if kwargs.get('min_separation_ev') is not None:
                 match_tol = max(0.05, float(kwargs['min_separation_ev']) / 1000.0)
             peak_positions = self.apply_selected_elements_to_positions(
-                peak_positions, energy, elements, match_tol_kev=match_tol
+                peak_positions, energy, fit_elements, match_tol_kev=match_tol
             )
+            # If anode is not a sample element, clear any sample labels on it
+            if tube_element and not sample_contains:
+                for p in peak_positions:
+                    if (
+                        not p.get('is_tube_line')
+                        and p.get('element') == tube_element
+                    ):
+                        p['element'] = None
+                        p['line'] = None
             # Keep Compton in the editable list path when enabled
             if include_tube_lines and kwargs.get('include_compton', True):
                 peak_positions = self._ensure_compton_positions(
@@ -510,18 +551,24 @@ class SpectrumFitter:
                     tube_element=tube_element,
                     excitation_kv=excitation_kv,
                     scatter_angle_deg=kwargs.get('scatter_angle_deg', 90.0),
-                    compton_fwhm_kev=kwargs.get('compton_fwhm_kev', 0.250),
+                    compton_fwhm_kev=kwargs.get('compton_fwhm_kev', 0.500),
                 )
         else:
+            # Avoid duplicate kwargs when sample_contains was already extracted
+            build_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k != 'sample_contains_tube_element'
+            }
             peak_positions = self.build_peak_positions(
                 energy,
                 counts_bg_subtracted=counts_bg_subtracted,
-                elements=elements,
+                elements=fit_elements,
                 auto_find_peaks=auto_find_peaks,
                 tube_element=tube_element,
                 excitation_kv=excitation_kv,
                 include_tube_lines=include_tube_lines,
-                **kwargs,
+                sample_contains_tube_element=sample_contains,
+                **build_kwargs,
             )
         
         # Step 4: Fit peaks with tube-profile priors + known overlap doublets
@@ -859,7 +906,14 @@ class SpectrumFitter:
         # Would search through xraylib database to identify peaks
         return peaks
     
-    def quantify_elements(self, peaks, experimental_params=None):
+    def quantify_elements(
+        self,
+        peaks,
+        experimental_params=None,
+        *,
+        tube_element=None,
+        sample_contains_tube_element=False,
+    ):
         """
         Semi-quantitative relative intensities from fitted peak areas.
 
@@ -871,6 +925,8 @@ class SpectrumFitter:
         Args:
             peaks: List of fitted Peak objects
             experimental_params: Unused; kept for API compatibility
+            tube_element: Anode symbol; excluded from analysis unless opted in
+            sample_contains_tube_element: If False, skip anode even if labeled
             
         Returns:
             Dict keyed by element with relative_intensity_pct, total_area, lines,
@@ -880,9 +936,16 @@ class SpectrumFitter:
         _ = experimental_params  # reserved for future FP wiring
         element_totals = {}
         element_lines = {}
+        anode = tube_element
+        include_anode = bool(sample_contains_tube_element)
 
         for peak in peaks:
             if peak.is_tube_line:
+                continue
+            # Compton / inelastic scatter must never enter composition
+            if peak.line and str(peak.line).startswith('Compton'):
+                continue
+            if peak.element and anode and peak.element == anode and not include_anode:
                 continue
 
             if peak.element:

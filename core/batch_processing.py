@@ -115,6 +115,9 @@ class BatchProcessingConfig:
     tube_element: str = "Rh"
     include_tube_lines: bool = True
     include_compton: bool = True
+    sample_contains_tube_element: bool = False
+    scatter_angle_deg: float = 90.0
+    compton_fwhm_kev: float = 0.500
     auto_find_peaks: bool = True
     excitation_kv: float = 50.0
 
@@ -288,6 +291,9 @@ class BatchProcessor:
             excitation_kv=excitation_kv,
             include_tube_lines=self.config.include_tube_lines,
             include_compton=self.config.include_compton,
+            scatter_angle_deg=self.config.scatter_angle_deg,
+            compton_fwhm_kev=self.config.compton_fwhm_kev,
+            sample_contains_tube_element=self.config.sample_contains_tube_element,
         )
 
         stats = fit_result.statistics or {}
@@ -295,7 +301,12 @@ class BatchProcessor:
         r_squared = float(stats.get("r_squared", 0.0))
 
         # Semi-quantitative relative intensities (same as Analysis tab)
-        quant = self.fitter.quantify_elements(fit_result.peaks, None)
+        quant = self.fitter.quantify_elements(
+            fit_result.peaks,
+            None,
+            tube_element=self.config.tube_element,
+            sample_contains_tube_element=self.config.sample_contains_tube_element,
+        )
         concentrations = {
             el: float(data.get("relative_intensity_pct", data.get("concentration", 0.0)))
             for el, data in quant.items()
@@ -305,6 +316,11 @@ class BatchProcessor:
         peak_areas: Dict[str, Dict[str, float]] = {}
         for peak in fit_result.peaks:
             if peak.is_tube_line or not peak.element:
+                continue
+            if (
+                peak.element == self.config.tube_element
+                and not self.config.sample_contains_tube_element
+            ):
                 continue
             peak_areas.setdefault(peak.element, {})
             line = peak.line or "unknown"

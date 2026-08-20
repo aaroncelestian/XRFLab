@@ -366,7 +366,7 @@ class PeakFitter:
         # Use wider window for low-energy peaks due to more overlap
         # Compton / fixed-wide peaks need a window matching their breadth
         if fixed_fwhm is not None:
-            window_width = 3.0 * fwhm_estimate
+            window_width = 5.0 * fwhm_estimate
         elif initial_center < 3.0:  # Low energy (Si, Al, Mg, Na)
             window_width = 5.0 * fwhm_estimate  # Wider window
         else:

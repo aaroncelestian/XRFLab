@@ -109,6 +109,7 @@ def test_merge_flattens_to_one_sample():
     assert len(merged.fovs) == 2
     assert merged.metadata["format"] == "merged_ipj_line_scans"
     assert merged.metadata["n_source_files"] == 3
+    assert merged.metadata["n_included_files"] == 2
     assert merged.metadata["skipped_sites_without_series"] == 1
 
     names = {s.name for s in merged.fovs}
@@ -123,6 +124,28 @@ def test_merge_flattens_to_one_sample():
     assert merged.has_line_scans()
 
 
+def test_merge_synthesizes_series_from_spot_spectra():
+    """Sites without attached line_scans still merge if they have spot spectra."""
+    spots = []
+    for i in range(1, 4):
+        ms = _spec(f"Point {i}")
+        ms.kind = "spot"
+        ms.index = i
+        ms.x = float(i)
+        ms.y = 0.0
+        spots.append(ms)
+    site = MappingFOV(id="fov", name="Site of Interest 1", spectra=spots, line_scans=[])
+    proj = MappingProject(
+        path="/data/spots_only.ipj",
+        samples=[MappingSample(id="s", name="Sample 1", sites=[site])],
+    )
+    other = _project_with_multipoint("/data/other.ipj", n_points=3)
+    merged = merge_line_scan_projects([proj, other], name="spots_merge")
+    assert len(merged.fovs) == 2
+    assert merged.metadata["n_included_files"] == 2
+    assert any(ms.name.startswith("spots_only_") for ms in merged.all_spectra())
+
+
 def test_merge_requires_series():
     empty = MappingProject(
         path="/data/empty.ipj",
@@ -134,7 +157,7 @@ def test_merge_requires_series():
             )
         ],
     )
-    with pytest.raises(ValueError, match="No line scans"):
+    with pytest.raises(ValueError, match="No line scans|point spectra"):
         merge_line_scan_projects([empty])
 
 

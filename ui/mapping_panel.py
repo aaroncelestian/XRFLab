@@ -1127,17 +1127,20 @@ class MappingPanel(QWidget):
             QMessageBox.information(
                 self,
                 "Merge IPJs",
-                "Select at least two .ipj files to merge.",
+                "Select at least two .ipj files to merge.\n"
+                "Tip: Shift/Cmd-click to select multiple files in the dialog.",
             )
             return
         try:
-            from core.mapping.merge import merge_ipj_line_scans
+            from core.mapping.merge import merge_ipj_line_scans_with_report
 
-            self.project = merge_ipj_line_scans(paths)
+            report = merge_ipj_line_scans_with_report(paths)
+            self.project = report.project
         except Exception as exc:
             QMessageBox.critical(self, "IPJ merge failed", str(exc))
             return
         self._apply_loaded_project()
+        QMessageBox.information(self, "Merge IPJs", report.summary_text())
 
     def _apply_loaded_project(self) -> None:
         """Refresh trees / status after open or merge."""
@@ -1155,13 +1158,16 @@ class MappingPanel(QWidget):
         n_cubes = self.project.metadata.get("n_cubes", 0)
         n_series = self.project.metadata.get("n_line_scans")
         n_sources = self.project.metadata.get("n_source_files")
+        n_included = self.project.metadata.get("n_included_files")
         self.status_message.emit(f"Loaded mapping project: {self.project.name}")
         info = (
             f"{self.project.name}: {n_samples} sample(s), {n_sites} site(s), "
             f"{len(self.project.all_spectra())} spectra"
             + (f", {n_cubes} cube(s)" if n_cubes else "")
         )
-        if n_sources:
+        if n_included is not None and n_sources:
+            info += f" (merged {n_included}/{n_sources} .ipj)"
+        elif n_sources:
             info += f" (merged from {n_sources} .ipj)"
         if n_series:
             info += f", {n_series} line/multipoint series"
@@ -4613,13 +4619,23 @@ class MappingPanel(QWidget):
                     include_tube_lines=fit_params.get("include_tube_lines", True),
                     include_compton=fit_params.get("include_compton", True),
                     scatter_angle_deg=fit_params.get("scatter_angle_deg", 90.0),
-                    compton_fwhm_kev=fit_params.get("compton_fwhm_kev", 0.250),
+                    compton_fwhm_kev=fit_params.get("compton_fwhm_kev", 0.500),
+                    sample_contains_tube_element=fit_params.get(
+                        "sample_contains_tube_element", False
+                    ),
                     experimental_params=exp_params,
                     prominence_percent=fit_params.get("prominence_percent"),
                     min_height=fit_params.get("min_height"),
                     min_separation_ev=fit_params.get("min_separation_ev"),
                 )
-                quant = self._fitter.quantify_elements(result.peaks, exp_params)
+                quant = self._fitter.quantify_elements(
+                    result.peaks,
+                    exp_params,
+                    tube_element=fit_params.get("tube_element", "Rh"),
+                    sample_contains_tube_element=fit_params.get(
+                        "sample_contains_tube_element", False
+                    ),
+                )
                 row = {
                     "index": i,
                     "name": pt.name,

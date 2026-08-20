@@ -293,6 +293,65 @@ def get_tube_compton_lines(
     return results
 
 
+# Approximate K-edge energies (keV) for common tube anodes — for user messages
+TUBE_K_EDGE_KEV = {
+    'Cr': 5.99,
+    'Cu': 8.98,
+    'Mo': 20.00,
+    'Rh': 23.22,
+    'Ag': 25.51,
+    'W': 69.53,
+}
+
+
+def compton_seed_diagnostics(
+    tube_element='Rh',
+    excitation_kv=50.0,
+    scatter_angle_deg=90.0,
+    fwhm_kev=0.500,
+    energy_min=None,
+    energy_max=None,
+):
+    """
+    Explain why Compton seeds may be missing.
+
+    Returns:
+        (seeds_in_range, warning_or_None)
+    """
+    tube_element = tube_element or 'Rh'
+    seeds = get_tube_compton_lines(
+        tube_element=tube_element,
+        excitation_kv=excitation_kv,
+        scatter_angle_deg=scatter_angle_deg,
+        fwhm_kev=fwhm_kev,
+    )
+    edge = TUBE_K_EDGE_KEV.get(tube_element)
+    if not seeds:
+        if edge is not None and float(excitation_kv) < edge:
+            return [], (
+                f"No {tube_element} Compton seeds: raise Excitation above "
+                f"{tube_element} K (~{edge:.1f} keV); current {excitation_kv:g} keV"
+            )
+        return [], (
+            f"No {tube_element} Compton seeds at {excitation_kv:g} keV "
+            f"(no anode K lines below tube voltage)"
+        )
+
+    if energy_min is None or energy_max is None:
+        return seeds, None
+
+    e_lo = float(energy_min)
+    e_hi = float(energy_max)
+    in_range = [c for c in seeds if e_lo <= float(c['energy']) <= e_hi]
+    if not in_range:
+        energies = ", ".join(f"{c['energy']:.2f}" for c in seeds)
+        return [], (
+            f"No {tube_element} Compton seeds in spectrum range "
+            f"[{e_lo:.2f}, {e_hi:.2f}] keV (need ~{energies} keV)"
+        )
+    return in_range, None
+
+
 def get_element_info(symbol, z):
     """
     Get detailed information about an element

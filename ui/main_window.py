@@ -1094,7 +1094,10 @@ class MainWindow(QMainWindow):
                 include_tube_lines=fit_params.get('include_tube_lines', True),
                 include_compton=fit_params.get('include_compton', True),
                 scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
-                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.250),
+                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.500),
+                sample_contains_tube_element=fit_params.get(
+                    'sample_contains_tube_element', False
+                ),
                 experimental_params=exp_params,
                 prominence_percent=fit_params.get('prominence_percent'),
                 min_height=fit_params.get('min_height'),
@@ -1185,7 +1188,12 @@ class MainWindow(QMainWindow):
             # Semi-quant relative intensities (area-normalized; needs labeled sample peaks)
             exp_params = self.element_panel.get_experimental_params()
             concentrations = self.fitter.quantify_elements(
-                self.fit_result.peaks, exp_params
+                self.fit_result.peaks,
+                exp_params,
+                tube_element=fit_params.get('tube_element', 'Rh'),
+                sample_contains_tube_element=fit_params.get(
+                    'sample_contains_tube_element', False
+                ),
             )
             self.session.set_concentrations(concentrations, method="semi_quant_area")
             self.results_panel.set_fp_live(False)
@@ -1214,6 +1222,9 @@ class MainWindow(QMainWindow):
                 )
                 if fit_params.get('smart_id_apply') and smart_report.n_applied:
                     fit_msg += f", applied {smart_report.n_applied}"
+            warn = getattr(self.fitter, 'last_compton_warning', None)
+            if warn:
+                fit_msg += f" — {warn}"
             if identified:
                 fit_msg += (
                     f"; {len(identified)} fitted element"
@@ -1284,7 +1295,10 @@ class MainWindow(QMainWindow):
                 include_tube_lines=fit_params.get('include_tube_lines', True),
                 include_compton=fit_params.get('include_compton', True),
                 scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
-                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.250),
+                compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.500),
+                sample_contains_tube_element=fit_params.get(
+                    'sample_contains_tube_element', False
+                ),
                 prominence_percent=fit_params.get('prominence_percent'),
                 min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
@@ -1335,6 +1349,9 @@ class MainWindow(QMainWindow):
                 f"Peak find ({len(preview_peaks)} total: "
                 f"{n_labeled} labeled, {n_unknown} unknown)"
             )
+            warn = getattr(self.fitter, 'last_compton_warning', None)
+            if warn:
+                header += f"\n{warn}"
             if id_summary:
                 header += "\n" + "\n".join(id_summary[:40])
             if lines:
@@ -1360,6 +1377,8 @@ class MainWindow(QMainWindow):
                     f"({n_unknown} unlabeled). "
                     f"Select elements, then Fitting → Fit Spectrum."
                 )
+            if warn:
+                msg = f"{msg} — {warn}"
             self.status_bar.showMessage(msg, 10000)
         except Exception as e:
             QMessageBox.critical(
@@ -1399,8 +1418,14 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Computing relative intensities...", 0)
         try:
             exp_params = self.element_panel.get_experimental_params()
+            fit_params = self.element_panel.get_fitting_params()
             concentrations = self.fitter.quantify_elements(
-                self.fit_result.peaks, exp_params
+                self.fit_result.peaks,
+                exp_params,
+                tube_element=fit_params.get('tube_element', 'Rh'),
+                sample_contains_tube_element=fit_params.get(
+                    'sample_contains_tube_element', False
+                ),
             )
             self.session.set_concentrations(concentrations, method="semi_quant_area")
             self.results_panel.set_fp_live(False)
@@ -1465,8 +1490,15 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Computing FP composition...", 0)
         try:
             exp_params = self.element_panel.get_experimental_params()
+            fit_params = self.element_panel.get_fitting_params()
             result = quantify_from_peaks(
-                self.fit_result.peaks, assumptions, exp_params
+                self.fit_result.peaks,
+                assumptions,
+                exp_params,
+                tube_element=fit_params.get('tube_element', 'Rh'),
+                sample_contains_tube_element=fit_params.get(
+                    'sample_contains_tube_element', False
+                ),
             )
             if not result.success:
                 if live:

@@ -214,6 +214,8 @@ class BatchAnalysisPanel(QWidget):
             tube_element = (
                 self.element_panel.tube_element_combo.currentText() if tube_on else "off"
             )
+            if tube_on and self.element_panel.sample_contains_tube_element():
+                tube_element = f"{tube_element} (+sample)"
 
             self.settings_elements.setStyleSheet("")
             if elements:
@@ -250,6 +252,19 @@ class BatchAnalysisPanel(QWidget):
             self.config.tube_element = (
                 self.element_panel.tube_element_combo.currentText() if tube_on else "Rh"
             )
+            self.config.include_compton = bool(
+                tube_on and self.element_panel.compton_check.isChecked()
+            )
+            self.config.sample_contains_tube_element = bool(
+                getattr(self.element_panel, "sample_contains_anode_check", None)
+                and self.element_panel.sample_contains_anode_check.isChecked()
+            )
+            self.config.scatter_angle_deg = float(
+                self.element_panel.scatter_angle_spin.value()
+            )
+            self.config.compton_fwhm_kev = float(
+                self.element_panel.compton_fwhm_spin.value()
+            ) / 1000.0
             if self._instrument_state is not None:
                 self.config.instrument_state = self._instrument_state
 

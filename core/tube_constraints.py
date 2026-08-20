@@ -45,6 +45,9 @@ def find_overlap_pairs(peak_positions: List[dict]) -> Tuple[List[OverlapPair], L
     Split peak seeds into overlap pairs + remaining positions.
 
     A position used in a pair is removed from the remaining list.
+    Also pairs tube vs sample seeds that share the same element and line
+    (sample-contains-anode opt-in), so tube amplitude can be profile-constrained
+    and excess attributed to the sample.
     """
     positions = [dict(p) for p in (peak_positions or [])]
     used = set()
@@ -60,7 +63,15 @@ def find_overlap_pairs(peak_positions: List[dict]) -> Tuple[List[OverlapPair], L
         if (not p.get('is_tube_line')) and p.get('element') and p.get('line')
     ]
 
-    for tube_el, tube_line, samp_el, samp_line, max_sep in KNOWN_TUBE_SAMPLE_OVERLAPS:
+    known = list(KNOWN_TUBE_SAMPLE_OVERLAPS)
+    # Same-element tube + sample (e.g. Rh tube Kα1 + sample Rh Kα1)
+    for i in tube_idxs:
+        p = positions[i]
+        known.append(
+            (p.get('element'), p.get('line'), p.get('element'), p.get('line'), 0.05)
+        )
+
+    for tube_el, tube_line, samp_el, samp_line, max_sep in known:
         t_idx = None
         for i in tube_idxs:
             if i in used:
@@ -154,6 +165,8 @@ def fit_peak_with_amplitude_prior(
 
     window_width = 3.0 * fwhm_estimate
     if initial_center < 3.0 and fixed_fwhm is None:
+        window_width = 5.0 * fwhm_estimate
+    if fixed_fwhm is not None:
         window_width = 5.0 * fwhm_estimate
 
     mask = np.abs(np.asarray(energy) - initial_center) < window_width
