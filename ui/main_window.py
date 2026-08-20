@@ -106,6 +106,13 @@ class MainWindow(QMainWindow):
         )
         self.open_ipj_action.triggered.connect(self.open_ipj_project)
 
+        self.merge_ipj_action = QAction("Merge &IPJ Projects...", self)
+        self.merge_ipj_action.setStatusTip(
+            "Merge line scans / multipoint series from many .ipj files "
+            "into one Mapping project"
+        )
+        self.merge_ipj_action.triggered.connect(self.merge_ipj_projects)
+
         self.open_project_action = QAction("Open &Project...", self)
         self.open_project_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.open_project_action.setStatusTip("Open a saved XRFLab project (.xrfp)")
@@ -208,6 +215,7 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
         file_menu.addAction(self.open_ipj_action)
+        file_menu.addAction(self.merge_ipj_action)
         file_menu.addAction(self.open_project_action)
         file_menu.addSeparator()
         file_menu.addAction(self.save_project_action)
@@ -868,6 +876,11 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentWidget(self.mapping_panel)
         self.mapping_panel.open_ipj()
 
+    def merge_ipj_projects(self):
+        """Merge many .ipj line/multipoint projects into one Mapping project."""
+        self.tab_widget.setCurrentWidget(self.mapping_panel)
+        self.mapping_panel.merge_ipjs()
+
     def send_batch_to_composition(self):
         """Load current batch fits into the Composition tab."""
         results = self.batch_analysis_panel.results
@@ -914,7 +927,15 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.set_spectrum(spectrum)
 
         if hasattr(spectrum, "metadata") and spectrum.metadata:
-            self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
+            meta = dict(spectrum.metadata)
+            # Prefer attribute live_time when metadata omitted it
+            if "live_time" not in meta and getattr(spectrum, "live_time", None):
+                meta["live_time"] = float(spectrum.live_time)
+            self.element_panel.update_from_spectrum_metadata(meta)
+        elif getattr(spectrum, "live_time", None):
+            self.element_panel.update_from_spectrum_metadata(
+                {"live_time": float(spectrum.live_time)}
+            )
 
         # Seed element selection from IPJ peak labels when present
         if peak_labels:
@@ -957,18 +978,23 @@ class MainWindow(QMainWindow):
         )
 
     def on_mapping_project_loaded(self, project):
-        """Spectra-only IPJ: jump to Analysis and queue every point for batch."""
-        if project is None or not project.is_spectra_only():
+        """After any IPJ load: push acquisition settings into Analysis.
+
+        Spectra-only projects also jump to Analysis and queue Batch.
+        """
+        if project is None:
+            return
+        try:
+            self.mapping_panel._copy_sample_to_analysis(quiet=True)
+        except Exception:
+            pass
+        if not project.is_spectra_only():
             return
         points = project.point_spectra()
         if not points:
             points = project.all_spectra()
         if not points:
             return
-        try:
-            self.mapping_panel._copy_sample_to_analysis()
-        except Exception:
-            pass
         pairs = self.mapping_panel._pairs_for_batch(points)
         self.on_mapping_spectra_to_batch(pairs, replace=True, switch_tab=False)
         first = points[0]

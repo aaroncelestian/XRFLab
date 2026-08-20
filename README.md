@@ -26,7 +26,7 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 - **Semi-quant**: area-normalized relative intensities (not FP weight %)
 - **FP composition**: standardless wt% from one fitted spectrum, with a matrix model (measured / oxide / carbonate / hydroxide) and live H₂O, OH, and CO₂ knobs for unmeasurable light elements
 - **Batch analysis** using the same fitter contract as the Analysis tab
-- **Mapping tab** for Oxford INCA / Horiba XGT `.ipj` projects: **Maps** (element maps, RGB, correlations, drawn intensity profiles) and **Line scan** (collected line / multipoint ROI profiles and area-normalized semi-quant)
+- **Mapping tab** for Oxford INCA / Horiba XGT `.ipj` projects: **Maps** (element maps, RGB, correlations, drawn intensity profiles) and **Line scan** (collected line / multipoint ROI profiles and area-normalized semi-quant). **Merge IPJs…** combines multipoint/line-scan series from many `.ipj` files into one project (spectra named `filename_sample_site_spectrum`); save as `.xrfp`
 - Multi-format I/O (TXT, CSV, MCA, HDF5, EMSA, IPJ)
 - Session model with injectable detector / instrument state
 - Optional **fisx** / xraylib FP helpers for standards-based work

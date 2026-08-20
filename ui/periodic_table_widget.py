@@ -126,7 +126,12 @@ class ElementButton(QPushButton):
         self.setFont(font)
         
         # Set tooltip
-        self.setToolTip(f"{name} ({symbol})\nZ = {atomic_number}\nRight-click for details")
+        self.setToolTip(
+            f"{name} ({symbol})\nZ = {atomic_number}\n"
+            "Click: show emission lines\n"
+            "Double-click: add/remove for fitting\n"
+            "Right-click: details"
+        )
         
         # Apply styling based on element group
         self._apply_group_styling()
@@ -134,6 +139,18 @@ class ElementButton(QPushButton):
         # Enable context menu
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def nextCheckState(self):
+        """Single-click must not toggle selection — only double-click does."""
+        pass
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click adds/removes the element from the fitting selection."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setChecked(not self.isChecked())
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
     
     def _show_context_menu(self, position):
         """Show context menu on right-click"""

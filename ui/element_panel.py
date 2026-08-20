@@ -173,10 +173,15 @@ class ElementPanel(QWidget):
         layout.setSpacing(2)
         
         # Create periodic table widget
+        # Click = show lines; double-click = add/remove for fitting
         self.periodic_table = PeriodicTableWidget()
         self.periodic_table.elements_changed.connect(self._on_periodic_table_changed)
         self.periodic_table.element_clicked.connect(self.element_clicked.emit)
         self.periodic_table.element_info_requested.connect(self._show_element_info)
+        self.periodic_table.setToolTip(
+            "Click an element to preview its emission lines on the spectrum.\n"
+            "Double-click to add or remove it from the fitting list."
+        )
         layout.addWidget(self.periodic_table)
 
         identify_group = QGroupBox("Identify on Plot")
@@ -853,37 +858,44 @@ class ElementPanel(QWidget):
         Args:
             metadata: Spectrum metadata dictionary
         """
-        # Update excitation energy
-        if 'excitation_energy' in metadata:
-            self.excitation_spin.setValue(float(metadata['excitation_energy']))
-        
-        # Update tube current
-        if 'tube_current' in metadata:
-            # Convert from nA to mA
-            # PROBECUR in EMSA files is in nanoamps (nA)
-            current = float(metadata['tube_current'])
-            print(f"  DEBUG: Raw tube_current from metadata: {current} nA")
-            # Convert nA → mA (divide by 1,000,000)
-            current = current / 1000000.0
-            print(f"  DEBUG: Converted to mA: {current}")
+        metadata = metadata or {}
+
+        # Excitation energy / tube voltage (keV or kV)
+        if "excitation_energy" in metadata:
+            self.excitation_spin.setValue(float(metadata["excitation_energy"]))
+        elif "kv" in metadata:
+            self.excitation_spin.setValue(float(metadata["kv"]))
+
+        # Tube current: prefer explicit mA (IPJ); EMSA PROBECUR is nanoamps
+        if "tube_current_ma" in metadata:
+            current = float(metadata["tube_current_ma"])
+            if current > self.current_spin.maximum():
+                self.current_spin.setMaximum(max(current, 50.0))
             self.current_spin.setValue(current)
-            print(f"  DEBUG: Set current spin to: {current} mA")
-        
-        # Update live time
-        if 'live_time' in metadata:
-            self.live_time_spin.setValue(float(metadata['live_time']))
-        
-        # Update incident angle
-        if 'incident_angle' in metadata:
-            self.angle_spin.setValue(float(metadata['incident_angle']))
-        
-        # Note: takeoff angle is in metadata but not in UI (could add if needed)
-        
-        print(f"Updated experimental parameters from spectrum metadata:")
-        print(f"  Excitation: {self.excitation_spin.value()} keV")
-        print(f"  Current: {self.current_spin.value()} mA")
-        print(f"  Live time: {self.live_time_spin.value()} s")
-        print(f"  Incident angle: {self.angle_spin.value()}°")
+        elif "ma" in metadata:
+            current = float(metadata["ma"])
+            if current > self.current_spin.maximum():
+                self.current_spin.setMaximum(max(current, 50.0))
+            self.current_spin.setValue(current)
+        elif "tube_current" in metadata:
+            # Convert from nA to mA (EMSA / some vendor files)
+            current = float(metadata["tube_current"])
+            if current > 1.0:
+                current = current / 1_000_000.0
+            if current > self.current_spin.maximum():
+                self.current_spin.setMaximum(max(current, 50.0))
+            self.current_spin.setValue(current)
+
+        # Live time (seconds)
+        if "live_time" in metadata:
+            live = float(metadata["live_time"])
+            if live > self.live_time_spin.maximum():
+                self.live_time_spin.setMaximum(max(live, 10000.0))
+            self.live_time_spin.setValue(live)
+
+        # Incident angle
+        if "incident_angle" in metadata:
+            self.angle_spin.setValue(float(metadata["incident_angle"]))
     
     def update_fwhm_status(self, fwhm_calibration=None):
         """

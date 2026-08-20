@@ -607,6 +607,9 @@ def _parse_spectra(
         if re.fullmatch(r"Spectrum\s+\d+", name, flags=re.I):
             kind = "line_point"
 
+        em = _read_em_conditions(
+            ole, spe_base + ["EMConditions", "EMConditions"]
+        )
         spec_meta = {
             "name": name,
             "spe_id": spe_id,
@@ -614,9 +617,18 @@ def _parse_spectra(
             "energy_offset_ev": offset_ev,
             "energy_calibration": "xgt_10eV_ch_offset",
             "source": "ipj",
+            "live_time": live_time,
+            "real_time": real_time,
         }
         if info.get("acquired_at"):
             spec_meta["acquired_at"] = info["acquired_at"]
+        # Analysis Experimental Parameters (mA, not EMSA nanoamps)
+        if "kv" in em:
+            spec_meta["excitation_energy"] = float(em["kv"])
+            spec_meta["kv"] = float(em["kv"])
+        if "ma" in em:
+            spec_meta["tube_current_ma"] = float(em["ma"])
+            spec_meta["ma"] = float(em["ma"])
         spectrum = Spectrum(
             energy=energy,
             counts=counts.astype(np.float64),
@@ -984,7 +996,10 @@ def _read_em_conditions(
     ole: "olefile.OleFileIO",
     path: Sequence[str],
 ) -> Dict[str, Any]:
-    """Tube kV / mA from SmartMap EMConditions (float32 @ 44 / 52)."""
+    """Tube kV / mA from EMConditions (float32 @ 44 / 52).
+
+    Present under SmartMap, per-spectrum, and GreyImage paths on XGT IPJs.
+    """
     out: Dict[str, Any] = {}
     if not ole.exists(list(path)):
         return out
@@ -1014,19 +1029,47 @@ def _acquisition_metadata(
         (s for s in spectra if s.kind == "sum" or "sum" in s.name.lower()),
         None,
     )
-    if sum_ms is not None:
-        live = float(sum_ms.spectrum.live_time)
+    ref_ms = sum_ms or (spectra[0] if spectra else None)
+    if ref_ms is not None:
+        live = float(ref_ms.spectrum.live_time)
         if live > 0:
             meta["map_live_time_s"] = live
-        real = float(sum_ms.spectrum.real_time)
+        real = float(ref_ms.spectrum.real_time)
         if real > 0:
             meta["map_real_time_s"] = real
-        acquired = sum_ms.spectrum.metadata.get("acquired_at")
+        acquired = ref_ms.spectrum.metadata.get("acquired_at")
         if acquired:
             meta["acquired_at"] = acquired
     em = _read_em_conditions(
         ole, list(fov_base) + ["SmartMap", "EMConditions", "EMConditions"]
     )
+    # Multipoint / spectra-only sites often have no SmartMap stream — use
+    # the first spectrum (or sum) EMConditions instead.
+    if "kv" not in em or "ma" not in em:
+        for ms in spectra:
+            sm = ms.spectrum.metadata or {}
+            if "kv" not in em and sm.get("kv") is not None:
+                em["kv"] = float(sm["kv"])
+            if "ma" not in em and sm.get("ma") is not None:
+                em["ma"] = float(sm["ma"])
+            if "kv" in em and "ma" in em:
+                break
+    if "kv" not in em or "ma" not in em:
+        for ms in spectra:
+            spe_id = (ms.metadata or {}).get("spe_id") or ms.name
+            path = list(fov_base) + [
+                "Spectra",
+                str(spe_id),
+                "EMConditions",
+                "EMConditions",
+            ]
+            em_spe = _read_em_conditions(ole, path)
+            em.setdefault("kv", em_spe.get("kv"))
+            em.setdefault("ma", em_spe.get("ma"))
+            if em.get("kv") is not None and em.get("ma") is not None:
+                break
+    # Drop None placeholders from setdefault
+    em = {k: v for k, v in em.items() if v is not None}
     meta.update(em)
     n = int(width) * int(height) if width and height else 0
     if n > 0:

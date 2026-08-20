@@ -10,6 +10,12 @@ from core.mapping.models import (
     MappingProject,
     coerce_element_symbols,
 )
+from core.mapping.merge import (
+    composite_label,
+    merge_ipj_line_scans,
+    merge_line_scan_projects,
+    sanitize_name_token,
+)
 from core.mapping.cube import SpectrumCube, decode_listdata
 from core.mapping.profiles import (
     extract_cube_element_profiles,
@@ -52,6 +58,10 @@ __all__ = [
     "MappingSample",
     "MappingProject",
     "coerce_element_symbols",
+    "composite_label",
+    "merge_ipj_line_scans",
+    "merge_line_scan_projects",
+    "sanitize_name_token",
     "SpectrumCube",
     "decode_listdata",
     "StageCamera",

@@ -172,6 +172,14 @@ class MappingPanel(QWidget):
         self.open_btn = QPushButton("Open IPJ…")
         self.open_btn.clicked.connect(self.open_ipj)
         btn_row.addWidget(self.open_btn)
+        self.merge_btn = QPushButton("Merge IPJs…")
+        self.merge_btn.setToolTip(
+            "Merge line scans / multipoint series from many .ipj files\n"
+            "into one project. Spectra are named:\n"
+            "filename_sample_site_spectrum"
+        )
+        self.merge_btn.clicked.connect(self.merge_ipjs)
+        btn_row.addWidget(self.merge_btn)
         self.sample_info_btn = QPushButton("Sample info…")
         self.sample_info_btn.setToolTip(
             "Project, sample, site, and acquisition metadata.\n"
@@ -1102,6 +1110,40 @@ class MappingPanel(QWidget):
             QMessageBox.critical(self, "IPJ load failed", str(exc))
             return
 
+        self._apply_loaded_project()
+
+    def merge_ipjs(self, paths: Optional[list] = None) -> None:
+        """Merge line/multipoint series from many .ipj files into one project."""
+        if not paths:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self,
+                "Merge INCA / XGT Projects (line scan / multipoint)",
+                "",
+                "INCA Project (*.ipj);;All Files (*)",
+            )
+        if not paths:
+            return
+        if len(paths) < 2:
+            QMessageBox.information(
+                self,
+                "Merge IPJs",
+                "Select at least two .ipj files to merge.",
+            )
+            return
+        try:
+            from core.mapping.merge import merge_ipj_line_scans
+
+            self.project = merge_ipj_line_scans(paths)
+        except Exception as exc:
+            QMessageBox.critical(self, "IPJ merge failed", str(exc))
+            return
+        self._apply_loaded_project()
+
+    def _apply_loaded_project(self) -> None:
+        """Refresh trees / status after open or merge."""
+        if self.project is None:
+            return
+
         self._cam_dest_rect_cache.clear()
 
         self._populate_trees()
@@ -1111,12 +1153,19 @@ class MappingPanel(QWidget):
         n_samples = self.project.metadata.get("n_samples", len(self.project.samples))
         n_sites = self.project.metadata.get("n_fovs", len(self.project.fovs))
         n_cubes = self.project.metadata.get("n_cubes", 0)
+        n_series = self.project.metadata.get("n_line_scans")
+        n_sources = self.project.metadata.get("n_source_files")
         self.status_message.emit(f"Loaded mapping project: {self.project.name}")
-        self.info_label.setText(
+        info = (
             f"{self.project.name}: {n_samples} sample(s), {n_sites} site(s), "
             f"{len(self.project.all_spectra())} spectra"
             + (f", {n_cubes} cube(s)" if n_cubes else "")
         )
+        if n_sources:
+            info += f" (merged from {n_sources} .ipj)"
+        if n_series:
+            info += f", {n_series} line/multipoint series"
+        self.info_label.setText(info)
         if self.project.is_spectra_only():
             n_pts = len(self.project.point_spectra())
             self.info_label.setText(
@@ -1337,15 +1386,21 @@ class MappingPanel(QWidget):
         if site is not None:
             site.metadata["comment"] = self.site_comment_edit.toPlainText()
 
-    def _copy_sample_to_analysis(self) -> None:
+    def _copy_sample_to_analysis(self, *, quiet: bool = False) -> bool:
+        """Copy sample name / type and site tube settings into Analysis.
+
+        Returns True if Analysis was updated. With quiet=True, missing
+        Analysis wiring is silent (used on IPJ open / site change).
+        """
         panel = self._element_panel
         if panel is None:
-            QMessageBox.information(
-                self,
-                "Analysis",
-                "Analysis sample fields are not connected.",
-            )
-            return
+            if not quiet:
+                QMessageBox.information(
+                    self,
+                    "Analysis",
+                    "Analysis sample fields are not connected.",
+                )
+            return False
         sample = self._current_sample()
         site = self.current_fov
         if sample is not None and hasattr(panel, "sample_name_edit"):
@@ -1355,18 +1410,56 @@ class MappingPanel(QWidget):
             idx = panel.sample_type_combo.findText(typ)
             if idx >= 0:
                 panel.sample_type_combo.setCurrentIndex(idx)
+
+        kv = ma = live = None
         if site is not None:
             kv = site.metadata.get("kv")
             ma = site.metadata.get("ma")
-            if kv and hasattr(panel, "excitation_spin"):
-                panel.excitation_spin.setValue(float(kv))
-            if ma and hasattr(panel, "current_spin"):
-                # Analysis current spinner max is 10 mA; XGT often uses 15 mA
-                spin = panel.current_spin
-                if float(ma) > spin.maximum():
-                    spin.setMaximum(max(float(ma), 50.0))
-                spin.setValue(float(ma))
-        self.status_message.emit("Copied sample / tube settings to Analysis → Sample/Exp")
+            live = site.metadata.get("map_live_time_s")
+            # Multipoint sites: fall back to first spectrum metadata
+            if (kv is None or ma is None or live is None) and site.spectra:
+                for ms in site.spectra:
+                    sm = getattr(ms.spectrum, "metadata", None) or {}
+                    if kv is None and sm.get("kv") is not None:
+                        kv = sm.get("kv")
+                    if ma is None and sm.get("ma") is not None:
+                        ma = sm.get("ma")
+                    if live is None:
+                        try:
+                            lt = float(ms.spectrum.live_time)
+                        except (TypeError, ValueError):
+                            lt = float(sm.get("live_time") or 0)
+                        if lt > 0:
+                            live = lt
+                    if kv is not None and ma is not None and live is not None:
+                        break
+
+        if kv is not None and hasattr(panel, "excitation_spin"):
+            panel.excitation_spin.setValue(float(kv))
+        if ma is not None and hasattr(panel, "current_spin"):
+            # Analysis current spinner max is 10 mA; XGT often uses 15 mA
+            spin = panel.current_spin
+            if float(ma) > spin.maximum():
+                spin.setMaximum(max(float(ma), 50.0))
+            spin.setValue(float(ma))
+        if live is not None and hasattr(panel, "live_time_spin"):
+            spin = panel.live_time_spin
+            if float(live) > spin.maximum():
+                spin.setMaximum(max(float(live), 10000.0))
+            spin.setValue(float(live))
+
+        parts = []
+        if kv is not None:
+            parts.append(f"{float(kv):g} kV")
+        if ma is not None:
+            parts.append(f"{float(ma):g} mA")
+        if live is not None:
+            parts.append(f"{float(live):g} s live")
+        detail = ", ".join(parts) if parts else "sample fields only"
+        self.status_message.emit(
+            f"Copied to Analysis → Sample/Exp ({detail})"
+        )
+        return True
 
     def _populate_trees(self) -> None:
         self._populate_sites_tree()
@@ -1934,6 +2027,8 @@ class MappingPanel(QWidget):
             self.nav_tabs.setCurrentIndex(1)
         self._fill_sample_tab()
         self.status_message.emit(f"Active site: {site.name}")
+        # Keep Analysis Experimental Parameters in sync with the active site
+        self._copy_sample_to_analysis(quiet=True)
 
     def _select_site_in_sites_tree(self, site_id: str) -> None:
         def walk(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:

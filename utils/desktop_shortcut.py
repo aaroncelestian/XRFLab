@@ -63,8 +63,12 @@ def install_desktop_shortcut() -> ShortcutResult:
 def _launch_paths() -> tuple[Path, Path, Path]:
     root = project_root()
     main_py = root / "main.py"
-    python = Path(sys.executable).resolve()
-    return root, main_py, python
+    # Do not Path.resolve() the interpreter: a venv's python often symlinks to
+    # the base conda/python.org binary, and resolving would drop site-packages.
+    python = Path(sys.executable)
+    if not python.is_absolute():
+        python = Path(shutil.which(sys.executable) or sys.executable)
+    return root, main_py, python.absolute()
 
 
 def _pyside6_plugin_path(python: Path) -> Path | None:
@@ -124,10 +128,16 @@ def _install_macos_app() -> ShortcutResult:
     launcher = macos / APP_NAME
     launcher.write_text(
         "#!/bin/bash\n"
-        f'cd "{root}"\n'
+        f'cd "{root}" || exit 1\n'
         f'export PATH="{python_bin}:$PATH"\n'
         f"{plugin_export}"
-        f'exec "{python}" "{main_py}" "$@"\n',
+        f'PYTHON="{python}"\n'
+        f'MAIN="{main_py}"\n'
+        'if [[ ! -x "$PYTHON" ]]; then\n'
+        '  /usr/bin/osascript -e "display alert \\"XRFLab\\" message \\"Python was not found:\\n$PYTHON\\n\\nReinstall the Desktop shortcut from Help → Install Desktop Shortcut (with your env active).\\" as critical" >/dev/null 2>&1\n'
+        '  exit 1\n'
+        'fi\n'
+        'exec "$PYTHON" "$MAIN" "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

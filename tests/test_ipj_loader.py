@@ -325,6 +325,32 @@ def test_dylan_map_acquisition_metadata(dylan):
     assert "30 kV" in summary
 
 
+def test_multipoint_site_gets_tube_settings_from_spectrum(dylan, barstow):
+    """Sites without SmartMap still expose kV/mA via spectrum EMConditions."""
+    # dylan Site 2 is multipoint (no SmartMap)
+    multi = next(
+        (f for f in dylan.fovs if not f.metadata.get("has_smartmap")),
+        None,
+    )
+    assert multi is not None
+    assert multi.metadata.get("kv") == 30.0
+    assert multi.metadata.get("ma") == 15.0
+    assert multi.metadata.get("map_live_time_s") is not None
+    assert multi.spectra
+    sm = multi.spectra[0].spectrum.metadata
+    assert sm.get("excitation_energy") == 30.0
+    assert sm.get("tube_current_ma") == 15.0
+    assert sm.get("live_time")
+
+    multi_b = next(
+        (f for f in barstow.fovs if not f.metadata.get("has_smartmap")),
+        None,
+    )
+    assert multi_b is not None
+    assert multi_b.metadata.get("kv") == 50.0
+    assert multi_b.metadata.get("ma") == 15.0
+
+
 def test_hyperspectral_cube_dylan(dylan):
     fov = dylan.primary_fov
     assert fov is not None
