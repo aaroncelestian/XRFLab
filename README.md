@@ -40,44 +40,35 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 
 ## Installation
 
-XRFLab is a Python desktop app. Install **Python**, clone or copy the project, create a **virtual environment**, then install the packages in `requirements.txt`.
+**Recommended path:** [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) (macOS and Windows). It gives you Python plus a reliable build of **xraylib**, which is the dependency that most often fails with plain `pip`.
 
-**Recommended:** Python **3.10, 3.11, or 3.12** (64-bit). Python 3.9 may work; 3.13+ is untested. Use a venv so XRFLab’s packages do not mix with other software.
+You do **not** need the full Anaconda distribution. Miniconda is smaller and enough for XRFLab. If you already have Anaconda or Miniforge, you can skip the Miniconda installer and start at step 2.
 
-Put the project in a simple local folder (`~/XRFLab` or `C:\XRFLab`). Cloud-synced paths (iCloud, OneDrive, Dropbox) and paths with unusual characters can break Qt plugins or compiled libraries.
+**Python version:** 3.10, 3.11, or 3.12 (64-bit). Prefer **3.12**. Python 3.9 may work; 3.13+ is untested.
+
+Put the project in a simple local folder (`~/XRFLab` or `C:\XRFLab`). Cloud-synced paths (iCloud, OneDrive, Dropbox) can break Qt plugins or compiled libraries.
 
 ---
 
-### macOS
+### Recommended: Miniconda (macOS and Windows)
 
-#### 1. Install Python
+#### 1. Install Miniconda
 
-Use either method. Confirm in **Terminal** (Applications → Utilities → Terminal):
+1. Download the installer for your OS from [Miniconda](https://www.anaconda.com/download/success) (choose **Miniconda**, not Anaconda).
+2. Run the installer.
+   - **macOS:** Apple Silicon (M1/M2/M3/M4) and Intel both work; pick the matching installer. You do not need Rosetta.
+   - **Windows:** Use the 64-bit installer. Allow it to initialize conda for Command Prompt / PowerShell when asked.
+3. Close and reopen your terminal (macOS **Terminal**, or Windows **Anaconda Prompt** / Command Prompt / PowerShell).
 
-```bash
-python3 --version
-```
-
-You want `Python 3.10` or newer.
-
-**Option A — python.org (simplest)**
-
-1. Download the macOS 64-bit installer from [https://www.python.org/downloads/macos/](https://www.python.org/downloads/macos/).
-2. Run it and finish the installer.
-3. If `python3` is still not found, open a **new** Terminal window.
-
-**Option B — Homebrew** (if you already use [Homebrew](https://brew.sh))
+Check:
 
 ```bash
-brew install python@3.12
-python3 --version
+conda --version
 ```
-
-Apple Silicon (M1/M2/M3/M4) and Intel Macs both work. You do **not** need Rosetta for this app.
 
 #### 2. Get the XRFLab folder
 
-If you have Git:
+**macOS / Linux (Terminal):**
 
 ```bash
 cd ~
@@ -85,91 +76,7 @@ git clone https://github.com/aaroncelestian/XRFLab.git
 cd XRFLab
 ```
 
-Or download/unzip the project and:
-
-```bash
-cd /path/to/XRFLab
-```
-
-#### 3. Create a virtual environment and install packages
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-The prompt should start with `(venv)`. Stay in that environment for every later command.
-
-One-shot alternative (same steps plus sample spectra):
-
-```bash
-chmod +x setup.sh
-./setup.sh
-source venv/bin/activate
-```
-
-If `xraylib` fails to install from pip, try:
-
-```bash
-brew install tschoonj/tap/xraylib
-pip install xraylib
-```
-
-Or use the Conda method in [Alternative: Conda](#alternative-conda-macos-and-windows) below.
-
-#### 4. Launch
-
-```bash
-source venv/bin/activate   # skip if already active
-python main.py
-```
-
-Optional sample spectra:
-
-```bash
-python -m utils.sample_data
-```
-
-After the window opens: **Help → Install Desktop Shortcut** adds an XRFLab icon to your Desktop.
-
-Each new Terminal session:
-
-```bash
-cd /path/to/XRFLab
-source venv/bin/activate
-python main.py
-```
-
----
-
-### Windows
-
-Use **Command Prompt** or **PowerShell**. These steps use Command Prompt.
-
-#### 1. Install Python
-
-1. Download the **Windows 64-bit** installer from [https://www.python.org/downloads/windows/](https://www.python.org/downloads/windows/).
-2. Run it.
-3. Check **Add python.exe to PATH** (bottom of the first screen). This is required.
-4. Click **Install Now**.
-5. Close and reopen Command Prompt.
-
-Check:
-
-```bat
-python --version
-pip --version
-```
-
-You want `Python 3.10` or newer. If Windows opens the Microsoft Store instead of Python, turn off **Settings → Apps → Advanced app settings → App execution aliases** for `python.exe` / `python3.exe`, or reinstall Python with PATH enabled.
-
-The **Windows Store** Python build is not recommended (Qt and scientific wheels often fail).
-
-#### 2. Get the XRFLab folder
-
-If you have [Git for Windows](https://git-scm.com/download/win):
+**Windows (Command Prompt or Anaconda Prompt):**
 
 ```bat
 cd %USERPROFILE%
@@ -177,95 +84,67 @@ git clone https://github.com/aaroncelestian/XRFLab.git
 cd XRFLab
 ```
 
-Or unzip the project and:
+Or download/unzip the project and `cd` into that folder. On Windows without Git, use [Git for Windows](https://git-scm.com/download/win) or unzip from GitHub.
 
-```bat
-cd C:\path\to\XRFLab
-```
+#### 3. Create the environment and install packages
 
-#### 3. Create a virtual environment and install packages
+Same commands on macOS and Windows (in the XRFLab folder):
 
-```bat
-python -m venv venv
-venv\Scripts\activate
-python -m pip install --upgrade pip
+```bash
+conda create -n xrflab python=3.12 -y
+conda activate xrflab
+conda install -c conda-forge xraylib -y
 pip install -r requirements.txt
 ```
 
-The prompt should start with `(venv)`. Stay in that environment for every later command.
+The prompt should show `(xrflab)`. Stay in that environment for every later command.
 
-If `xraylib` fails on pip, use the Conda method below. Installing a C compiler to build xraylib from source is not required when wheels or conda-forge packages are available.
+If `pip install -r requirements.txt` tries to rebuild `xraylib` and errors, install the remaining packages without it:
+
+```bash
+pip install PySide6 pyqtgraph numpy scipy pandas h5py openpyxl fisx matplotlib olefile pytest
+```
+
+Do **not** also create a `venv` folder inside this conda env. Use one environment at a time: either conda `xrflab` or a pip venv (see below), not both.
 
 #### 4. Launch
 
-```bat
-venv\Scripts\activate
+```bash
+conda activate xrflab
+cd /path/to/XRFLab
 python main.py
 ```
 
+On Windows, if `conda activate` is not found in a normal Command Prompt, open **Anaconda Prompt** (or “Miniconda Prompt”) from the Start menu and run the same commands there.
+
 Optional sample spectra:
 
-```bat
+```bash
 python -m utils.sample_data
 ```
 
 After the window opens: **Help → Install Desktop Shortcut** adds an XRFLab icon to your Desktop.
 
-Each new Command Prompt session:
-
-```bat
-cd C:\path\to\XRFLab
-venv\Scripts\activate
-python main.py
-```
-
-In PowerShell, activation is:
-
-```powershell
-.\venv\Scripts\Activate.ps1
-```
-
-If PowerShell blocks scripts, run once (as Administrator if needed):
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
----
-
-### Alternative: Conda (macOS and Windows)
-
-Use this if you already have Anaconda/Miniconda, or if `pip install xraylib` fails. [Miniconda](https://docs.conda.io/en/latest/miniconda.html) is enough.
+Each new session:
 
 ```bash
-cd /path/to/XRFLab
-conda create -n xrflab python=3.12 -y
 conda activate xrflab
-conda install -c conda-forge xraylib -y
-pip install -r requirements.txt
+cd /path/to/XRFLab
 python main.py
 ```
-
-If pip then tries to reinstall xraylib and errors, install the rest without it:
-
-```bash
-pip install PySide6 pyqtgraph numpy scipy pandas h5py openpyxl fisx matplotlib olefile
-```
-
-`conda activate xrflab` replaces `source venv/bin/activate` / `venv\Scripts\activate`. Do not mix a `venv` folder and this conda env.
 
 ---
 
 ### Confirm the install
 
-From the activated environment, in the XRFLab folder:
+With `(xrflab)` active, from the XRFLab folder:
 
 ```bash
 python -c "import PySide6, pyqtgraph, numpy, scipy, pandas, xraylib, fisx; print('OK')"
 python main.py
 ```
 
-Optional tests (after `pip install pytest`):
+Optional tests:
 
 ```bash
 pytest
@@ -273,24 +152,87 @@ pytest
 
 ---
 
+### Alternative: python.org + venv (no conda)
+
+Use this if you already manage Python yourself and prefer a lightweight install. If `xraylib` fails under pip, switch to the Miniconda path above.
+
+#### macOS
+
+1. Install Python 3.12 from [python.org](https://www.python.org/downloads/macos/) or Homebrew (`brew install python@3.12`).
+2. Open Terminal and run:
+
+```bash
+cd ~
+git clone https://github.com/aaroncelestian/XRFLab.git
+cd XRFLab
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+One-shot helper (venv + deps + sample data):
+
+```bash
+chmod +x setup.sh
+./setup.sh
+source venv/bin/activate
+python main.py
+```
+
+If `xraylib` fails:
+
+```bash
+brew install tschoonj/tap/xraylib
+pip install xraylib
+```
+
+#### Windows
+
+1. Install **Windows 64-bit** Python from [python.org](https://www.python.org/downloads/windows/).
+2. Check **Add python.exe to PATH**, then finish the installer and open a **new** Command Prompt.
+3. Avoid the Microsoft Store Python build (Qt and scientific wheels often fail). If `python` opens the Store, disable app execution aliases for `python.exe` / `python3.exe`.
+
+```bat
+cd %USERPROFILE%
+git clone https://github.com/aaroncelestian/XRFLab.git
+cd XRFLab
+python -m venv venv
+venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+In PowerShell, activate with `.\venv\Scripts\Activate.ps1`. If scripts are blocked:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Each new session: `source venv/bin/activate` (macOS) or `venv\Scripts\activate` (Windows), then `python main.py`.
+
+---
+
 ### Troubleshooting
 
 | Problem | What to try |
 | --- | --- |
-| `python` / `python3` not found | Reinstall Python and enable PATH (Windows). Open a **new** terminal. On macOS use `python3`. |
-| `No module named PySide6` (or similar) | The venv is not active, or you installed packages for a different Python. Activate, then `pip install -r requirements.txt` again. |
-| `xraylib` pip error | Use conda-forge (`conda install -c conda-forge xraylib`) or, on macOS, `brew install tschoonj/tap/xraylib` then `pip install xraylib`. |
-| Window never appears / Qt plugin error | Install from a local disk path, not iCloud/OneDrive. On Windows use 64-bit Python from python.org, not the Store. |
-| `pip` not recognized (Windows) | `python -m pip install -r requirements.txt` |
-| macOS “Python is from an unidentified developer” | System Settings → Privacy & Security → Open Anyway, or right-click the Python installer → Open. |
-| PowerShell `Activate.ps1` is disabled | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use Command Prompt. |
+| `conda` not found | Reopen the terminal, or use **Anaconda Prompt** / **Miniconda Prompt** (Windows). Re-run the Miniconda installer and allow shell initialization. |
+| `conda activate` fails on Windows | Use Anaconda/Miniconda Prompt, or run `conda init cmd.exe` / `conda init powershell`, then open a new window. |
+| `No module named PySide6` (or similar) | The env is not active. Run `conda activate xrflab` (or `source venv/bin/activate`), then reinstall with `pip install -r requirements.txt`. |
+| `xraylib` pip error | Prefer Miniconda: `conda install -c conda-forge xraylib`. On macOS pip-only installs, try `brew install tschoonj/tap/xraylib` then `pip install xraylib`. |
+| Window never appears / Qt plugin error | Install from a local disk path, not iCloud/OneDrive. On Windows avoid Store Python; use Miniconda or python.org 64-bit. |
+| `python` not found (venv path) | Open a new terminal; on macOS use `python3`. On Windows enable PATH or use `python -m pip …`. |
+| macOS “unidentified developer” | System Settings → Privacy & Security → Open Anyway. |
 | Want a Desktop icon | Launch once, then **Help → Install Desktop Shortcut**. |
 
 ---
 
 ## Usage
 
-With the virtual environment (or conda env) **activated**, from the XRFLab folder:
+With the conda env (or venv) **activated**, from the XRFLab folder:
 
 ```bash
 python main.py
