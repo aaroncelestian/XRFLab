@@ -24,6 +24,7 @@ class ElementPanel(QWidget):
     peak_list_changed = Signal()  # Emitted when peak list is edited (delete/clear)
     identify_on_plot_toggled = Signal(bool)  # Click-spectrum identify mode
     identify_add_element = Signal(str)  # Add candidate element from identify list
+    tube_guides_changed = Signal()  # Tube overlay settings (anode / kV / Compton)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -391,6 +392,14 @@ class ElementPanel(QWidget):
         self.show_markers_check.setChecked(True)
         detect_layout.addRow(self.show_markers_check)
 
+        self.show_tube_guides_check = QCheckBox("Show tube lines on spectrum")
+        self.show_tube_guides_check.setChecked(True)
+        self.show_tube_guides_check.setToolTip(
+            "Faint bands mark where the tube anode (and Compton) lines fall.\n"
+            "Independent of fitting — useful while reviewing Elements."
+        )
+        detect_layout.addRow(self.show_tube_guides_check)
+
         self.auto_id_check = QCheckBox("Auto-ID peaks (common XRF elements)")
         self.auto_id_check.setChecked(True)
         self.auto_id_check.setToolTip(
@@ -467,6 +476,29 @@ class ElementPanel(QWidget):
         )
         self._on_tube_anode_changed(self.tube_element_combo.currentText())
         self._on_tube_lines_toggled(self.tube_lines_check.isChecked())
+
+        # Keep tube-guide overlay in sync with Peak Find / Sample settings
+        self.show_tube_guides_check.toggled.connect(
+            lambda _c: self.tube_guides_changed.emit()
+        )
+        self.tube_lines_check.toggled.connect(
+            lambda _c: self.tube_guides_changed.emit()
+        )
+        self.tube_element_combo.currentTextChanged.connect(
+            lambda _t: self.tube_guides_changed.emit()
+        )
+        self.compton_check.toggled.connect(
+            lambda _c: self.tube_guides_changed.emit()
+        )
+        self.scatter_angle_spin.valueChanged.connect(
+            lambda _v: self.tube_guides_changed.emit()
+        )
+        self.compton_fwhm_spin.valueChanged.connect(
+            lambda _v: self.tube_guides_changed.emit()
+        )
+        self.excitation_spin.valueChanged.connect(
+            lambda _v: self.tube_guides_changed.emit()
+        )
 
         find_button = QPushButton("Find Peaks + Auto-ID")
         find_button.setStyleSheet("""
@@ -1118,6 +1150,10 @@ class ElementPanel(QWidget):
             'min_height': None if min_height <= 0 else min_height,
             'min_separation_ev': self.min_separation_spin.value(),
             'show_peak_markers': self.show_markers_check.isChecked(),
+            'show_tube_guides': (
+                hasattr(self, 'show_tube_guides_check')
+                and self.show_tube_guides_check.isChecked()
+            ),
             'use_peak_list': self.should_use_peak_list(),
             'auto_id_after_peak_find': (
                 hasattr(self, 'auto_id_check') and self.auto_id_check.isChecked()

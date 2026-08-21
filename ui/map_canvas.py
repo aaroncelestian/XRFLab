@@ -75,6 +75,8 @@ class MapCanvas(QWidget):
         self._move_proxy = None
         self._series_xy: Optional[Tuple[list, list]] = None
         self._series_highlight: Optional[int] = None
+        self._series_connect: bool = False
+        self._series_labels: Optional[List[str]] = None
 
         self._build_single_panel()
         self._connect_scene()
@@ -146,23 +148,35 @@ class MapCanvas(QWidget):
         ys,
         *,
         highlight: Optional[int] = None,
-        connect: bool = True,
+        connect: bool = False,
+        labels: Optional[Sequence[str]] = None,
     ) -> None:
-        """Overlay a collected line / multipoint series in image coordinates."""
+        """Overlay a collected line / multipoint series in image coordinates.
+
+        ``labels`` are optional per-point strings (e.g. Spectrum numbers)
+        drawn next to each marker.
+        """
         if xs is None or ys is None or len(xs) == 0:
             self.clear_series_markers()
             return
         self._series_xy = (list(xs), list(ys))
         self._series_highlight = highlight
-        self._apply_series_markers(connect=connect)
+        self._series_connect = bool(connect)
+        if labels is None:
+            self._series_labels = None
+        else:
+            self._series_labels = [str(v) for v in labels]
+        self._apply_series_markers()
 
     def set_series_highlight(self, index: Optional[int]) -> None:
         self._series_highlight = None if index is None else int(index)
-        self._apply_series_markers()
+        self._update_series_highlight_only()
 
     def clear_series_markers(self) -> None:
         self._series_xy = None
         self._series_highlight = None
+        self._series_connect = False
+        self._series_labels = None
         for p in self._panels:
             if "series" in p:
                 p["series"].setData([])
@@ -170,13 +184,49 @@ class MapCanvas(QWidget):
                 p["series_path"].setData([], [])
             if "series_hi" in p:
                 p["series_hi"].setData([])
+            self._clear_panel_series_labels(p)
 
-    def _apply_series_markers(self, *, connect: bool = True) -> None:
+    def _clear_panel_series_labels(self, panel: dict) -> None:
+        view = panel.get("view")
+        for item in panel.get("series_labels") or []:
+            if view is not None:
+                try:
+                    view.removeItem(item)
+                except Exception:
+                    pass
+        panel["series_labels"] = []
+
+    def _update_series_highlight_only(self) -> None:
+        """Move highlight marker / label colors without rebuilding TextItems."""
+        if self._series_xy is None:
+            return
+        xs, ys = self._series_xy
+        hi = self._series_highlight
+        for p in self._panels:
+            if "series_hi" in p:
+                if hi is not None and 0 <= hi < len(xs):
+                    p["series_hi"].setData(x=[xs[hi]], y=[ys[hi]])
+                else:
+                    p["series_hi"].setData([])
+            for i, item in enumerate(p.get("series_labels") or []):
+                try:
+                    color = (
+                        "#ffe14a"
+                        if hi is not None and i == hi
+                        else "#e8fbff"
+                    )
+                    item.setColor(color)
+                except Exception:
+                    pass
+
+    def _apply_series_markers(self) -> None:
         if self._series_xy is None:
             self.clear_series_markers()
             return
         xs, ys = self._series_xy
         hi = self._series_highlight
+        connect = self._series_connect
+        labels = self._series_labels
         for p in self._panels:
             if "series_path" in p:
                 if connect and len(xs) >= 2:
@@ -190,6 +240,49 @@ class MapCanvas(QWidget):
                     p["series_hi"].setData(x=[xs[hi]], y=[ys[hi]])
                 else:
                     p["series_hi"].setData([])
+            self._set_panel_series_labels(p, xs, ys, labels, highlight=hi)
+
+    def _set_panel_series_labels(
+        self,
+        panel: dict,
+        xs,
+        ys,
+        labels: Optional[List[str]],
+        *,
+        highlight: Optional[int] = None,
+    ) -> None:
+        self._clear_panel_series_labels(panel)
+        if not labels or not xs:
+            return
+        view = panel.get("view")
+        if view is None:
+            return
+        items: List[pg.TextItem] = []
+        n = min(len(xs), len(ys), len(labels))
+        for i in range(n):
+            text = labels[i]
+            if not text:
+                continue
+            color = "#ffe14a" if highlight is not None and i == highlight else "#e8fbff"
+            item = pg.TextItem(
+                text=str(text),
+                color=color,
+                anchor=(0.0, 1.0),
+            )
+            item.setZValue(23)
+            try:
+                from PySide6.QtGui import QFont
+
+                f = QFont()
+                f.setPointSize(9)
+                f.setBold(True)
+                item.setFont(f)
+            except Exception:
+                pass
+            item.setPos(float(xs[i]) + 2.0, float(ys[i]) - 2.0)
+            view.addItem(item)
+            items.append(item)
+        panel["series_labels"] = items
 
     def set_line(
         self,

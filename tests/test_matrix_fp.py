@@ -257,6 +257,39 @@ def test_empirical_formula_calcite_quartz_magnetite():
     assert empirical_formula(mag_el) == "Fe₃O₄"
 
 
+def test_empirical_formula_h2o_as_hydrate_and_subscripts():
+    from core.matrix_model import empirical_formula
+
+    el, fw = expand_composition(
+        {"Si": 1.0},
+        MatrixAssumptions(kind=MatrixKind.OXIDE, h2o_wt=10.0),
+    )
+    formula = empirical_formula(el, formula_wt=fw)
+    assert "H₂O" in formula
+    assert "·" in formula
+    # Free H must not appear in the anhydrous part (before the hydrate dot).
+    anhydrous = formula.split("·", 1)[0]
+    assert "H" not in anhydrous
+    # Stoichiometry in the anhydrous formula uses Unicode subscripts only.
+    assert not any(ch in "0123456789" for ch in anhydrous), formula
+
+
+def test_empirical_formula_decimal_subscripts():
+    from core.matrix_model import empirical_formula
+
+    # Mixed cations → non-integer Al/Na coefficients, all subscripted.
+    el, fw = expand_composition(
+        {"Si": 24.5, "Al": 16.3, "Na": 10.7, "Ca": 0.3},
+        MatrixAssumptions(kind=MatrixKind.OXIDE, h2o_wt=2.0),
+    )
+    formula = empirical_formula(el, formula_wt=fw)
+    assert "H₂O" in formula
+    assert formula.startswith("Si")
+    assert "₂" in formula or "₄" in formula or "₆" in formula
+    # No free HO… mashed into the main formula.
+    assert "HO" not in formula.split("·", 1)[0]
+
+
 def test_coerce_matrix_kind_from_combo_strings():
     from core.matrix_model import coerce_matrix_kind
 

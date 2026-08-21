@@ -11,7 +11,11 @@ from numpy.lib.stride_tricks import sliding_window_view
 # XGT-7200 sample stage travel is 100 × 100 mm. The overview BMP is 4:3
 # (typically 2592×1944) and shows a wider camera FOV; Horiba hatches the
 # margins outside the probeable square. Square pixels, 100 mm on the short
-# image axis, stage (0, 0) at the image centre; +X right, +Y up.
+# image axis, stage (0, 0) at the image centre; +X right.
+#
+# After the XGT BMP orientation fix (180° + left/right mirror ≡ vertical flip
+# of the decoded bitmap), stage +Y maps toward the *bottom* of the displayed
+# photo (larger row index) so overlays match the corrected image.
 XGT_STAGE_TRAVEL_MM = 100.0
 
 
@@ -37,19 +41,20 @@ class StageCamera:
     def stage_to_pixel(self, x_mm: float, y_mm: float) -> Tuple[float, float]:
         """Stage (mm) → image pixel (col, row), origin top-left of the BMP."""
         px = (self.width_px - 1) * 0.5 + (x_mm - self.origin_x_mm) / self.mm_per_px_x
-        py = (self.height_px - 1) * 0.5 - (y_mm - self.origin_y_mm) / self.mm_per_px_y
+        # +Y → larger row after XGT orientation correction (see module note)
+        py = (self.height_px - 1) * 0.5 + (y_mm - self.origin_y_mm) / self.mm_per_px_y
         return float(px), float(py)
 
     def pixel_to_stage(self, px: float, py: float) -> Tuple[float, float]:
         x_mm = self.origin_x_mm + (px - (self.width_px - 1) * 0.5) * self.mm_per_px_x
-        y_mm = self.origin_y_mm - (py - (self.height_px - 1) * 0.5) * self.mm_per_px_y
+        y_mm = self.origin_y_mm + (py - (self.height_px - 1) * 0.5) * self.mm_per_px_y
         return float(x_mm), float(y_mm)
 
     def stages_to_pixels(
         self, xs: np.ndarray, ys: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
         px = (self.width_px - 1) * 0.5 + (np.asarray(xs, dtype=np.float64) - self.origin_x_mm) / self.mm_per_px_x
-        py = (self.height_px - 1) * 0.5 - (np.asarray(ys, dtype=np.float64) - self.origin_y_mm) / self.mm_per_px_y
+        py = (self.height_px - 1) * 0.5 + (np.asarray(ys, dtype=np.float64) - self.origin_y_mm) / self.mm_per_px_y
         return px, py
 
     def stage_bounds_to_pixel_rect(
@@ -413,9 +418,9 @@ def calibrate_stage_camera(
     sx, sy = float(stage_center_mm[0]), float(stage_center_mm[1])
     if not (np.isfinite(sx) and np.isfinite(sy)):
         return None
-    # stage_to_pixel: px = cx0 + (x - ox)/mpp, py = cy0 - (y - oy)/mpp
+    # stage_to_pixel: px = cx0 + (x - ox)/mpp, py = cy0 + (y - oy)/mpp
     ox = sx - (pcx - cx0) * mpp
-    oy = sy - (cy0 - pcy) * mpp
+    oy = sy - (pcy - cy0) * mpp
     return StageCamera(
         width_px=width,
         height_px=height,

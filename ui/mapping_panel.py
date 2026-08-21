@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -54,6 +54,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from core.batch_processing import sanitize_sample_name
+from core.composition import numbered_replicate_names, strip_replicate_suffix
 
 from core.mapping.camera import (
     StageCamera,
@@ -243,15 +246,18 @@ class MappingPanel(QWidget):
         data_layout.setContentsMargins(0, 0, 0, 0)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Data"])
-        self.tree.setEditTriggers(QAbstractItemView.EditKeyPressed)
+        self.tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_data_context_menu)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
         self.tree.itemChanged.connect(self._on_data_tree_item_changed)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         data_layout.addWidget(self.tree)
+        rename_data_shortcut = QShortcut(QKeySequence("F2"), self.tree)
+        rename_data_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        rename_data_shortcut.activated.connect(self._rename_selected_data_item)
         data_hint = QLabel(
-            "Shift/Ctrl-click to select spectra · F2 to rename · "
+            "Shift/Ctrl-click to select spectra · F2 / Rename… for Sample_1, Sample_2, … · "
             "Send selected → Batch for bulk fitting"
         )
         data_hint.setWordWrap(True)
@@ -259,7 +265,12 @@ class MappingPanel(QWidget):
         data_layout.addWidget(data_hint)
         data_btn_row = QHBoxLayout()
         self.rename_data_btn = QPushButton("Rename…")
-        self.rename_data_btn.setToolTip("Rename selected spectrum, line scan, or site")
+        self.rename_data_btn.setToolTip(
+            "Rename selected spectra.\n"
+            "One spectrum (or site / line scan): new name as typed.\n"
+            "Several spectra: SampleName → SampleName_1, SampleName_2, … "
+            "(same as Batch Analysis; Composition groups those as one sample)."
+        )
         self.rename_data_btn.clicked.connect(self._rename_selected_data_item)
         data_btn_row.addWidget(self.rename_data_btn)
         self.select_all_spectra_btn = QPushButton("Select all spectra")
@@ -916,6 +927,8 @@ class MappingPanel(QWidget):
             "This tab is for spectra the instrument actually collected along "
             "a path (line scan or multipoint). Check the elements you want "
             "on the profile, then Fit / semi-quant uses that same list.\n\n"
+            "Line scans: hover the camera or profile to highlight a point. "
+            "Multipoint: select a spectrum in Data (camera dots are display-only).\n\n"
             "A line drawn on a map stays on Maps as an intensity profile. "
             "Map pixels are usually too short-count to fit at each point."
         )
@@ -1076,12 +1089,12 @@ class MappingPanel(QWidget):
         self._ls_profile_hover_proxy = pg.SignalProxy(
             self.ls_profile_plot.scene().sigMouseMoved,
             rateLimit=40,
-            slot=self._on_ls_profile_mouse,
+            slot=lambda evt: self._on_ls_profile_mouse(evt, self.ls_profile_plot),
         )
         self._ls_quant_hover_proxy = pg.SignalProxy(
             self.quant_plot.scene().sigMouseMoved,
             rateLimit=40,
-            slot=self._on_ls_profile_mouse,
+            slot=lambda evt: self._on_ls_profile_mouse(evt, self.quant_plot),
         )
 
     # -------------------------------------------------------------- wiring
@@ -1830,6 +1843,139 @@ class MappingPanel(QWidget):
                 self._tree_updating = False
         self._fill_sample_tab()
 
+    def _selected_spectrum_tree_items(self) -> list:
+        """Selected spectrum leaf items in tree order (not click order)."""
+        out = []
+
+        def walk(item: QTreeWidgetItem) -> None:
+            payload = item.data(0, Qt.UserRole)
+            if (
+                item.isSelected()
+                and payload
+                and payload[0] == "spectrum"
+            ):
+                out.append(item)
+            for i in range(item.childCount()):
+                walk(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        return out
+
+    def _fov_spectrum_names(self, fov: MappingFOV) -> set:
+        names = {s.name for s in fov.spectra}
+        for ls in fov.line_scans:
+            names.update(s.name for s in ls.points)
+        return names
+
+    def _batch_rename_selected_spectra(self, items: list) -> None:
+        """Rename several spectra as Sample_1 … Sample_n (Batch Analysis style)."""
+        n = len(items)
+        stems = [item.text(0) for item in items]
+        title = "Rename sample"
+        label = (
+            f"Sample name for {n} spectra.\n"
+            f"They will be named <name>_1 … <name>_{n}."
+        )
+        stripped = {strip_replicate_suffix(s) for s in stems}
+        default = next(iter(stripped)) if len(stripped) == 1 else ""
+
+        name, ok = QInputDialog.getText(self, title, label, text=default)
+        if not ok:
+            return
+        name = sanitize_sample_name(name)
+        if not name:
+            QMessageBox.warning(self, "Rename", "Enter a valid name.")
+            return
+
+        new_stems = numbered_replicate_names(name, n)
+        if len(new_stems) != n:
+            QMessageBox.warning(self, "Rename", "Enter a valid name.")
+            return
+
+        # Resolve MapSpectrum objects and their FOVs before applying
+        plan = []  # (item, ms, fov, old_name, new_name)
+        for item, new_stem in zip(items, new_stems):
+            payload = item.data(0, Qt.UserRole)
+            if not payload or payload[0] != "spectrum":
+                continue
+            fov = self._find_fov(payload[1])
+            if fov is None:
+                continue
+            old_name = payload[2]
+            ms = self._find_spectrum(fov, old_name)
+            if ms is None:
+                continue
+            plan.append((item, ms, fov, old_name, new_stem))
+
+        if len(plan) != n:
+            QMessageBox.warning(
+                self, "Rename", "Could not resolve all selected spectra."
+            )
+            return
+
+        # Collision check: names occupied by spectra not in this rename set
+        renaming_ids = {id(ms) for _, ms, _, _, _ in plan}
+        occupied = set()
+        for _, ms, fov, _, _ in plan:
+            for s in fov.spectra:
+                if id(s) not in renaming_ids:
+                    occupied.add(s.name)
+            for ls in fov.line_scans:
+                for s in ls.points:
+                    if id(s) not in renaming_ids:
+                        occupied.add(s.name)
+
+        planned_names = set()
+        for _, _, _, old_name, new_name in plan:
+            if new_name != old_name and (
+                new_name in occupied or new_name in planned_names
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Rename",
+                    f"The name “{new_name}” is already used in this site.",
+                )
+                return
+            planned_names.add(new_name)
+
+        # Two-phase rename avoids transient collisions within the selection
+        temps = []
+        for i, (_item, ms, _fov, old_name, new_name) in enumerate(plan):
+            if old_name == new_name:
+                temps.append(None)
+                continue
+            temp = f"__xrflab_ren_{i}__"
+            ms.name = temp
+            if isinstance(ms.spectrum.metadata, dict):
+                ms.spectrum.metadata["name"] = temp
+            temps.append(temp)
+
+        for (_item, ms, _fov, old_name, new_name), temp in zip(plan, temps):
+            if temp is None:
+                continue
+            ms.name = new_name
+            if isinstance(ms.spectrum.metadata, dict):
+                ms.spectrum.metadata["name"] = new_name
+
+        self._populate_data_tree()
+        # Reselect renamed spectra
+        want = {new for _, _, _, _, new in plan}
+        def select_named(item: QTreeWidgetItem) -> None:
+            payload = item.data(0, Qt.UserRole)
+            if payload and payload[0] == "spectrum" and payload[2] in want:
+                item.setSelected(True)
+            for i in range(item.childCount()):
+                select_named(item.child(i))
+
+        self.tree.clearSelection()
+        for i in range(self.tree.topLevelItemCount()):
+            select_named(self.tree.topLevelItem(i))
+
+        self.status_message.emit(
+            f"Renamed {n} spectra → {new_stems[0]} … {new_stems[-1]}"
+        )
+
     def _prompt_rename(self, item: QTreeWidgetItem, title: str) -> None:
         payload = item.data(0, Qt.UserRole)
         if not payload:
@@ -1843,10 +1989,25 @@ class MappingPanel(QWidget):
         )
         if not ok:
             return
-        new_name = new_name.strip()
+        new_name = sanitize_sample_name(new_name)
         if not new_name or new_name == current:
             return
-        item.setText(0, new_name)  # triggers itemChanged → apply
+        if kind == "spectrum":
+            fov = self._find_fov(payload[1])
+            if fov is not None:
+                occupied = self._fov_spectrum_names(fov)
+                occupied.discard(current)
+                if new_name in occupied:
+                    QMessageBox.warning(
+                        self,
+                        "Rename",
+                        f"The name “{new_name}” is already used in this site.",
+                    )
+                    return
+        self._tree_updating = True
+        item.setText(0, new_name)
+        self._tree_updating = False
+        self._apply_rename_from_item(item, payload)
 
     def _rename_selected_sites_item(self) -> None:
         items = self.sites_tree.selectedItems()
@@ -1861,20 +2022,27 @@ class MappingPanel(QWidget):
         self._prompt_rename(item, "Rename")
 
     def _rename_selected_data_item(self) -> None:
+        spectrum_items = self._selected_spectrum_tree_items()
+        if len(spectrum_items) > 1:
+            self._batch_rename_selected_spectra(spectrum_items)
+            return
+
         items = self.tree.selectedItems()
         if not items:
             QMessageBox.information(
                 self, "Rename", "Select a site, spectrum, or line scan first."
             )
             return
-        item = items[0]
+        # Prefer a single selected spectrum; otherwise first renamable item
+        item = spectrum_items[0] if spectrum_items else items[0]
         payload = item.data(0, Qt.UserRole)
         if not payload or payload[0] not in ("site", "spectrum", "linescan"):
             QMessageBox.information(
                 self,
                 "Rename",
                 "Select a site, spectrum, or line-scan series to rename.\n"
-                "(Element maps keep their IPJ labels.)",
+                "(Element maps keep their IPJ labels.)\n\n"
+                "Select several spectra and Rename to get Sample_1, Sample_2, …",
             )
             return
         self._prompt_rename(item, "Rename")
@@ -1909,9 +2077,15 @@ class MappingPanel(QWidget):
             self.tree.clearSelection()
             item.setSelected(True)
         menu = QMenu(self)
+        spectrum_items = self._selected_spectrum_tree_items()
+        n_spec = len(spectrum_items)
         act_ren = QAction("Rename…", self)
+        if n_spec > 1:
+            act_ren.setText(f"Rename {n_spec} as sample…")
+            act_ren.triggered.connect(self._rename_selected_data_item)
+        else:
+            act_ren.triggered.connect(lambda: self._prompt_rename(item, "Rename"))
         act_ren.setShortcut(QKeySequence("F2"))
-        act_ren.triggered.connect(lambda: self._prompt_rename(item, "Rename"))
         menu.addAction(act_ren)
         if payload[0] == "spectrum":
             act_an = QAction("Send to Analysis", self)
@@ -2143,13 +2317,14 @@ class MappingPanel(QWidget):
             self.ls_status_label.setText("No collected line scan in this site.")
             return
         tag = ls.display_label()
-        span = float(ls.distances().max()) if ls.n_points else 0.0
         if ls.is_multipoint:
             self.ls_status_label.setText(
                 f"{tag}: {ls.name}  ·  {ls.n_points} spectra  ·  "
-                f"{span:.2f} mm along stage axis (not collection-path distance)"
+                "profile vs Spectrum index — pick a point in Data "
+                "(camera dots are not clickable)"
             )
         else:
+            span = float(ls.distances().max()) if ls.n_points else 0.0
             self.ls_status_label.setText(
                 f"{tag}: {ls.name}  ·  {ls.n_points} spectra  ·  {span:.2f} mm"
             )
@@ -3247,6 +3422,13 @@ class MappingPanel(QWidget):
             if fov and fov is not self.current_fov:
                 self._activate_site(fov)
             self.info_label.setText(f"Selected spectrum: {payload[2]}")
+            ls = self._collected_line_scan()
+            if ls is not None and ls.is_multipoint:
+                if self.workspace_tabs.currentIndex() != 1:
+                    self.workspace_tabs.setCurrentIndex(1)
+                if not self._last_ls_profiles:
+                    self._plot_ipj_line_scan(ls)
+            self._highlight_line_scan_point_by_name(payload[2])
         elif kind == "linescan":
             fov = self._find_fov(payload[1])
             if fov and fov is not self.current_fov:
@@ -3695,12 +3877,12 @@ class MappingPanel(QWidget):
 
     def _line_scan_axis_labels(self, line_scan: LineScan) -> None:
         if line_scan.is_multipoint:
-            bottom = "Position along transect"
+            self.ls_profile_plot.setLabel("bottom", "Spectrum index")
+            self.quant_plot.setLabel("bottom", "Spectrum index")
         else:
-            bottom = "Distance along scan"
-        self.ls_profile_plot.setLabel("bottom", bottom, units="mm")
+            self.ls_profile_plot.setLabel("bottom", "Distance along scan", units="mm")
+            self.quant_plot.setLabel("bottom", "Distance along scan", units="mm")
         self.ls_profile_plot.setLabel("left", "Counts / s in window")
-        self.quant_plot.setLabel("bottom", bottom, units="mm")
 
     @staticmethod
     def _window_cps(spectrum, e_kev: float, half: float = 0.15) -> float:
@@ -3722,6 +3904,19 @@ class MappingPanel(QWidget):
         if sample is None or sample.whole_image is None:
             return None
         return sample.whole_image
+
+    def _series_point_numbers(self, line_scan: LineScan) -> list:
+        """Vendor Spectrum N (or 1-based collection index) for camera labels."""
+        import re
+
+        labels = []
+        for i, pt in enumerate(line_scan.points):
+            if pt.index is not None:
+                labels.append(str(int(pt.index)))
+                continue
+            m = re.search(r"(\d+)\s*$", pt.name or "")
+            labels.append(m.group(1) if m else str(i + 1))
+        return labels
 
     def _refresh_ls_camera(self, line_scan: Optional[LineScan] = None) -> None:
         image = self._sample_camera_image()
@@ -3758,19 +3953,13 @@ class MappingPanel(QWidget):
                 "This series has no stage coordinates to overlay on the camera."
             )
             return
-        order = ls.plot_order()
-        px, py = cam.stages_to_pixels(coords[order, 0], coords[order, 1])
-        # Keep pixel arrays aligned with original point index for hover lookup
-        px_all, py_all = cam.stages_to_pixels(coords[:, 0], coords[:, 1])
-        self._ls_cam_px, self._ls_cam_py = px_all, py_all
+        # Collection order: label N sits on Spectrum N's stage XY
+        px, py = cam.stages_to_pixels(coords[:, 0], coords[:, 1])
+        self._ls_cam_px, self._ls_cam_py = px, py
+        labels = self._series_point_numbers(ls)
         hi = self._ls_hover_index
-        hi_plot = None
-        if hi is not None:
-            matches = np.where(order == hi)[0]
-            if matches.size:
-                hi_plot = int(matches[0])
         self.ls_camera.set_series_markers(
-            px, py, highlight=hi_plot, connect=True
+            px, py, highlight=hi, connect=False, labels=labels
         )
         n = ls.n_points
         cal = (
@@ -3785,7 +3974,12 @@ class MappingPanel(QWidget):
         self.ls_camera_label.setText(
             f"{n} points on the sample camera "
             f"({cam.fov_width_mm:.0f}×{cam.fov_height_mm:.0f} mm FOV, "
-            f"{origin_note}). Hover the profile or click a point."
+            f"{origin_note}). Numbers = Spectrum index"
+            + (
+                " — select a spectrum in Data to highlight"
+                if ls.is_multipoint
+                else "."
+            )
         )
         self._overlay_line_scan_on_maps_camera(ls)
 
@@ -3802,15 +3996,15 @@ class MappingPanel(QWidget):
         if coords is None:
             self.canvas.clear_series_markers()
             return
-        order = ls.plot_order()
-        px, py = cam.stages_to_pixels(coords[order, 0], coords[order, 1])
-        hi = self._ls_hover_index
-        hi_plot = None
-        if hi is not None:
-            matches = np.where(order == hi)[0]
-            if matches.size:
-                hi_plot = int(matches[0])
-        self.canvas.set_series_markers(px, py, highlight=hi_plot, connect=True)
+        px, py = cam.stages_to_pixels(coords[:, 0], coords[:, 1])
+        labels = self._series_point_numbers(ls)
+        self.canvas.set_series_markers(
+            px,
+            py,
+            highlight=self._ls_hover_index,
+            connect=False,
+            labels=labels,
+        )
 
     def _set_ls_hover_index(self, index: Optional[int]) -> None:
         ls = self._collected_line_scan()
@@ -3824,40 +4018,52 @@ class MappingPanel(QWidget):
         if index is None or ls is None:
             return
         pt = ls.points[index]
-        dist = ls.distances()
-        x_mm = float(dist[index]) if dist.size > index else 0.0
+        x_val = self._ls_plot_x_for_index(index)
         xy = ""
         if pt.x is not None and pt.y is not None:
             xy = f"  ·  stage ({pt.x:.3f}, {pt.y:.3f}) mm"
-        self.ls_camera_label.setText(
-            f"{pt.name}  ·  {x_mm:.2f} mm along transect{xy}"
-        )
+        if ls.is_multipoint:
+            self.ls_camera_label.setText(
+                f"{pt.name}  ·  Spectrum index {int(round(x_val))}{xy}"
+            )
+        else:
+            self.ls_camera_label.setText(
+                f"{pt.name}  ·  {x_val:.2f} mm along scan{xy}"
+            )
+
+    def _ls_plot_x_for_index(self, index: int) -> float:
+        """Abscissa used on the profile plot for a collection-order point index."""
+        if (
+            self._ls_plot_x is not None
+            and self._ls_plot_order is not None
+            and self._ls_plot_x.size
+        ):
+            matches = np.where(self._ls_plot_order == index)[0]
+            if matches.size:
+                return float(self._ls_plot_x[int(matches[0])])
+        ls = self._collected_line_scan()
+        if ls is None:
+            return 0.0
+        dist = ls.distances()
+        if dist.size > index:
+            return float(dist[index])
+        return 0.0
 
     def _sync_ls_hover_overlays(self) -> None:
         idx = self._ls_hover_index
         dist = None
-        ls = self._collected_line_scan()
-        if idx is not None and ls is not None:
-            d = ls.distances()
-            if d.size > idx:
-                dist = float(d[idx])
+        if idx is not None:
+            dist = self._ls_plot_x_for_index(idx)
         for line in (self._ls_profile_hover, self._ls_quant_hover):
             if dist is None:
                 line.setVisible(False)
             else:
                 line.setValue(dist)
                 line.setVisible(True)
-        if self._ls_cam_px is None or ls is None:
-            return
-        order = ls.plot_order()
-        hi_plot = None
-        if idx is not None:
-            matches = np.where(order == idx)[0]
-            if matches.size:
-                hi_plot = int(matches[0])
-        self.ls_camera.set_series_highlight(hi_plot)
+        # Camera markers are in collection order — highlight index is direct
+        self.ls_camera.set_series_highlight(idx)
         if self._combo_kind() == "whole_image":
-            self.canvas.set_series_highlight(hi_plot)
+            self.canvas.set_series_highlight(idx)
 
     def _nearest_ls_point_by_distance(self, x_mm: float) -> Optional[int]:
         xs = self._ls_plot_x
@@ -3870,7 +4076,8 @@ class MappingPanel(QWidget):
             order = ls.plot_order()
             if xs.size == 0:
                 return None
-        i = int(np.argmin(np.abs(xs - x_mm)))
+            xs = xs[order]
+        i = int(np.argmin(np.abs(np.asarray(xs, dtype=np.float64) - x_mm)))
         return int(order[i])
 
     def _nearest_ls_point_by_pixel(self, px: float, py: float) -> Optional[int]:
@@ -3883,21 +4090,43 @@ class MappingPanel(QWidget):
             return None
         return i
 
-    def _on_ls_profile_mouse(self, event) -> None:
-        pos = event[0]
-        for plot in (self.ls_profile_plot, self.quant_plot):
-            if plot.sceneBoundingRect().contains(pos):
-                mouse = plot.plotItem.vb.mapSceneToView(pos)
-                idx = self._nearest_ls_point_by_distance(float(mouse.x()))
-                self._set_ls_hover_index(idx)
+    def _highlight_line_scan_point_by_name(self, name: str) -> None:
+        """Highlight a series point from Data-tree spectrum selection."""
+        ls = self._collected_line_scan()
+        if ls is None:
+            return
+        for i, pt in enumerate(ls.points):
+            if pt.name == name:
+                self._set_ls_hover_index(i)
                 return
 
+    def _ls_camera_pick_enabled(self) -> bool:
+        """Camera hover/click selects points only for true line scans."""
+        ls = self._collected_line_scan()
+        return ls is not None and ls.is_line_scan
+
+    def _on_ls_profile_mouse(self, event, plot) -> None:
+        """Hover on ROI profile or semi-quant → highlight matching spectrum."""
+        pos = event[0] if isinstance(event, (tuple, list)) else event
+        try:
+            if not plot.sceneBoundingRect().contains(pos):
+                return
+            mouse = plot.plotItem.vb.mapSceneToView(pos)
+        except Exception:
+            return
+        idx = self._nearest_ls_point_by_distance(float(mouse.x()))
+        self._set_ls_hover_index(idx)
+
     def _on_ls_camera_cursor(self, x, y, _val) -> None:
+        if not self._ls_camera_pick_enabled():
+            return
         idx = self._nearest_ls_point_by_pixel(x, y)
         if idx is not None:
             self._set_ls_hover_index(idx)
 
     def _on_ls_camera_clicked(self, x, y) -> None:
+        if not self._ls_camera_pick_enabled():
+            return
         idx = self._nearest_ls_point_by_pixel(x, y)
         if idx is None:
             return
@@ -3980,7 +4209,7 @@ class MappingPanel(QWidget):
         n_roi = len(rois)
         span = float(xs.max()) if xs.size else 0.0
         where = (
-            f"vs stage position ({span:.2f} mm span)"
+            f"vs Spectrum index (1…{int(span)})"
             if line_scan.is_multipoint
             else f"vs scan distance ({span:.2f} mm)"
         )
@@ -4673,11 +4902,8 @@ class MappingPanel(QWidget):
         skip = {"index", "name", "distance", "x", "y", "live_time"}
         element_keys = [k for k in rows[0].keys() if k not in skip]
         plot_x = np.asarray([r["distance"] for r in rows], dtype=np.float64)
-        order = (
-            np.argsort(plot_x, kind="mergesort")
-            if line_scan.is_multipoint
-            else np.arange(len(rows))
-        )
+        # Collection order for both kinds (multipoint abscissa is Spectrum index)
+        order = np.arange(len(rows))
         x_plot = plot_x[order]
         for ci, key in enumerate(element_keys):
             ys = np.array([r.get(key, np.nan) for r in rows], dtype=np.float64)

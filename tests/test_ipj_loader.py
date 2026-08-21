@@ -121,13 +121,11 @@ def test_dylan_point_series_and_maps(dylan):
     assert "Multipoint" in ls.name
     # Correct µm positions: early steps ~0.4 mm; full path travels tens of mm
     path = ls.path_distances()
-    proj = ls.distances()
     assert float(path[-1]) > 40.0
-    assert float(proj.max()) > 10.0
-    np.testing.assert_allclose(proj, ls.projected_positions())
-    # Plot order is spatial, so the abscissa is monotonic
-    order = ls.plot_order()
-    assert np.all(np.diff(proj[order]) >= -1e-12)
+    assert float(ls.projected_positions().max()) > 10.0
+    # Multipoint profile uses Spectrum index, collection order
+    np.testing.assert_allclose(ls.distances(), np.arange(1, ls.n_points + 1))
+    np.testing.assert_array_equal(ls.plot_order(), np.arange(ls.n_points))
 
 
 def test_map_sum_stage_matches_map_extra_um(dylan, barstow):
@@ -232,8 +230,8 @@ def test_classify_equal_vs_irregular_steps():
     assert classify_point_series_kind(multi) == "multipoint"
 
 
-def test_multipoint_distances_use_projected_axis_not_path():
-    """Zigzag collection order must not inflate the profile x-axis."""
+def test_multipoint_distances_use_spectrum_index_not_path():
+    """Multipoint profile stays in Spectrum order; path/projection stay available."""
     from core.mapping.models import LineScan, MapSpectrum
     from core.spectrum import Spectrum
 
@@ -256,8 +254,8 @@ def test_multipoint_distances_use_projected_axis_not_path():
     proj = ls.projected_positions()
     np.testing.assert_allclose(path, [0.0, 1.0, 2.0, 3.0])
     np.testing.assert_allclose(proj, [0.0, 1.0, 2.0, 1.0])
-    np.testing.assert_allclose(ls.distances(), proj)
-    np.testing.assert_array_equal(ls.plot_order(), [0, 1, 3, 2])
+    np.testing.assert_allclose(ls.distances(), [1.0, 2.0, 3.0, 4.0])
+    np.testing.assert_array_equal(ls.plot_order(), [0, 1, 2, 3])
 
     line_pts = [_pt(i, float(i), 0.0) for i in range(1, 6)]
     line = LineScan(
@@ -453,16 +451,19 @@ def test_optical_camera_bmps(barstow, dylan, emerald):
         assert img.shape == (1944, 2592, 3)
         assert img.dtype == np.uint8
         assert int(img.max()) > 0
+        assert sample.whole_image.metadata.get("orientation") == "rot180_mirror_lr"
 
     barstow_opt = next((f for f in barstow.fovs if f.optical is not None), None)
     assert barstow_opt is not None
     assert barstow_opt.optical.data.shape[2] == 3
     assert barstow_opt.optical.data.shape[0] > 100
     assert barstow_opt.optical.metadata.get("kind") == "map_area"
+    assert barstow_opt.optical.metadata.get("orientation") == "rot180_mirror_lr"
 
     dylan_opt = next((f for f in dylan.fovs if f.optical is not None), None)
     assert dylan_opt is not None
     assert dylan_opt.optical.data.ndim == 3
+    assert dylan_opt.optical.metadata.get("orientation") == "rot180_mirror_lr"
 
 
 def test_map_area_thumbnail_is_crop_of_sample_camera(dylan, emerald, barstow):

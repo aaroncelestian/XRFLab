@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from core.xray_data import get_element_lines
+from core.xray_data import get_element_lines, build_tube_guide_regions
 from core.peak_fitting import PeakFitter
 
 
@@ -27,6 +27,9 @@ class SpectrumWidget(QWidget):
         self.background_data = None
         self.peak_markers = []
         self._peak_marker_specs = []  # list of dicts to redraw after plot clear
+        self._tube_guide_items = []
+        self._tube_guide_specs = []
+        self._tube_guides_visible = True
         self._energy_pick_mode = False
         self._pick_marker = None
         
@@ -292,6 +295,87 @@ class SpectrumWidget(QWidget):
             plot_item.removeItem(marker)
         self.peak_markers.clear()
         self._peak_marker_specs.clear()
+
+    def set_tube_guides(self, regions, show=True):
+        """
+        Set faint vertical bands marking tube elastic / Compton locations.
+
+        Args:
+            regions: Iterable of dicts from build_tube_guide_regions
+                     (energy, half_width, label, kind)
+            show: If False, keep specs but hide the overlay
+        """
+        self._tube_guide_specs = [dict(r) for r in (regions or [])]
+        self._tube_guides_visible = bool(show)
+        self._redraw_tube_guides()
+
+    def clear_tube_guides(self):
+        """Remove tube-line guide bands from the plot."""
+        self._tube_guide_specs.clear()
+        self._tube_guides_visible = False
+        self._remove_tube_guide_items()
+
+    def set_tube_guides_visible(self, show: bool):
+        """Show or hide existing tube guides without clearing their specs."""
+        self._tube_guides_visible = bool(show)
+        self._redraw_tube_guides()
+
+    def _remove_tube_guide_items(self):
+        plot_item = self.plot_widget.getPlotItem()
+        for item in self._tube_guide_items:
+            try:
+                plot_item.removeItem(item)
+            except Exception:
+                pass
+        self._tube_guide_items.clear()
+
+    def _redraw_tube_guides(self):
+        """Draw tube guide bands behind the spectrum (survives plot clear)."""
+        self._remove_tube_guide_items()
+        if not self._tube_guides_visible or not self._tube_guide_specs:
+            return
+        plot_item = self.plot_widget.getPlotItem()
+        # Draw elastic first, Compton on top of those (still behind data)
+        for spec in self._tube_guide_specs:
+            energy = float(spec.get("energy", 0.0))
+            half = max(0.03, float(spec.get("half_width", 0.08)))
+            kind = str(spec.get("kind") or "elastic")
+            label = str(spec.get("label") or "")
+            if kind == "compton":
+                brush = pg.mkBrush(156, 39, 176, 28)  # purple, very faint
+                pen = pg.mkPen(156, 39, 176, 50)
+            else:
+                brush = pg.mkBrush(123, 31, 162, 38)
+                pen = pg.mkPen(123, 31, 162, 70)
+            region = pg.LinearRegionItem(
+                values=(energy - half, energy + half),
+                orientation="vertical",
+                brush=brush,
+                pen=pen,
+                movable=False,
+            )
+            region.setZValue(-20)
+            try:
+                region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            except Exception:
+                pass
+            plot_item.addItem(region, ignoreBounds=True)
+            self._tube_guide_items.append(region)
+
+            # Label only major features so the plot stays readable
+            short = label.split()[-1] if label else ""
+            if short in {"Kα1", "Lα1", "Compton Kα", "Compton Kβ", "Kβ1"}:
+                text = pg.TextItem(
+                    text=label,
+                    color=(120, 40, 140, 160),
+                    anchor=(0.5, 0.0),
+                )
+                # Place near the top of the view; update on view change is overkill
+                y = self._intensity_stick_scale() * 1.02
+                text.setPos(energy, y)
+                text.setZValue(-10)
+                plot_item.addItem(text)
+                self._tube_guide_items.append(text)
     
     def _assign_label_positions(self):
         """Stagger peak-label heights by energy so neighbors don't pile up"""
@@ -486,9 +570,14 @@ class SpectrumWidget(QWidget):
         plot_item = self.plot_widget.getPlotItem()
         # Preserve markers across clear/redraw
         saved_specs = list(self._peak_marker_specs)
+        saved_tube = list(self._tube_guide_specs)
+        tube_vis = self._tube_guides_visible
         plot_item.clear()
         self.peak_markers.clear()
+        self._tube_guide_items.clear()
         self._peak_marker_specs = saved_specs
+        self._tube_guide_specs = saved_tube
+        self._tube_guides_visible = tube_vis
         
         # Re-add crosshair and legend after clear
         plot_item.addItem(self.vLine, ignoreBounds=True)
@@ -496,6 +585,9 @@ class SpectrumWidget(QWidget):
         if self._pick_marker is not None:
             plot_item.addItem(self._pick_marker, ignoreBounds=True)
         self._ensure_legend(plot_item)
+
+        # Tube guides behind the measured curve
+        self._redraw_tube_guides()
         
         if self.spectrum_data is None:
             return

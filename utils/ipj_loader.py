@@ -472,6 +472,10 @@ def _parse_xgt_bmp(
         return None
     if data.size == 0:
         return None
+    # XGT stores the sample-camera BMP rotated/mirrored relative to stage
+    # +X/+Y. Correct with 180° then mirror left/right (≡ vertical flip of the
+    # raw bitmap) so tray labels and stage overlays line up.
+    data = np.ascontiguousarray(data[::-1, :])
     return OverviewImage(
         name=name,
         data=data,
@@ -479,6 +483,7 @@ def _parse_xgt_bmp(
             "source": "xgt_bmp",
             "kind": kind,
             "path": "/".join(path),
+            "orientation": "rot180_mirror_lr",
             **bmp_meta,
         },
     )

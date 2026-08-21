@@ -180,19 +180,21 @@ class LineScan:
         return proj - float(np.min(proj))
 
     def distances(self) -> np.ndarray:
-        """Profile abscissa: path for line scans, projected position for multipoint."""
+        """Profile abscissa: path for line scans, spectrum index for multipoint."""
         if self.is_multipoint:
-            return self.projected_positions()
+            # Collection / vendor Spectrum order — not a 1D stage projection.
+            # 1-based index keeps hover and labels aligned with Spectrum 1…N.
+            return np.arange(1, self.n_points + 1, dtype=np.float64)
         return self.path_distances()
 
     def plot_order(self) -> np.ndarray:
         """Indices that plot left-to-right along ``distances()``."""
-        xs = self.distances()
-        if xs.size == 0:
+        n = self.n_points
+        if n == 0:
             return np.array([], dtype=int)
-        if self.is_multipoint:
-            return np.argsort(xs, kind="mergesort")
-        return np.arange(len(xs), dtype=int)
+        # Multipoint and line scan both keep collection order for the profile.
+        # (Equal-step line scans are already acquired in path order.)
+        return np.arange(n, dtype=int)
 
 
 @dataclass

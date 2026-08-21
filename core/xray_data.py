@@ -352,6 +352,77 @@ def compton_seed_diagnostics(
     return in_range, None
 
 
+_TUBE_GUIDE_ELASTIC = ("Kα1", "Kα2", "Kβ1", "Lα1", "Lβ1")
+
+
+def build_tube_guide_regions(
+    tube_element: str = "Rh",
+    excitation_kv: float = 50.0,
+    *,
+    include_compton: bool = True,
+    scatter_angle_deg: float = 90.0,
+    compton_fwhm_kev: float = 0.500,
+    energy_min=None,
+    energy_max=None,
+) -> list:
+    """
+    Faint vertical bands for tube elastic + Compton locations on the plot.
+
+    Returns list of dicts: energy, half_width, label, kind ('elastic'|'compton').
+    K-series (and Compton) are omitted when tube kV is below the anode K-edge.
+    """
+    anode = str(tube_element or "Rh")
+    kv = float(excitation_kv)
+    e_lo = float(energy_min) if energy_min is not None else 0.0
+    e_hi = float(energy_max) if energy_max is not None else 1e9
+    k_edge = float(TUBE_K_EDGE_KEV.get(anode, 0.0))
+    allow_k = kv >= k_edge - 0.05
+
+    regions = []
+    tube_lines = get_tube_lines(anode, kv)
+    # Elastic: narrow band (~±80 eV), slightly wider for Kβ
+    for series in ("K", "L"):
+        if series == "K" and not allow_k:
+            continue
+        for line in tube_lines.get(series, []) or []:
+            name = line.get("name")
+            if name not in _TUBE_GUIDE_ELASTIC:
+                continue
+            energy = float(line["energy"])
+            if energy < e_lo or energy > e_hi:
+                continue
+            half = 0.10 if name.startswith("Kβ") else 0.08
+            regions.append(
+                {
+                    "energy": energy,
+                    "half_width": half,
+                    "label": f"{anode} {name}",
+                    "kind": "elastic",
+                }
+            )
+
+    if include_compton and allow_k:
+        for c in get_tube_compton_lines(
+            anode,
+            kv,
+            scatter_angle_deg=scatter_angle_deg,
+            fwhm_kev=compton_fwhm_kev,
+        ):
+            energy = float(c["energy"])
+            if energy < e_lo or energy > e_hi:
+                continue
+            half = float(c.get("exclusion_half_width_kev") or max(0.30, 1.5 * compton_fwhm_kev))
+            regions.append(
+                {
+                    "energy": energy,
+                    "half_width": half,
+                    "label": f"{anode} {c.get('line', 'Compton')}",
+                    "kind": "compton",
+                }
+            )
+    return regions
+
+
 def get_element_info(symbol, z):
     """
     Get detailed information about an element

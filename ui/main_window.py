@@ -424,6 +424,7 @@ class MainWindow(QMainWindow):
         self.element_panel.element_clicked.connect(self.on_element_clicked)
         self.element_panel.identify_on_plot_toggled.connect(self.on_identify_on_plot_toggled)
         self.element_panel.identify_add_element.connect(self.on_identify_add_element)
+        self.element_panel.tube_guides_changed.connect(self.refresh_tube_guides)
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
         self.results_panel.fp_quantify_requested.connect(self.quantify_fp)
@@ -431,6 +432,8 @@ class MainWindow(QMainWindow):
             lambda: self.quantify_fp(live=True)
         )
         self.results_panel.export_button.clicked.connect(self.export_results)
+
+        self.refresh_tube_guides()
         
         return analysis_widget
     
@@ -718,7 +721,9 @@ class MainWindow(QMainWindow):
             bits.append(f"measured cations {fp.measured_cation_pct:.1f} %")
             self.results_panel.set_formula_summary(
                 "    |  ".join(bits),
-                empirical=empirical_formula(fp.element_wt),
+                empirical=empirical_formula(
+                    fp.element_wt, formula_wt=fp.formula_wt
+                ),
             )
         self.spectrum_widget.restore_state(ui.get("spectrum_widget") or {})
         if ui.get("left_tab") is not None:
@@ -862,7 +867,8 @@ class MainWindow(QMainWindow):
                 # Auto-populate experimental parameters from spectrum metadata
                 if hasattr(spectrum, 'metadata') and spectrum.metadata:
                     self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
-                
+
+                self.refresh_tube_guides()
                 self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
             except Exception as e:
                 QMessageBox.critical(
@@ -953,6 +959,7 @@ class MainWindow(QMainWindow):
                     pass
 
         self.tab_widget.setCurrentIndex(0)  # Analysis
+        self.refresh_tube_guides()
         self.status_bar.showMessage(
             f"Loaded mapping spectrum into Analysis: {path_label or 'spectrum'}",
             5000,
@@ -1524,7 +1531,9 @@ class MainWindow(QMainWindow):
             bits.append(f"measured cations {result.measured_cation_pct:.1f} %")
             self.results_panel.set_formula_summary(
                 "    |  ".join(bits),
-                empirical=empirical_formula(result.element_wt),
+                empirical=empirical_formula(
+                    result.element_wt, formula_wt=result.formula_wt
+                ),
             )
             n = len([k for k, v in result.concentrations.items()
                      if v.get("role") == "measured"])
@@ -1692,6 +1701,43 @@ class MainWindow(QMainWindow):
         self.spectrum_widget.show_element_lines(symbol, z)
         self._displayed_element_lines = symbol
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
+
+    def refresh_tube_guides(self):
+        """Update faint tube-line bands on the Analysis spectrum plot."""
+        from core.xray_data import build_tube_guide_regions
+
+        panel = self.element_panel
+        show = True
+        if hasattr(panel, "show_tube_guides_check"):
+            show = bool(panel.show_tube_guides_check.isChecked())
+
+        e_min = e_max = None
+        spectrum = getattr(self.spectrum_widget, "spectrum_data", None)
+        if spectrum is not None and len(getattr(spectrum, "energy", []) or []):
+            energy = spectrum.energy
+            e_min = float(min(energy))
+            e_max = float(max(energy))
+
+        fit = panel.get_fitting_params() if hasattr(panel, "get_fitting_params") else {}
+        # Guides follow the tube anode / kV even if "Include Tube Lines" is off
+        # for fitting — the overlay is a reference for element ID. Compton
+        # bands honor the Compton checkbox (and need Include Tube for θ/FWHM).
+        include_compton = bool(fit.get("include_compton", True))
+        if hasattr(panel, "compton_check") and hasattr(panel, "tube_lines_check"):
+            include_compton = (
+                panel.tube_lines_check.isChecked() and panel.compton_check.isChecked()
+            )
+
+        regions = build_tube_guide_regions(
+            tube_element=fit.get("tube_element", "Rh"),
+            excitation_kv=float(fit.get("excitation_kv", 20.0)),
+            include_compton=include_compton,
+            scatter_angle_deg=float(fit.get("scatter_angle_deg", 90.0)),
+            compton_fwhm_kev=float(fit.get("compton_fwhm_kev", 0.500)),
+            energy_min=e_min,
+            energy_max=e_max,
+        )
+        self.spectrum_widget.set_tube_guides(regions, show=show)
     
     def on_result_element_selected(self, symbol):
         """Handle element click in Results table — overlay lines on the spectrum"""

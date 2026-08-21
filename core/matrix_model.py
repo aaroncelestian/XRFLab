@@ -410,6 +410,13 @@ def _nice_mole_multiplier(moles: Dict[str, float]) -> float:
     return float(best_m)
 
 
+def _subscript_number(text: str) -> str:
+    """Turn digits in a number string into Unicode subscripts; keep '.'."""
+    return "".join(
+        ch.translate(_SUBSCRIPTS) if ch.isdigit() else ch for ch in text
+    )
+
+
 def _fmt_stoich(n: float) -> Optional[str]:
     """Subscript count for a formula term. None means omit the element."""
     if n < 0.03:
@@ -421,44 +428,111 @@ def _fmt_stoich(n: float) -> Optional[str]:
         if nearest == 1:
             return ""
         return str(int(nearest)).translate(_SUBSCRIPTS)
+    text = f"{n:.2f}".rstrip("0").rstrip(".")
+    return _subscript_number(text)
+
+
+def _fmt_hydrate_coeff(n: float) -> Optional[str]:
+    """Coefficient before H₂O / OH / CO₂ in a ·nTerm suffix. None = omit."""
+    if n < 0.03:
+        return None
+    nearest = round(n)
+    if abs(n - nearest) < 0.04:
+        if nearest <= 0:
+            return None
+        if nearest == 1:
+            return ""
+        return str(int(nearest))
     return f"{n:.2f}".rstrip("0").rstrip(".")
 
 
-def empirical_formula(element_wt: Dict[str, float]) -> str:
-    """Stoichiometric formula from elemental wt% (e.g. CaCO₃, SiO₂, Fe₃O₄)."""
+def empirical_formula(
+    element_wt: Dict[str, float],
+    *,
+    formula_wt: Optional[Dict[str, float]] = None,
+) -> str:
+    """Stoichiometric formula from elemental wt% (e.g. CaCO₃, SiO₂, Fe₃O₄).
+
+    When ``formula_wt`` includes user H2O / OH / CO2 knobs, those are peeled
+    off the elemental totals and shown as hydrate-style suffixes
+    (e.g. SiO₂·0.5H₂O) rather than free H in the main formula.
+    """
+    fw = formula_wt or {}
+    h2o = max(0.0, float(fw.get("H2O") or 0.0))
+    oh = max(0.0, float(fw.get("OH") or 0.0))
+    co2 = max(0.0, float(fw.get("CO2") or 0.0))
+
+    adjusted = {
+        el: float(wt)
+        for el, wt in (element_wt or {}).items()
+        if float(wt) > 0.0
+    }
+    for el, w in _knob_elements(h2o, oh, co2).items():
+        left = adjusted.get(el, 0.0) - w
+        if left <= 0.02:
+            adjusted.pop(el, None)
+        else:
+            adjusted[el] = left
+
     moles: Dict[str, float] = {}
-    for el, wt in (element_wt or {}).items():
-        if float(wt) <= 0.02:
+    for el, wt in adjusted.items():
+        if wt <= 0.02:
             continue
         try:
-            moles[el] = float(wt) / atomic_weight(el)
+            moles[el] = wt / atomic_weight(el)
         except KeyError:
             continue
-    if not moles:
+    if not moles and h2o <= 0 and oh <= 0 and co2 <= 0:
         return "—"
 
     cations = {k: v for k, v in moles.items() if k not in _LIGHT}
     if cations:
         base = max(cations.values())
-    else:
+    elif moles:
         base = max(moles.values())
+    else:
+        # Pure light-knob composition (e.g. only H2O) — still show ·H₂O
+        base = 1.0
     if base <= 0:
         return "—"
-    ratios = {k: v / base for k, v in moles.items()}
-    mult = _nice_mole_multiplier(ratios)
-    scaled = {k: v * mult for k, v in ratios.items()}
 
-    cations_sorted = sorted(
-        (e for e in scaled if e not in _LIGHT),
-        key=lambda e: -scaled[e],
-    )
-    order = cations_sorted + [e for e in ("C", "H", "O", "N", "F") if e in scaled]
-    parts = []
-    for el in order:
-        token = _fmt_stoich(scaled[el])
-        if token is None:
+    parts: list[str] = []
+    if moles:
+        ratios = {k: v / base for k, v in moles.items()}
+        mult = _nice_mole_multiplier(ratios)
+        scaled = {k: v * mult for k, v in ratios.items()}
+
+        cations_sorted = sorted(
+            (e for e in scaled if e not in _LIGHT),
+            key=lambda e: -scaled[e],
+        )
+        order = cations_sorted + [
+            e for e in ("C", "H", "O", "N", "F") if e in scaled
+        ]
+        for el in order:
+            token = _fmt_stoich(scaled[el])
+            if token is None:
+                continue
+            parts.append(f"{el}{token}")
+    else:
+        mult = 1.0
+
+    # ·nH₂O / ·nOH / ·nCO₂ from user matrix knobs (same formula basis)
+    aw_h = atomic_weight("H")
+    aw_c = atomic_weight("C")
+    aw_o = atomic_weight("O")
+    for amount, mw, label in (
+        (h2o, 2.0 * aw_h + aw_o, "H₂O"),
+        (oh, aw_h + aw_o, "OH"),
+        (co2, aw_c + 2.0 * aw_o, "CO₂"),
+    ):
+        if amount <= 0.05 or mw <= 0:
             continue
-        parts.append(f"{el}{token}")
+        coeff = _fmt_hydrate_coeff((amount / mw) / base * mult)
+        if coeff is None:
+            continue
+        parts.append(f"·{coeff}{label}")
+
     return "".join(parts) if parts else "—"
 
 

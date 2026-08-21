@@ -21,10 +21,11 @@ def test_stage_camera_roundtrip_center_and_offset():
     x, y = cam.pixel_to_stage(px, py)
     np.testing.assert_allclose([x, y], [10.0, 5.0], atol=1e-9)
 
-    # +Y is toward the top of the image (smaller row index)
+    # +Y is toward the bottom of the displayed photo (larger row index)
+    # after the XGT BMP orientation correction.
     _px0, py0 = cam.stage_to_pixel(0.0, 0.0)
     _px1, py1 = cam.stage_to_pixel(0.0, 10.0)
-    assert py1 < py0
+    assert py1 > py0
 
 
 def test_camera_from_image_inscribes_100mm_stage_square():
@@ -53,7 +54,7 @@ def test_camera_from_image_inscribes_100mm_stage_square():
     ys = np.array([-5.8, 5.5])
     px, py = cam.stages_to_pixels(xs, ys)
     assert px[0] > (2592 - 1) / 2.0  # +X is to the right of centre
-    assert py[1] < py[0]  # more positive Y is higher on the photo
+    assert py[1] > py[0]  # more positive Y is lower on the photo
 
 
 def test_stage_bounds_to_pixel_rect():
