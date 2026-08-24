@@ -170,6 +170,78 @@ def test_locate_scaled_template_near_center():
     assert abs((y1 - y0) - 20) <= 1
 
 
+def test_camera_for_tray_overlay_ignores_small_map_calibration():
+    from core.mapping.camera import (
+        camera_for_tray_overlay,
+        camera_from_sample_sites,
+        locate_red_map_rect,
+    )
+    from core.mapping.models import MappingFOV, OverviewImage, ElementMap
+
+    photo = np.zeros((200, 300, 3), dtype=np.uint8)
+    photo[:] = (30, 40, 35)
+    # Hollow red probeable square
+    photo[50:111, 80:141] = (30, 40, 35)
+    photo[50:53, 80:141] = (255, 20, 10)
+    photo[108:111, 80:141] = (255, 20, 10)
+    photo[50:111, 80:83] = (255, 20, 10)
+    photo[50:111, 138:141] = (255, 20, 10)
+    optical = OverviewImage(name="Map area", data=photo[40:80, 100:160].copy())
+    em = ElementMap(name="Ca", data=np.ones((10, 15), dtype=np.float64))
+    fov = MappingFOV(
+        id="s1",
+        name="Site 1",
+        width=15,
+        height=10,
+        element_maps=[em],
+        optical=optical,
+        stage_center_mm=(5.0, -2.0),
+        metadata={"map_extra": {"size_mm": (3.0, 2.0)}},
+    )
+    tray_cam, method = camera_for_tray_overlay(photo)
+    site_cam = camera_from_sample_sites(photo, [fov])
+    assert method == "probeable ROI"
+    assert tray_cam is not None
+    assert site_cam is not None
+    # Tray overlay must not use the small-map origin
+    px0, py0 = tray_cam.stage_to_pixel(0.0, 0.0)
+    red = locate_red_map_rect(photo)
+    assert red is not None
+    np.testing.assert_allclose(px0, 0.5 * (red[0] + red[2]), atol=1.0)
+    np.testing.assert_allclose(py0, 0.5 * (red[1] + red[3]), atol=1.0)
+    # Small-map site calibration pins (5, -2) to map crop centre — wrong for tray
+    sx, sy = site_cam.stage_to_pixel(5.0, -2.0)
+    np.testing.assert_allclose([sx, sy], [130.0, 60.0], atol=0.5)
+    assert abs(tray_cam.origin_x_mm - site_cam.origin_x_mm) > 1.0
+
+
+def test_camera_from_sample_sites_red_roi_uses_probeable_origin():
+    from core.mapping.camera import camera_from_sample_sites, locate_red_map_rect
+    from core.mapping.models import MappingFOV
+
+    photo = np.zeros((200, 300, 3), dtype=np.uint8)
+    photo[:] = (30, 40, 35)
+    photo[50:111, 80:141] = (30, 40, 35)
+    photo[50:53, 80:141] = (255, 20, 10)
+    photo[108:111, 80:141] = (255, 20, 10)
+    photo[50:111, 80:83] = (255, 20, 10)
+    photo[50:111, 138:141] = (255, 20, 10)
+    fov = MappingFOV(
+        id="s1",
+        name="Site 1",
+        width=0,
+        height=0,
+        stage_center_mm=(12.0, -8.0),
+        metadata={"map_extra": {"size_mm": (4.0, 3.0)}},
+    )
+    cam = camera_from_sample_sites(photo, [fov])
+    red = locate_red_map_rect(photo)
+    assert cam is not None and red is not None
+    px, py = cam.stage_to_pixel(0.0, 0.0)
+    np.testing.assert_allclose(px, 0.5 * (red[0] + red[2]), atol=1.0)
+    np.testing.assert_allclose(py, 0.5 * (red[1] + red[3]), atol=1.0)
+
+
 def test_camera_from_sample_sites_prefers_crop_calibration():
     from core.mapping.camera import camera_from_sample_sites, locate_image_crop
     from core.mapping.models import MappingFOV, OverviewImage, ElementMap

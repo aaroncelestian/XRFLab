@@ -23,7 +23,7 @@ from core.mapping.profiles import (
     extract_multi_element_profiles,
     line_distances,
 )
-from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop, locate_red_map_rect, locate_scaled_template, camera_from_sample_sites, calibrate_stage_camera
+from core.mapping.camera import StageCamera, camera_from_image, locate_image_crop, locate_red_map_rect, locate_scaled_template, camera_from_sample_sites, calibrate_stage_camera, camera_for_tray_overlay
 from core.mapping.correlations import map_correlation, map_correlation_matrix, rgb_composite
 from core.mapping.display import (
     enhance_map,

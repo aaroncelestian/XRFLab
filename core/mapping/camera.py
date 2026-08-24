@@ -483,17 +483,12 @@ def camera_from_sample_sites(
             red = locate_red_map_rect(photo_arr)
             if red is None:
                 continue
-            if size is not None:
-                rw = red[2] - red[0]
-                rh = red[3] - red[1]
-                exp_w = float(size[0]) / base.mm_per_px_x
-                exp_h = float(size[1]) / base.mm_per_px_y
-                if exp_w > 1 and exp_h > 1:
-                    scale_err = abs(rw - exp_w) / exp_w + abs(rh - exp_h) / exp_h
-                    if scale_err > 0.75:
-                        continue
             rect = red
             rank = 1
+            # Red ROI is the 100×100 mm probeable square; stage (0,0) is its centre,
+            # not the sum-spectrum / map FOV centre.
+            center = (0.0, 0.0)
+            size = (float(stage_travel_mm), float(stage_travel_mm))
         cam = calibrate_stage_camera(
             photo_arr,
             center,
@@ -507,3 +502,38 @@ def camera_from_sample_sites(
             if rank >= 3:
                 break
     return best_cam if best_cam is not None else base
+
+
+def camera_for_tray_overlay(
+    image,
+    *,
+    stage_travel_mm: float = XGT_STAGE_TRAVEL_MM,
+) -> Tuple[Optional[StageCamera], str]:
+    """
+    Calibrate the sample-camera view for tray-wide line / multipoint overlays.
+
+    Small map-area crops from individual sites are intentionally ignored: they
+    only cover a few mm and mis-register spectra collected across the tray.
+    When Horiba's red probeable-area rectangle is visible, stage (0,0) is
+    anchored to its centre (the scannable 100×100 mm square, inside the
+    hatched non-scannable margins).
+    """
+    photo = getattr(image, "data", image)
+    photo_arr = np.asarray(photo)
+    base = camera_from_image(image, stage_travel_mm=stage_travel_mm)
+    if base is None:
+        return None, "none"
+
+    red = locate_red_map_rect(photo_arr)
+    if red is not None:
+        cam = calibrate_stage_camera(
+            photo_arr,
+            (0.0, 0.0),
+            red,
+            (float(stage_travel_mm), float(stage_travel_mm)),
+            stage_travel_mm=stage_travel_mm,
+        )
+        if cam is not None:
+            return cam, "probeable ROI"
+
+    return base, "image centre"

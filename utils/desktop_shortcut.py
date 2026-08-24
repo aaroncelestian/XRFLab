@@ -159,9 +159,9 @@ def _install_macos_app() -> ShortcutResult:
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>1.3.1</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>1.3.1</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.13</string>
     <key>NSHighResolutionCapable</key>

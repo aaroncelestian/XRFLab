@@ -92,7 +92,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("XRFLab")
     app.setOrganizationName("XRFLab")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("1.3.1")
     _force_light_mode(app)
 
     icon_file = icon_path("xrflab.png")

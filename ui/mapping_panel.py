@@ -62,6 +62,7 @@ from core.mapping.camera import (
     StageCamera,
     camera_from_image,
     camera_from_sample_sites,
+    camera_for_tray_overlay,
     locate_image_crop,
     locate_red_map_rect,
     locate_scaled_template,
@@ -3930,8 +3931,7 @@ class MappingPanel(QWidget):
             )
             return
         sample = self._sample_for_site(self.current_fov) if self.current_fov else None
-        sites = list(sample.sites) if sample is not None else []
-        cam = camera_from_sample_sites(image, sites) or camera_from_image(image)
+        cam, cal_method = camera_for_tray_overlay(image)
         self._ls_camera_model = cam
         rgb = image.data.ndim == 3 and image.data.shape[-1] >= 3
         try:
@@ -3962,15 +3962,12 @@ class MappingPanel(QWidget):
             px, py, highlight=hi, connect=False, labels=labels
         )
         n = ls.n_points
-        cal = (
-            abs(float(cam.origin_x_mm)) > 1e-6
-            or abs(float(cam.origin_y_mm)) > 1e-6
-        )
-        origin_note = (
-            "origin calibrated from map/ROI"
-            if cal
-            else "origin at image centre (uncalibrated)"
-        )
+        if cal_method == "probeable ROI":
+            origin_note = "origin at probeable-area centre (red ROI)"
+        elif cal_method == "image centre":
+            origin_note = "origin at image centre"
+        else:
+            origin_note = "unregistered"
         self.ls_camera_label.setText(
             f"{n} points on the sample camera "
             f"({cam.fov_width_mm:.0f}×{cam.fov_height_mm:.0f} mm FOV, "

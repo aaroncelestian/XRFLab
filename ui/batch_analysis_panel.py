@@ -26,6 +26,7 @@ from core.batch_processing import (
 )
 from core.composition import numbered_replicate_names, strip_replicate_suffix
 from ui.element_panel import ElementPanel
+from ui.composition_panel import CompositionPanel
 
 
 class BatchProcessingWorker(QThread):
@@ -55,7 +56,7 @@ class BatchAnalysisPanel(QWidget):
     """Panel for batch spectral fitting and quantification"""
     
     results_ready = Signal()
-    send_to_composition_requested = Signal()
+    spectrum_selected = Signal(str, list)  # sample label, member spectrum names
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,6 +69,11 @@ class BatchAnalysisPanel(QWidget):
         self.element_panel = None  # Will be set from main window
         self._instrument_state = None
         self._memory_spectra = {}  # display name -> Spectrum (IPJ / Mapping)
+        self.composition_panel = CompositionPanel(embedded_in_batch=True)
+        self.composition_panel.sample_activated.connect(self._on_composition_sample_activated)
+        self.composition_panel.open_in_batch_requested.connect(
+            self._on_composition_open_in_batch
+        )
         
         self._init_ui()
 
@@ -87,22 +93,59 @@ class BatchAnalysisPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        splitter = QSplitter(Qt.Horizontal)
+        self._main_splitter = QSplitter(Qt.Horizontal)
 
-        left_tab_widget = QTabWidget()
-        left_tab_widget.setMinimumWidth(280)
-        left_tab_widget.setMaximumWidth(380)
+        self.left_tab_widget = QTabWidget()
+        self.left_tab_widget.setMinimumWidth(280)
+        self.left_tab_widget.setMaximumWidth(380)
+        self._narrow_tab_max_width = 380
 
-        left_tab_widget.addTab(self._create_setup_tab(), "Setup")
-        left_tab_widget.addTab(self._create_results_tab(), "Results")
+        self.left_tab_widget.addTab(self._create_setup_tab(), "Setup")
+        self.left_tab_widget.addTab(self._create_summary_tab(), "Summary")
+        self.left_tab_widget.addTab(self._create_results_tab(), "Results")
+        self.left_tab_widget.addTab(
+            self.composition_panel.build_composition_view(), "Composition"
+        )
+        self.left_tab_widget.addTab(self._create_trends_tab(), "Trends")
+        self.left_tab_widget.currentChanged.connect(self._on_left_tab_changed)
 
-        splitter.addWidget(left_tab_widget)
-        splitter.addWidget(self._create_plot_widget())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 900])
+        self._main_splitter.addWidget(self.left_tab_widget)
+        self._main_splitter.addWidget(self._create_plot_widget())
+        self._main_splitter.setStretchFactor(0, 0)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setSizes([320, 900])
 
-        layout.addWidget(splitter)
+        layout.addWidget(self._main_splitter)
+
+    def _on_left_tab_changed(self, index: int) -> None:
+        """Give Composition and Trends tabs the full panel width."""
+        wide = index >= 3
+        if wide:
+            self.left_tab_widget.setMaximumWidth(16777215)
+            self.plot_widget.setVisible(False)
+            self._main_splitter.setSizes([1600, 0])
+        else:
+            self.left_tab_widget.setMaximumWidth(self._narrow_tab_max_width)
+            self.plot_widget.setVisible(True)
+            self._main_splitter.setSizes([320, 900])
+
+    def _on_composition_sample_activated(self, _sample, names):
+        self.spectrum_selected.emit(_sample, list(names or []))
+        if names:
+            self.select_spectra(names)
+
+    def _on_composition_open_in_batch(self, _sample, names):
+        self.spectrum_selected.emit(_sample, list(names or []))
+        if names:
+            self.select_spectra(names)
+            self.left_tab_widget.setCurrentIndex(2)
+
+    def sync_composition(self) -> None:
+        """Refresh embedded composition tables from the latest batch fits."""
+        if self.results:
+            self.composition_panel.load_batch_results(self.results)
+        else:
+            self.composition_panel.load_batch_results([])
 
     def _create_setup_tab(self):
         """Create Setup tab with files and settings summary"""
@@ -117,34 +160,44 @@ class BatchAnalysisPanel(QWidget):
 
         return widget
 
-    def _create_results_tab(self):
-        """Create Results tab with sub-tabs"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        results_subtabs = QTabWidget()
-        results_subtabs.addTab(self._create_summary_subtab(), "Summary")
-        results_subtabs.addTab(self._create_trends_subtab(), "Trends")
-        layout.addWidget(results_subtabs)
-
-        return widget
-
-    def _create_summary_subtab(self):
-        """Create summary sub-tab with statistics and spectrum list"""
+    def _create_summary_tab(self):
+        """Create Summary tab with batch statistics."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
         layout.addWidget(self._create_summary_group())
+        layout.addStretch()
+
+        return widget
+
+    def _create_results_tab(self):
+        """Create Results tab with per-spectrum fit table and export."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
         layout.addWidget(self._create_spectrum_list_group(), stretch=2)
         layout.addWidget(self._create_export_group())
 
         return widget
 
-    def _create_trends_subtab(self):
-        """Create concentration trends sub-tab"""
+    def _create_trends_tab(self):
+        """Trends: element lines plus ternary / correlate / ratios / matrix."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        self.trends_tabs = QTabWidget()
+        self.trends_tabs.addTab(self._create_element_trends_tab(), "Element Trends")
+        self.composition_panel.transfer_plot_tabs_to(self.trends_tabs)
+        layout.addWidget(self.trends_tabs)
+        return widget
+
+    def _create_element_trends_tab(self):
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -153,7 +206,6 @@ class BatchAnalysisPanel(QWidget):
         layout.addWidget(self._create_element_trends_selection())
         self.trends_plot_widget = self._create_trends_plot_widget()
         layout.addWidget(self.trends_plot_widget, stretch=1)
-
         return widget
 
     def _create_settings_summary_group(self):
@@ -574,7 +626,6 @@ class BatchAnalysisPanel(QWidget):
 
         self.summary_text = QTextEdit()
         self.summary_text.setReadOnly(True)
-        self.summary_text.setMaximumHeight(88)
         self.summary_text.setPlaceholderText("No results yet")
         self.summary_text.setStyleSheet(
             "QTextEdit { background-color: #f5f5f5; font-size: 11px; "
@@ -618,13 +669,6 @@ class BatchAnalysisPanel(QWidget):
         export_excel_btn = QPushButton("Excel")
         export_excel_btn.clicked.connect(lambda: self._export_results("excel"))
         layout.addWidget(export_excel_btn)
-
-        send_btn = QPushButton("Send to Composition")
-        send_btn.setToolTip(
-            "Group replicates and plot sample means (ternary, correlate, ratios)"
-        )
-        send_btn.clicked.connect(self.send_to_composition_requested.emit)
-        layout.addWidget(send_btn)
 
         layout.addStretch()
         return group
@@ -876,15 +920,17 @@ class BatchAnalysisPanel(QWidget):
         
         # Populate element checkboxes for trends
         self._populate_element_checkboxes()
+        self.sync_composition()
 
         self.results_ready.emit()
-        
+        self.left_tab_widget.setCurrentIndex(2)
+
         QMessageBox.information(
             self,
             "Processing Complete",
             f"Processed {len(results)} spectra.\n"
-            "Open Results to review fits, or Composition to group "
-            "replicates and plot sample means.",
+            "Review fits on Results, compositions on Composition, and "
+            "plots on Trends.",
         )
     
     def _on_processing_error(self, error_message):
@@ -1046,6 +1092,9 @@ class BatchAnalysisPanel(QWidget):
     
     def _populate_element_checkboxes(self):
         """Populate element checkboxes from results"""
+        if not hasattr(self, "element_checks_layout"):
+            return
+
         # Clear existing checkboxes
         for checkbox in self.element_trend_checks.values():
             checkbox.deleteLater()
@@ -1119,7 +1168,7 @@ class BatchAnalysisPanel(QWidget):
         # Create plot widget
         plot_widget = pg.GraphicsLayoutWidget()
         plot_widget.setBackground('w')
-        plot_widget.setFixedHeight(250)
+        plot_widget.setMinimumHeight(280)
         
         # Create plot
         plot = plot_widget.addPlot()
@@ -1198,6 +1247,9 @@ class BatchAnalysisPanel(QWidget):
         ]
         from core.project_file import _batch_config_dict
 
+        comp = self.composition_panel.capture_state()
+        if hasattr(self, "trends_tabs"):
+            comp["plot_tab"] = int(self.trends_tabs.currentIndex())
         return {
             "file_paths": file_paths,
             "memory_names": list(self._memory_spectra.keys()),
@@ -1211,9 +1263,17 @@ class BatchAnalysisPanel(QWidget):
                     if box.isChecked()
                 ],
             },
+            "composition": comp,
         }
 
-    def restore_state(self, state: dict, *, results=None, memory_spectra=None) -> None:
+    def restore_state(
+        self,
+        state: dict,
+        *,
+        results=None,
+        memory_spectra=None,
+        composition=None,
+    ) -> None:
         from core.project_file import _batch_config_from_dict
         from core.batch_processing import BatchProcessor
 
@@ -1267,3 +1327,14 @@ class BatchAnalysisPanel(QWidget):
             self.processor = None
             self._populate_results_table()
             self._update_summary()
+
+        comp_state = composition if composition is not None else state.get("composition")
+        if comp_state:
+            self.composition_panel.restore_state(comp_state)
+            plot_tab = comp_state.get("plot_tab")
+            if plot_tab is not None and hasattr(self, "trends_tabs"):
+                idx = int(plot_tab)
+                if 0 <= idx < self.trends_tabs.count():
+                    self.trends_tabs.setCurrentIndex(idx)
+        else:
+            self.sync_composition()

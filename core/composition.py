@@ -439,6 +439,24 @@ def display_row_values(
     )
 
 
+def row_composition_summary(
+    row: CompositionRow,
+    *,
+    as_oxides: bool = False,
+    fe_as: str = "FeO",
+    close: bool = False,
+    max_terms: int = 6,
+) -> str:
+    """Compact formula-style summary for one spectrum row."""
+    vals = display_row_values(
+        row, as_oxides=as_oxides, fe_as=fe_as, close=close
+    )
+    if not vals:
+        return "—"
+    top = sorted(vals.items(), key=lambda item: -item[1])[: max(1, int(max_terms))]
+    return ", ".join(f"{key} {value:.1f}" for key, value in top)
+
+
 def component_keys(
     summaries: Sequence[SampleSummary],
     *,

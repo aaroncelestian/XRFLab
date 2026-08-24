@@ -16,7 +16,6 @@ from ui.spectrum_widget import SpectrumWidget
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
 from ui.batch_analysis_panel import BatchAnalysisPanel
-from ui.composition_panel import CompositionPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
 from ui.tube_profile_panel import TubeProfilePanel
@@ -282,25 +281,9 @@ class MainWindow(QMainWindow):
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
-
-        # Composition: group batch replicates and plot sample means
-        self.composition_panel = CompositionPanel()
-        self.composition_panel.from_batch_requested.connect(
-            self.send_batch_to_composition
+        self.batch_analysis_panel.spectrum_selected.connect(
+            self.on_batch_composition_spectrum_selected
         )
-        self.composition_panel.sample_activated.connect(
-            self.on_composition_sample_activated
-        )
-        self.composition_panel.open_in_batch_requested.connect(
-            self.on_composition_open_in_batch
-        )
-        self.batch_analysis_panel.results_ready.connect(
-            self.send_batch_to_composition
-        )
-        self.batch_analysis_panel.send_to_composition_requested.connect(
-            self.open_composition_from_batch
-        )
-        self.tab_widget.addTab(self.composition_panel, "Composition")
 
         # Mapping tab: IPJ maps + collected line-scan semi-quant
         self.mapping_panel = MappingPanel()
@@ -312,7 +295,7 @@ class MainWindow(QMainWindow):
         self.mapping_panel.status_message.connect(
             lambda msg: self.status_bar.showMessage(msg, 5000)
         )
-        self.tab_widget.addTab(self.mapping_panel, "Mapping")
+        self.tab_widget.addTab(self.mapping_panel, "Proj Data")
         
         # Calibration tab: infrequent setup tools, grouped and out of the primary bar
         self.calibration_tab = self._create_calibration_tab()
@@ -402,6 +385,12 @@ class MainWindow(QMainWindow):
         
         results_tab = self._create_results_tab()
         self.analysis_left_tabs.addTab(results_tab, "Results")
+
+        composition_tab = QWidget()
+        composition_layout = QVBoxLayout(composition_tab)
+        composition_layout.setContentsMargins(0, 0, 0, 0)
+        composition_layout.addWidget(self.results_panel.composition_tab_widget())
+        self.analysis_left_tabs.addTab(composition_tab, "Composition")
         
         main_splitter.addWidget(self.analysis_left_tabs)
         
@@ -522,6 +511,7 @@ class MainWindow(QMainWindow):
     TAB_ELEMENTS = 2
     TAB_FITTING = 3
     TAB_RESULTS = 4
+    TAB_COMPOSITION = 5
 
     def _create_status_bar(self):
         """Create status bar"""
@@ -580,7 +570,7 @@ class MainWindow(QMainWindow):
             self.session.spectrum is not None
             or self.mapping_panel.project is not None
             or self.batch_analysis_panel.file_list.count() > 0
-            or self.composition_panel.rows
+            or self.batch_analysis_panel.composition_panel.rows
         )
 
     def capture_document(self) -> ProjectDocument:
@@ -638,7 +628,7 @@ class MainWindow(QMainWindow):
             mapping_ui=self.mapping_panel.capture_ui_state(),
             drawn_line_scan=self.mapping_panel._drawn_line_scan,
             batch=batch,
-            composition=self.composition_panel.capture_state(),
+            composition=self.batch_analysis_panel.composition_panel.capture_state(),
             calibrations=calibrations,
             window=window,
         )
@@ -744,8 +734,8 @@ class MainWindow(QMainWindow):
             },
             results=batch.get("results") or [],
             memory_spectra=batch.get("memory_spectra") or {},
+            composition=document.composition or {},
         )
-        self.composition_panel.restore_state(document.composition or {})
 
         window = document.window or {}
         if window.get("log_y") is not None:
@@ -887,37 +877,9 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentWidget(self.mapping_panel)
         self.mapping_panel.merge_ipjs()
 
-    def send_batch_to_composition(self):
-        """Load current batch fits into the Composition tab."""
-        results = self.batch_analysis_panel.results
-        if not results:
-            QMessageBox.information(
-                self,
-                "Composition",
-                "Process a batch first (Batch Analysis → Process All).",
-            )
-            return
-        self.composition_panel.load_batch_results(results)
-        n = len(self.composition_panel.summaries)
-        self.status_bar.showMessage(
-            f"Composition: {len(results)} spectra grouped into {n} samples",
-            8000,
-        )
-
-    def open_composition_from_batch(self):
-        """Send to Composition and switch to that tab."""
-        self.send_batch_to_composition()
-        if self.batch_analysis_panel.results:
-            self.tab_widget.setCurrentWidget(self.composition_panel)
-
-    def on_composition_sample_activated(self, _sample, names):
-        """Keep Batch selection in sync without switching tabs."""
+    def on_batch_composition_spectrum_selected(self, _sample, names):
+        """Keep batch fit plot in sync when a composition row is selected."""
         self.batch_analysis_panel.select_spectra(names)
-
-    def on_composition_open_in_batch(self, _sample, names):
-        """Double-click a sample: jump to Batch and show one of its fits."""
-        self.batch_analysis_panel.select_spectra(names)
-        self.tab_widget.setCurrentWidget(self.batch_analysis_panel)
 
     def on_mapping_spectrum_sent(self, spectrum, peak_labels=None):
         """Receive a spectrum extracted from Mapping → load into Analysis."""
@@ -1489,7 +1451,7 @@ class MainWindow(QMainWindow):
             return
 
         if hasattr(self, "analysis_left_tabs"):
-            self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
+            self.analysis_left_tabs.setCurrentIndex(self.TAB_COMPOSITION)
 
         assumptions = self.results_panel.get_matrix_assumptions()
         self.session.matrix = assumptions
@@ -1635,7 +1597,7 @@ class MainWindow(QMainWindow):
             self,
             "About XRFLab",
             "<h3>XRFLab</h3>"
-            "<p>Version 1.0.0</p>"
+            f"<p>Version {QApplication.applicationVersion()}</p>"
             "<p>Desktop XRF spectrum analysis: fitting, detector/tube calibration, "
             "area-normalized semi-quant, and standardless FP composition "
             "(matrix model with optional H₂O / OH / CO₂). "

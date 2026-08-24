@@ -1,5 +1,11 @@
 # Changelog
 
+## Version 1.3.1 - Composition UI layout (2026-08-24)
+
+- **Analysis:** Composition tab (matrix model, FP wt%, formulas) after Results; Results keeps semi-quant only
+- **Batch Analysis:** Composition tab (per-spectrum formulas, grouping, sample means) and Trends tab (element trends, ternary, correlate, ratios, matrix)
+- Removed the top-level Composition tab; batch composition updates automatically after Process All
+
 ## Version 1.3.0 - Standardless FP composition (2026-08-12)
 
 - Analysis **FP Composition** converts one fitted spectrum to wt% using relative fundamental parameters

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xrflab"
-version = "1.0.0"
+version = "1.3.1"
 description = "Desktop XRF spectrum analysis: fitting, calibration, and semi-quantitative intensities"
 readme = "README.md"
 requires-python = ">=3.9"

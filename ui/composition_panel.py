@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -50,6 +51,7 @@ from core.composition import (
     replicate_ratio_points,
     replicate_scatter_points,
     replicate_ternary_points,
+    row_composition_summary,
     rows_from_batch_results,
     scatter_points,
     summarize_samples,
@@ -103,24 +105,44 @@ class CompositionPanel(QWidget):
     sample_activated = Signal(str, list)  # sample name, member spectrum names
     open_in_batch_requested = Signal(str, list)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, embedded_in_batch: bool = False):
         super().__init__(parent)
         self.rows = []
         self.summaries: list[SampleSummary] = []
         self._group_mode = GroupMode.AUTO
         self._selected_sample = None
         self._filling_table = False
+        self._filling_spectrum_table = False
         self._filling_combos = False
-        self._setup_ui()
+        self._embedded_in_batch = bool(embedded_in_batch)
+        self._composition_view = None
+        self._trends_view = None
+        self._ensure_parts()
 
-    def _setup_ui(self):
+    def _ensure_parts(self) -> None:
+        if hasattr(self, "group_combo"):
+            return
+        self._source_group = None
+        self._build_group_group()
+        self._build_display_group()
+        self._build_spectrum_table_group()
+        self._build_table_group()
+        self._build_export_group()
+        self._plots_host_widget = self._build_plots()
+        if self._embedded_in_batch:
+            self._plots_host_widget.setParent(self)
+        if not self._embedded_in_batch:
+            self._build_source_group()
+            self._assemble_standalone_layout()
+
+    def _assemble_standalone_layout(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_left())
-        splitter.addWidget(self._build_plots())
+        splitter.addWidget(self._plots_host_widget)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([420, 780])
@@ -132,6 +154,67 @@ class CompositionPanel(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: #555;")
         root.addWidget(self.status_label)
+
+    def build_composition_view(self) -> QWidget:
+        """Batch Analysis → Composition tab (tables + grouping)."""
+        self._ensure_parts()
+        if self._composition_view is not None:
+            return self._composition_view
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.addWidget(self._group_box)
+        inner_layout.addWidget(self._display_box)
+        inner_layout.addWidget(self._spectrum_table_box, stretch=1)
+        inner_layout.addWidget(self._table_box, stretch=1)
+        inner_layout.addWidget(self._export_box)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll, stretch=1)
+
+        self.status_label = QLabel(
+            "Relative intensities from batch fits. Group replicates, then open "
+            "Trends for plots."
+        )
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #555;")
+        layout.addWidget(self.status_label)
+        self._composition_view = widget
+        return widget
+
+    def build_trends_view(self) -> QWidget:
+        """Batch Analysis → Trends tab (element trends + geochemistry plots)."""
+        self._ensure_parts()
+        if self._trends_view is not None:
+            return self._trends_view
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self.plot_tabs, stretch=1)
+        self._trends_view = widget
+        return widget
+
+    def transfer_plot_tabs_to(self, destination: QTabWidget) -> None:
+        """Move Ternary / Correlate / Ratios / Matrix into a batch Trends tab."""
+        self._ensure_parts()
+        while self.plot_tabs.count():
+            page = self.plot_tabs.widget(0)
+            title = self.plot_tabs.tabText(0)
+            self.plot_tabs.removeTab(0)
+            destination.addTab(page, title)
+
+    def _setup_ui(self):
+        """Legacy entry point; use _ensure_parts instead."""
+        self._ensure_parts()
 
     def _build_left(self) -> QWidget:
         widget = QWidget()
@@ -156,6 +239,7 @@ class CompositionPanel(QWidget):
         self.from_batch_btn.clicked.connect(self.from_batch_requested.emit)
         layout.addWidget(self.from_batch_btn)
         layout.addStretch()
+        self._source_group = group
         return group
 
     def _build_group_group(self) -> QGroupBox:
@@ -224,6 +308,7 @@ class CompositionPanel(QWidget):
         self.group_summary.setStyleSheet("color: #555;")
         self.group_summary.setWordWrap(True)
         layout.addWidget(self.group_summary)
+        self._group_box = group
         return group
 
     def _build_display_group(self) -> QGroupBox:
@@ -266,6 +351,28 @@ class CompositionPanel(QWidget):
         self.labels_check.setChecked(True)
         self.labels_check.toggled.connect(self._refresh_plots)
         layout.addWidget(self.labels_check)
+        self._display_box = group
+        return group
+
+    def _build_spectrum_table_group(self) -> QGroupBox:
+        group = QGroupBox("All spectra (composition)")
+        layout = QVBoxLayout(group)
+        self.spectrum_table = QTableWidget()
+        self.spectrum_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.spectrum_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.spectrum_table.setAlternatingRowColors(True)
+        self.spectrum_table.setToolTip(
+            "Each row is one fitted spectrum. Formula column summarizes "
+            "relative intensities (oxide display follows options above)."
+        )
+        self.spectrum_table.itemSelectionChanged.connect(
+            self._on_spectrum_table_selection
+        )
+        header = self.spectrum_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        layout.addWidget(self.spectrum_table)
+        self._spectrum_table_box = group
         return group
 
     def _build_table_group(self) -> QGroupBox:
@@ -287,6 +394,7 @@ class CompositionPanel(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
         layout.addWidget(self.table)
+        self._table_box = group
         return group
 
     def _build_export_group(self) -> QGroupBox:
@@ -299,6 +407,7 @@ class CompositionPanel(QWidget):
         xls_btn.clicked.connect(lambda: self._export("excel"))
         layout.addWidget(xls_btn)
         layout.addStretch()
+        self._export_box = group
         return group
 
     def _build_plots(self) -> QWidget:
@@ -466,6 +575,7 @@ class CompositionPanel(QWidget):
         if not self.rows:
             self.summaries = []
             self.group_summary.setText("No spectra loaded")
+            self._fill_spectrum_table()
             self._fill_table()
             self._refresh_plots()
             return
@@ -511,6 +621,7 @@ class CompositionPanel(QWidget):
             f"Plotting {n_samp} sample means. Click a row or point to inspect "
             "that pellet’s spectra in Batch."
         )
+        self._fill_spectrum_table()
         self._fill_table()
         self._fill_combos()
         self._refresh_plots()
@@ -526,6 +637,7 @@ class CompositionPanel(QWidget):
 
     def _on_display_changed(self) -> None:
         self.fe_combo.setEnabled(self._as_oxides())
+        self._fill_spectrum_table()
         self._fill_table()
         self._fill_combos()
         self._refresh_plots()
@@ -608,6 +720,83 @@ class CompositionPanel(QWidget):
                 self.table.setItem(i, 2 + j, item)
         self.table.resizeColumnsToContents()
         self._filling_table = False
+
+    def _fill_spectrum_table(self) -> None:
+        if not hasattr(self, "spectrum_table"):
+            return
+        self._filling_spectrum_table = True
+        keys = component_keys(
+            self.summaries,
+            as_oxides=self._as_oxides(),
+            fe_as=self._fe_as(),
+            close=self._close(),
+        )
+        if not keys and self.rows:
+            found = set()
+            for row in self.rows:
+                found.update(
+                    convert_values(
+                        row.values,
+                        as_oxides=self._as_oxides(),
+                        fe_as=self._fe_as(),
+                        close=self._close(),
+                    ).keys()
+                )
+            keys = sorted(found)
+
+        self.spectrum_table.setColumnCount(3 + len(keys))
+        self.spectrum_table.setHorizontalHeaderLabels(
+            ["Spectrum", "Sample", "Formula"] + list(keys)
+        )
+        self.spectrum_table.setRowCount(len(self.rows))
+        for i, row in enumerate(self.rows):
+            name_item = QTableWidgetItem(row.name)
+            if not row.success:
+                name_item.setForeground(Qt.red)
+            self.spectrum_table.setItem(i, 0, name_item)
+            sample_item = QTableWidgetItem(row.sample)
+            self.spectrum_table.setItem(i, 1, sample_item)
+            formula_item = QTableWidgetItem(
+                row_composition_summary(
+                    row,
+                    as_oxides=self._as_oxides(),
+                    fe_as=self._fe_as(),
+                    close=self._close(),
+                )
+            )
+            formula_item.setFlags(formula_item.flags() & ~Qt.ItemIsEditable)
+            self.spectrum_table.setItem(i, 2, formula_item)
+            vals = convert_values(
+                row.values,
+                as_oxides=self._as_oxides(),
+                fe_as=self._fe_as(),
+                close=self._close(),
+            )
+            for j, key in enumerate(keys):
+                value = vals.get(key, 0.0)
+                item = QTableWidgetItem(f"{value:.2f}")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.spectrum_table.setItem(i, 3 + j, item)
+        self.spectrum_table.resizeColumnsToContents()
+        self._filling_spectrum_table = False
+
+    def _on_spectrum_table_selection(self) -> None:
+        if self._filling_spectrum_table:
+            return
+        model = self.spectrum_table.selectionModel()
+        rows = model.selectedRows() if model else []
+        if not rows:
+            return
+        index = rows[0].row()
+        if not (0 <= index < len(self.rows)):
+            return
+        row = self.rows[index]
+        self.sample_activated.emit(row.sample, [row.name])
+        if hasattr(self, "status_label"):
+            self.status_label.setText(
+                f"{row.name} ({row.sample}) — select on Results to view the fit"
+            )
 
     def _on_table_item_changed(self, item: QTableWidgetItem) -> None:
         if self._filling_table or item.column() != 0:
@@ -933,7 +1122,11 @@ class CompositionPanel(QWidget):
             "fe_as": self.fe_combo.currentText(),
             "close": bool(self.close_check.isChecked()),
             "errorbars": bool(self.errorbar_check.isChecked()),
-            "plot_tab": int(self.plot_tabs.currentIndex()),
+            "plot_tab": (
+                int(self.plot_tabs.currentIndex())
+                if self.plot_tabs.count()
+                else 0
+            ),
             "tern_a": self.tern_a.currentText(),
             "tern_b": self.tern_b.currentText(),
             "tern_c": self.tern_c.currentText(),
@@ -993,6 +1186,7 @@ class CompositionPanel(QWidget):
         if not self.rows:
             self.summaries = []
             self.group_summary.setText("No spectra loaded")
+            self._fill_spectrum_table()
             self._fill_table()
             self._refresh_plots()
             return
@@ -1007,6 +1201,7 @@ class CompositionPanel(QWidget):
             f"(n={min(ns) if ns else 0}–{max(ns) if ns else 0}, {mode.value})"
             f"{extra}"
         )
+        self._fill_spectrum_table()
         self._fill_table()
         self._fill_combos()
         for combo, key in (
@@ -1025,6 +1220,6 @@ class CompositionPanel(QWidget):
                 combo.blockSignals(True)
                 combo.setCurrentText(str(text))
                 combo.blockSignals(False)
-        if state.get("plot_tab") is not None:
+        if state.get("plot_tab") is not None and self.plot_tabs.count():
             self.plot_tabs.setCurrentIndex(int(state["plot_tab"]))
         self._refresh_plots()

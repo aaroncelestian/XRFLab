@@ -25,31 +25,29 @@ class ResultsPanel(QWidget):
         super().__init__(parent)
         
         self.results_data = []
+        self.fp_results_data = []
         self._fp_live = False
         self._updating_controls = False
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(200)
         self._debounce.timeout.connect(self._emit_matrix_changed)
+        self._composition_tab = self._create_composition_tab()
         self._setup_ui()
     
+    def composition_tab_widget(self) -> QWidget:
+        """Matrix model, FP wt%, and formulas (Analysis → Composition tab)."""
+        return self._composition_tab
+
     def _setup_ui(self):
-        """Setup the panel layout with vertical stacking"""
+        """Setup the Results tab layout (fit stats + semi-quant only)."""
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(5)
         
-        stats_group = self._create_statistics_group()
-        main_layout.addWidget(stats_group)
-
-        matrix_group = self._create_matrix_group()
-        main_layout.addWidget(matrix_group)
-        
-        results_group = self._create_results_table_group()
-        main_layout.addWidget(results_group, stretch=2)
-        
-        peaks_group = self._create_peaks_group()
-        main_layout.addWidget(peaks_group, stretch=1)
+        main_layout.addWidget(self._create_statistics_group())
+        main_layout.addWidget(self._create_semi_quant_group(), stretch=2)
+        main_layout.addWidget(self._create_peaks_group(), stretch=1)
         
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
@@ -78,6 +76,36 @@ class ResultsPanel(QWidget):
             lambda _checked=False: self.quantify_requested.emit()
         )
         button_row.addWidget(self.quantify_button)
+        
+        self.export_button = QPushButton("Export Results")
+        self.export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
+        button_row.addWidget(self.export_button)
+        
+        main_layout.addLayout(button_row)
+
+    def _create_composition_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+
+        layout.addWidget(self._create_matrix_group())
+        layout.addWidget(self._create_formula_group())
+        layout.addWidget(self._create_fp_results_group(), stretch=2)
 
         self.fp_button = QPushButton("FP Composition")
         self.fp_button.setToolTip(
@@ -103,27 +131,9 @@ class ResultsPanel(QWidget):
         self.fp_button.clicked.connect(
             lambda _checked=False: self.fp_quantify_requested.emit()
         )
-        button_row.addWidget(self.fp_button)
-        
-        self.export_button = QPushButton("Export Results")
-        self.export_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed {
-                background-color: #0D47A1;
-            }
-        """)
-        button_row.addWidget(self.export_button)
-        
-        main_layout.addLayout(button_row)
+        layout.addWidget(self.fp_button)
+        layout.addStretch()
+        return widget
 
     def _create_matrix_group(self):
         group = QGroupBox("Matrix (for FP composition)")
@@ -180,50 +190,8 @@ class ResultsPanel(QWidget):
         self._refresh_matrix_hint()
         return group
 
-    def _light_spin(self, tooltip: str) -> QDoubleSpinBox:
-        spin = QDoubleSpinBox()
-        spin.setRange(0.0, 80.0)
-        spin.setDecimals(2)
-        spin.setSingleStep(0.5)
-        spin.setSuffix(" wt%")
-        spin.setValue(0.0)
-        spin.setToolTip(tooltip)
-        spin.valueChanged.connect(self._on_matrix_control_changed)
-        return spin
-    
-    def _create_statistics_group(self):
-        """Create fit statistics display group"""
-        group = QGroupBox("Fit Statistics")
-        layout = QHBoxLayout(group)  # Changed to horizontal for compact display
-        layout.setSpacing(15)
-        
-        # Chi-squared
-        self.chi_squared_label = QLabel("χ²: --")
-        self.chi_squared_label.setFont(QFont("Arial", 10))
-        layout.addWidget(self.chi_squared_label)
-        
-        # R-squared
-        self.r_squared_label = QLabel("R²: --")
-        self.r_squared_label.setFont(QFont("Arial", 10))
-        layout.addWidget(self.r_squared_label)
-        
-        # Reduced chi-squared
-        self.reduced_chi_label = QLabel("χ²ᵣ: --")
-        self.reduced_chi_label.setFont(QFont("Arial", 10))
-        layout.addWidget(self.reduced_chi_label)
-        
-        # Iterations
-        self.iterations_label = QLabel("Iterations: --")
-        self.iterations_label.setFont(QFont("Arial", 10))
-        layout.addWidget(self.iterations_label)
-        
-        layout.addStretch()  # Push stats to the left
-        
-        return group
-    
-    def _create_results_table_group(self):
-        """Create quantification results table"""
-        group = QGroupBox("Quantification")
+    def _create_formula_group(self):
+        group = QGroupBox("Formula")
         layout = QVBoxLayout(group)
 
         self.formula_empirical = QLabel("Formula: —")
@@ -254,8 +222,49 @@ class ResultsPanel(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.formula_label)
+        return group
+
+    def _light_spin(self, tooltip: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(0.0, 80.0)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.5)
+        spin.setSuffix(" wt%")
+        spin.setValue(0.0)
+        spin.setToolTip(tooltip)
+        spin.valueChanged.connect(self._on_matrix_control_changed)
+        return spin
+    
+    def _create_statistics_group(self):
+        """Create fit statistics display group"""
+        group = QGroupBox("Fit Statistics")
+        layout = QHBoxLayout(group)
+        layout.setSpacing(15)
         
-        # Create table
+        self.chi_squared_label = QLabel("χ²: --")
+        self.chi_squared_label.setFont(QFont("Arial", 10))
+        layout.addWidget(self.chi_squared_label)
+        
+        self.r_squared_label = QLabel("R²: --")
+        self.r_squared_label.setFont(QFont("Arial", 10))
+        layout.addWidget(self.r_squared_label)
+        
+        self.reduced_chi_label = QLabel("χ²ᵣ: --")
+        self.reduced_chi_label.setFont(QFont("Arial", 10))
+        layout.addWidget(self.reduced_chi_label)
+        
+        self.iterations_label = QLabel("Iterations: --")
+        self.iterations_label.setFont(QFont("Arial", 10))
+        layout.addWidget(self.iterations_label)
+        
+        layout.addStretch()
+        return group
+    
+    def _create_semi_quant_group(self):
+        """Semi-quantitative relative intensities (Results tab)."""
+        group = QGroupBox("Semi-Quant (relative intensity)")
+        layout = QVBoxLayout(group)
+        
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(4)
         self.results_table.setHorizontalHeaderLabels([
@@ -265,7 +274,6 @@ class ResultsPanel(QWidget):
             "Line"
         ])
         
-        # Configure table appearance
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -277,12 +285,14 @@ class ResultsPanel(QWidget):
         self.results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.results_table.setMinimumHeight(80)
-        self.results_table.setToolTip("Click an element to show its emission lines on the spectrum (click again to clear)")
-        self.results_table.cellClicked.connect(self._on_result_cell_clicked)
-        
+        self.results_table.setToolTip(
+            "Click an element to show its emission lines on the spectrum"
+        )
+        self.results_table.cellClicked.connect(
+            lambda row, col: self._on_table_cell_clicked(row, self.results_data)
+        )
         layout.addWidget(self.results_table)
         
-        # Method note
         self.method_label = QLabel(
             "Method: area-normalized semi-quant (not FP wt%)"
         )
@@ -290,12 +300,48 @@ class ResultsPanel(QWidget):
         self.method_label.setStyleSheet("color: #666;")
         layout.addWidget(self.method_label)
 
-        # Total concentration label
         self.total_label = QLabel("Sum of relative intensities: -- %")
         self.total_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.total_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         layout.addWidget(self.total_label)
         
+        return group
+
+    def _create_fp_results_group(self):
+        """FP wt% table (Composition tab)."""
+        group = QGroupBox("FP wt%")
+        layout = QVBoxLayout(group)
+
+        self.fp_results_table = QTableWidget()
+        self.fp_results_table.setColumnCount(4)
+        self.fp_results_table.setHorizontalHeaderLabels([
+            "Element", "wt%", "Source", "Line"
+        ])
+        header = self.fp_results_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.fp_results_table.setAlternatingRowColors(True)
+        self.fp_results_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.fp_results_table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.fp_results_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.fp_results_table.setMinimumHeight(120)
+        self.fp_results_table.cellClicked.connect(
+            lambda row, col: self._on_table_cell_clicked(row, self.fp_results_data)
+        )
+        layout.addWidget(self.fp_results_table)
+
+        self.fp_total_label = QLabel("Analytical total: -- %")
+        self.fp_total_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.fp_total_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self.fp_total_label)
         return group
     
     def _create_peaks_group(self):
@@ -342,12 +388,6 @@ class ResultsPanel(QWidget):
         self.matrix_hint.setText(assumptions.hint())
     
     def set_fit_statistics(self, statistics):
-        """
-        Update fit statistics
-        
-        Args:
-            statistics: Dictionary with chi_squared, reduced_chi_squared, r_squared, etc.
-        """
         chi_squared = statistics.get('chi_squared', 0)
         r_squared = statistics.get('r_squared', 0)
         reduced_chi = statistics.get('reduced_chi_squared', 0)
@@ -368,43 +408,32 @@ class ResultsPanel(QWidget):
             self.reduced_chi_label.setStyleSheet("")
     
     def set_results(self, results):
-        """
-        Update quantification results table
-        
-        Args:
-            results: List of dictionaries with keys:
-                     'element', 'concentration', 'error', 'line'
-        """
-        self.results_data = results
-        self.results_table.setRowCount(len(results))
-
         method = "semi_quant_area"
         if results:
             method = results[0].get("method", method)
-        is_fp = method == "fp_matrix"
-
-        if is_fp:
-            self.results_table.setHorizontalHeaderLabels([
-                "Element", "wt%", "Source", "Line"
-            ])
+        if method == "fp_matrix":
+            self.fp_results_data = list(results)
+            self._populate_table(self.fp_results_table, results, is_fp=True)
+            self._update_total_label(self.fp_total_label, results, is_fp=True)
         else:
-            self.results_table.setHorizontalHeaderLabels([
-                "Element", "Rel. Intensity", "Uncertainty", "Line"
-            ])
-        
-        total_concentration = 0.0
+            self.results_data = list(results)
+            self._populate_table(self.results_table, results, is_fp=False)
+            self._update_total_label(self.total_label, results, is_fp=False)
+
+    def _populate_table(self, table, results, *, is_fp: bool):
+        table.setRowCount(len(results))
         assumed_brush = QBrush(QColor("#f3f3f3"))
-        
         for i, result in enumerate(results):
-            # Element symbol
             element_item = QTableWidgetItem(result['element'])
             element_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.results_table.setItem(i, 0, element_item)
-            
+            table.setItem(i, 0, element_item)
+
             conc = result['concentration']
             conc_item = QTableWidgetItem(f"{conc:.3f} %")
-            conc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.results_table.setItem(i, 1, conc_item)
+            conc_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            table.setItem(i, 1, conc_item)
 
             role = result.get("role")
             error = result.get('error', None)
@@ -415,42 +444,33 @@ class ResultsPanel(QWidget):
                 mid_item = QTableWidgetItem("—")
             else:
                 mid_item = QTableWidgetItem(f"± {error:.3f} %")
-            mid_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.results_table.setItem(i, 2, mid_item)
-            
+            mid_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            table.setItem(i, 2, mid_item)
+
             line_item = QTableWidgetItem(result.get('line', 'K'))
             line_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.results_table.setItem(i, 3, line_item)
+            table.setItem(i, 3, line_item)
 
             if role == "assumed":
                 for col in range(4):
-                    item = self.results_table.item(i, col)
+                    item = table.item(i, col)
                     if item is not None:
                         item.setBackground(assumed_brush)
-            
-            total_concentration += conc
-        
-        self.total_label.setText(
-            f"{'Analytical total' if is_fp else 'Sum of relative intensities'}: "
-            f"{total_concentration:.2f} %"
-        )
-        
-        if 98 <= total_concentration <= 102:
-            self.total_label.setStyleSheet("color: green;")
-        elif 95 <= total_concentration <= 105:
-            self.total_label.setStyleSheet("color: orange;")
+
+    def _update_total_label(self, label, results, *, is_fp: bool):
+        total = sum(float(r.get("concentration", 0.0)) for r in results)
+        if is_fp:
+            label.setText(f"Analytical total: {total:.2f} %")
         else:
-            self.total_label.setStyleSheet("color: red;")
-        
-        if hasattr(self, "method_label"):
-            if is_fp:
-                self.method_label.setText(
-                    "Method: standardless FP wt% (relative Sherman + matrix assumptions)"
-                )
-            else:
-                self.method_label.setText(
-                    "Method: area-normalized semi-quant (not FP wt%)"
-                )
+            label.setText(f"Sum of relative intensities: {total:.2f} %")
+        if 98 <= total <= 102:
+            label.setStyleSheet("color: green;")
+        elif 95 <= total <= 105:
+            label.setStyleSheet("color: orange;")
+        else:
+            label.setStyleSheet("color: red;")
 
     def set_formula_summary(self, text: str, *, empirical: str = "") -> None:
         if empirical:
@@ -465,12 +485,6 @@ class ResultsPanel(QWidget):
         )
     
     def set_peaks(self, peaks):
-        """
-        Update identified peaks list from Peak objects
-        
-        Args:
-            peaks: List of Peak objects from fitting
-        """
         text_lines = []
         for peak in peaks:
             if peak.element and peak.line:
@@ -492,7 +506,6 @@ class ResultsPanel(QWidget):
         self.peaks_text.setPlainText("\n".join(text_lines) if text_lines else "No peaks")
     
     def set_tube_overlap_flags(self, flags):
-        """Append tube-profile overlap warnings under the peaks list."""
         if not flags:
             return
         current = self.peaks_text.toPlainText()
@@ -502,7 +515,6 @@ class ResultsPanel(QWidget):
         self.peaks_text.setPlainText(current + block)
 
     def set_tube_constraint_notes(self, notes):
-        """Append soft-prior / doublet notes under the peaks list."""
         if not notes:
             return
         current = self.peaks_text.toPlainText()
@@ -510,13 +522,6 @@ class ResultsPanel(QWidget):
         self.peaks_text.setPlainText(current + block)
     
     def set_quantification(self, concentrations):
-        """
-        Update quantification results from concentration dictionary
-        
-        Args:
-            concentrations: Dict with element symbols as keys, each containing
-                          'concentration', 'error', 'lines' (list), 'total_area'
-        """
         results = []
         for element, data in concentrations.items():
             lines = [str(line) for line in data.get('lines', []) if line]
@@ -536,12 +541,15 @@ class ResultsPanel(QWidget):
         self.set_results(results)
     
     def clear_results(self):
-        """Clear all results and statistics"""
         self.results_table.setRowCount(0)
+        self.fp_results_table.setRowCount(0)
         self.results_data = []
+        self.fp_results_data = []
         self._fp_live = False
         self.total_label.setText("Sum of relative intensities: -- %")
         self.total_label.setStyleSheet("")
+        self.fp_total_label.setText("Analytical total: -- %")
+        self.fp_total_label.setStyleSheet("")
         if hasattr(self, "method_label"):
             self.method_label.setText(
                 "Method: area-normalized semi-quant (not FP wt%)"
@@ -559,26 +567,15 @@ class ResultsPanel(QWidget):
         self.peaks_text.clear()
     
     def get_results(self):
-        """Return current results data"""
         return self.results_data
     
-    def _on_result_cell_clicked(self, row, _column):
-        """Emit selected element so the spectrum can show/clear its lines"""
-        if 0 <= row < len(self.results_data):
-            symbol = self.results_data[row].get('element')
+    def _on_table_cell_clicked(self, row, data):
+        if 0 <= row < len(data):
+            symbol = data[row].get('element')
             if symbol:
                 self.element_selected.emit(symbol)
     
     def add_result_row(self, element, concentration, error, line):
-        """
-        Add a single result row
-        
-        Args:
-            element: Element symbol
-            concentration: Concentration value
-            error: Error/uncertainty
-            line: X-ray line (K, L, M)
-        """
         result = {
             'element': element,
             'concentration': concentration,
@@ -589,7 +586,6 @@ class ResultsPanel(QWidget):
         self.set_results(self.results_data)
 
     def set_matrix_assumptions(self, assumptions: MatrixAssumptions) -> None:
-        """Restore matrix knobs without emitting a live FP recompute."""
         if assumptions is None:
             return
         kind = assumptions.kind
@@ -616,6 +612,7 @@ class ResultsPanel(QWidget):
             "matrix": assumptions.to_dict(),
             "fp_live": bool(self._fp_live),
             "results_data": list(self.results_data or []),
+            "fp_results_data": list(self.fp_results_data or []),
             "peaks_text": self.peaks_text.toPlainText(),
             "formula_text": (
                 self.formula_label.text() if hasattr(self, "formula_label") else ""
@@ -636,6 +633,12 @@ class ResultsPanel(QWidget):
         self.set_fp_live(bool(state.get("fp_live", False)))
         if state.get("results_data"):
             self.set_results(list(state["results_data"]))
+        if state.get("fp_results_data"):
+            fp_rows = list(state["fp_results_data"])
+            if fp_rows:
+                for row in fp_rows:
+                    row["method"] = row.get("method", "fp_matrix")
+                self.set_results(fp_rows)
         if state.get("peaks_text"):
             self.peaks_text.setPlainText(str(state["peaks_text"]))
         empirical = state.get("empirical") or ""
