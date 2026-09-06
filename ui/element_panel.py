@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from ui.periodic_table_widget import PeriodicTableWidget
+from ui.tube_profile_panel import SHOW_TUBE_PROFILE_CALIBRATION
 from core.xray_data import get_element_lines, get_element_info
 from core.spectrum import metadata_text, _as_float
 from core.peak_fitting import (
@@ -617,7 +618,6 @@ class ElementPanel(QWidget):
             "color: #994400; font-weight: bold; padding: 4px;"
         )
         layout.addWidget(self.tube_profile_status_label)
-        from ui.tube_profile_panel import SHOW_TUBE_PROFILE_CALIBRATION
         self.tube_profile_status_label.setVisible(SHOW_TUBE_PROFILE_CALIBRATION)
 
         self.escape_peaks_check = QCheckBox("Include Escape Peaks")
