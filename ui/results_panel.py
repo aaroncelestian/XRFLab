@@ -111,7 +111,9 @@ class ResultsPanel(QWidget):
         self.fp_button = QPushButton("FP Composition")
         self.fp_button.setToolTip(
             "Fundamental-parameters wt% using the matrix model above.\n"
-            "H2O, OH, and CO2 are user assumptions (not measured).\n"
+            "Excitation is a polychromatic tube spectrum (continuum + anode\n"
+            "K/L lines) at the kV setting, not a single energy. K lines are\n"
+            "preferred over L/M. H2O, OH, and CO2 are user assumptions.\n"
             "After the first run, changing knobs recomputes live."
         )
         self.fp_button.setStyleSheet("""

@@ -34,6 +34,21 @@ def _normalize_counts(counts, scale_to=1.0):
     return y * (float(scale_to) / peak)
 
 
+def enable_box_zoom(plot, enabled=True):
+    """Left-drag a rectangle to zoom; right-drag pans; wheel zooms."""
+    if plot is None:
+        return
+    if hasattr(plot, "getViewBox"):
+        vb = plot.getViewBox()
+    elif hasattr(plot, "getPlotItem"):
+        vb = plot.getPlotItem().getViewBox()
+    else:
+        vb = plot
+    if vb is None:
+        return
+    vb.setMouseMode(pg.ViewBox.RectMode if enabled else pg.ViewBox.PanMode)
+
+
 class SpectrumWidget(QWidget):
     """Widget for displaying XRF spectra with interactive features"""
     
@@ -90,7 +105,10 @@ class SpectrumWidget(QWidget):
         )
         
         self.home_button = QPushButton("Home")
-        self.home_button.setToolTip("Reset plot view to fit all data")
+        self.home_button.setToolTip(
+            "Reset plot view to fit all data.\n"
+            "Left-drag a box to zoom; right-drag to pan; scroll to zoom."
+        )
         self.home_button.setStyleSheet(small_btn_style)
         self.home_button.setFixedHeight(22)
         self.home_button.clicked.connect(self.reset_view)
@@ -142,6 +160,7 @@ class SpectrumWidget(QWidget):
         plot_item.showGrid(x=True, y=True, alpha=0.3)
         plot_item.setLogMode(False, False)  # Linear Y-axis by default
         self._ensure_legend(plot_item)
+        enable_box_zoom(plot_item)
         
         # Enable antialiasing for smooth lines
         self.plot_widget.setAntialiasing(True)
@@ -171,6 +190,7 @@ class SpectrumWidget(QWidget):
         residuals_item.setLabel('bottom', 'Energy', units='keV')
         residuals_item.showGrid(x=True, y=True, alpha=0.3)
         residuals_item.addLine(y=0, pen=pg.mkPen('k', width=1, style=Qt.DashLine))
+        enable_box_zoom(residuals_item)
         
         # Link X-axes
         self.residuals_widget.setXLink(self.plot_widget)
@@ -792,6 +812,7 @@ class SpectrumWidget(QWidget):
     def set_energy_pick_mode(self, enabled: bool):
         """Enable/disable click-to-identify energy picking on the main plot."""
         self._energy_pick_mode = bool(enabled)
+        enable_box_zoom(self.plot_widget.getPlotItem(), enabled=not self._energy_pick_mode)
         if self._pick_marker is not None and not enabled:
             self._pick_marker.setVisible(False)
         if enabled:

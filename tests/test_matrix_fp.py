@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.fp_quantification import (
     FPQuantResult,
     normalize_line,
+    observed_areas_from_peaks,
     quantify_from_peaks,
 )
 from core.fundamental_parameters import FundamentalParameters
@@ -323,3 +324,75 @@ def test_apply_fp_quantification_from_peak_areas():
     assert result.fp_wt["Si"] > 0
     assert "O" in result.fp_wt
     assert abs(result.fp_formula_wt["SiO2"] - 100.0) < 0.5
+
+
+def test_observed_areas_prefers_k_over_larger_l():
+    peaks = [
+        _peak("Ni", "Lα1", 9_000_000, 0.851),
+        _peak("Ni", "Kα1", 400_000, 7.478),
+        _peak("Ni", "Kβ1", 80_000, 8.265),
+        _peak("As", "Lα1", 700_000, 1.282),
+        _peak("As", "Kα1", 250_000, 10.544),
+        _peak("Pb", "Lα1", 50_000, 10.55),
+    ]
+    observed = observed_areas_from_peaks(peaks)
+    assert observed["Ni"][1] == "Kα1"
+    assert observed["As"][1] == "Kα1"
+    assert observed["Pb"][1] == "Lα1"
+
+
+def test_tube_spectrum_has_continuum_and_rh_k():
+    import numpy as np
+    from core.fundamental_parameters import build_tube_spectrum
+
+    energy, continuum, lines = build_tube_spectrum(50.0, "Rh")
+    assert energy.size > 20
+    assert continuum.size == energy.size
+    assert np.any((energy > 8.33) & (energy < 11.87) & (continuum > 0))
+    char_e = [e for e, w in lines if w > 0]
+    assert any(19.5 < e < 21.0 for e in char_e)
+    assert any(2.4 < e < 3.2 for e in char_e)
+
+
+def test_poly_nias_ratio_between_mono_and_pure_continuum():
+    """Rh 50 kV poly should not pretend excitation is a 50 keV line."""
+    assumptions = MatrixAssumptions(kind=MatrixKind.MEASURED)
+    true_el, _ = expand_composition(
+        {"Ni": atomic_weight("Ni"), "As": atomic_weight("As")}, assumptions
+    )
+    frac = {k: v / 100.0 for k, v in true_el.items()}
+    poly = FundamentalParameters(
+        excitation_energy=50.0, tube_element="Rh", polychromatic=True
+    )
+    mono = FundamentalParameters(
+        excitation_energy=50.0, tube_element="Rh", polychromatic=False
+    )
+    r_poly = poly.calculate_intensity(
+        "Ni", 28, "Kα1", frac["Ni"], frac
+    ) / poly.calculate_intensity("As", 33, "Kα1", frac["As"], frac)
+    r_mono = mono.calculate_intensity(
+        "Ni", 28, "Kα1", frac["Ni"], frac
+    ) / mono.calculate_intensity("As", 33, "Kα1", frac["As"], frac)
+    assert r_mono < 0.55
+    assert 0.55 < r_poly < 1.05
+
+    # Measured nickeline spot (Ni Kα / As Kα ≈ 0.65) should land near NiAs,
+    # not the old monochromatic Ni₃As₂ (~55 wt% Ni).
+    result = quantify_from_peaks(
+        [
+            _peak("Ni", "Kα1", 0.651, 7.478),
+            _peak("As", "Kα1", 1.0, 10.544),
+        ],
+        assumptions,
+        {
+            "excitation_energy": 50.0,
+            "incident_angle": 45.0,
+            "tube_element": "Rh",
+        },
+    )
+    assert result.success
+    assert abs(result.element_wt["Ni"] - true_el["Ni"]) < 8.0
+    moles = (result.element_wt["Ni"] / atomic_weight("Ni")) / (
+        result.element_wt["As"] / atomic_weight("As")
+    )
+    assert 0.80 < moles < 1.25

@@ -1115,7 +1115,12 @@ class ElementPanel(QWidget):
             'tube_current': self.current_spin.value(),
             'live_time': self.live_time_spin.value(),
             'detector_type': self.detector_combo.currentText(),
-            'incident_angle': self.angle_spin.value()
+            'incident_angle': self.angle_spin.value(),
+            'tube_element': (
+                self.tube_element_combo.currentText()
+                if hasattr(self, "tube_element_combo")
+                else "Rh"
+            ),
         }
     
     def get_fitting_params(self):

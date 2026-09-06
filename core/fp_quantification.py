@@ -75,6 +75,25 @@ def _atomic_number(symbol: str) -> Optional[int]:
         return None
 
 
+def _line_series_rank(line: Optional[str]) -> int:
+    """K before L before M, even when a lower series has a larger fitted area."""
+    raw = str(line or "")
+    key = (
+        raw.lower()
+        .replace("α", "a")
+        .replace("β", "b")
+        .replace("γ", "g")
+        .replace("α", "a")
+    )
+    if key.startswith("k"):
+        return 0
+    if key.startswith("l"):
+        return 1
+    if key.startswith("m"):
+        return 2
+    return 3
+
+
 def observed_areas_from_peaks(
     peaks,
     *,
@@ -82,7 +101,11 @@ def observed_areas_from_peaks(
     sample_contains_tube_element=False,
 ) -> Dict[str, Tuple[float, str, float]]:
     """
-    Strongest non-tube sample peak per element.
+    Best non-tube sample peak per element.
+
+    Prefers K lines over L/M even if the lower-energy peak has a larger
+    fitted area (common when background inflates L lines). Within a series,
+    the largest area wins.
 
     Returns:
         {element: (area, line, energy)}
@@ -105,9 +128,15 @@ def observed_areas_from_peaks(
         if area <= 0:
             continue
         energy = float(getattr(peak, "energy", 0.0) or 0.0)
+        cand = (area, str(line), energy)
         prev = best.get(element)
-        if prev is None or area > prev[0]:
-            best[element] = (area, str(line), energy)
+        if prev is None:
+            best[element] = cand
+            continue
+        cand_key = (_line_series_rank(cand[1]), -cand[0])
+        prev_key = (_line_series_rank(prev[1]), -prev[0])
+        if cand_key < prev_key:
+            best[element] = cand
     return best
 
 
@@ -144,6 +173,14 @@ def _ratio_residual(
     obs_n = obs / obs.sum()
     pred_n = pred / pred.sum()
     return float(np.sqrt(np.mean((obs_n - pred_n) ** 2)))
+
+
+def _as_percent(masses: Dict[str, float]) -> Dict[str, float]:
+    """Normalize positive masses to wt% (sum 100)."""
+    total = float(sum(max(float(v), 0.0) for v in masses.values()))
+    if total <= 0:
+        return {k: 0.0 for k in masses}
+    return {k: 100.0 * max(float(v), 0.0) / total for k, v in masses.items()}
 
 
 @dataclass
@@ -261,7 +298,9 @@ def quantify_from_peaks(
     Args:
         peaks: Fitted Peak objects (tube lines ignored)
         assumptions: Matrix kind + H2O/OH/CO2 knobs
-        experimental_params: excitation_energy, incident_angle, takeoff_angle
+        experimental_params: excitation_energy (tube kV), incident_angle,
+            takeoff_angle, tube_element. The kV sets a polychromatic
+            continuum + anode characteristic spectrum, not a mono line.
         max_iter: FP iteration cap
         damp: mixing factor toward the new cation estimate (0-1)
         tol: max relative cation change for convergence
@@ -270,9 +309,10 @@ def quantify_from_peaks(
     """
     assumptions = assumptions or MatrixAssumptions()
     params = experimental_params or {}
+    anode = tube_element or params.get("tube_element")
     observed = observed_areas_from_peaks(
         peaks,
-        tube_element=tube_element or params.get("tube_element"),
+        tube_element=anode,
         sample_contains_tube_element=sample_contains_tube_element
         or bool(params.get("sample_contains_tube_element")),
     )
@@ -286,13 +326,18 @@ def quantify_from_peaks(
     excitation = float(params.get("excitation_energy", 50.0) or 50.0)
     incident = float(params.get("incident_angle", 45.0) or 45.0)
     takeoff = float(params.get("takeoff_angle", incident) or incident)
+    poly = params.get("polychromatic")
     fp = FundamentalParameters(
         excitation_energy=excitation,
         takeoff_angle=takeoff,
         incident_angle=incident,
+        tube_element=str(anode or "Rh"),
+        polychromatic=True if poly is None else bool(poly),
     )
 
-    cation_masses = {el: area for el, (area, _line, _e) in observed.items()}
+    cation_masses = _as_percent(
+        {el: area for el, (area, _line, _e) in observed.items()}
+    )
     try:
         element_wt, formula_wt = expand_composition(cation_masses, assumptions)
     except ValueError as exc:
@@ -318,13 +363,13 @@ def quantify_from_peaks(
             else:
                 new_cations[el] = area * c / i_th
 
+        # area * c / I is a weight fraction; mix only after both sides are wt%.
+        new_cations = _as_percent(new_cations)
         blended = {
             el: (1.0 - damp) * cation_masses.get(el, 0.0) + damp * new_cations[el]
             for el in new_cations
         }
-        # Keep relative scale of cations order-1 so expand stays well-conditioned
-        s = sum(blended.values()) or 1.0
-        blended = {el: 100.0 * v / s for el, v in blended.items()}
+        blended = _as_percent(blended)
 
         rel_change = 0.0
         for el, new_m in blended.items():
@@ -357,7 +402,10 @@ def quantify_from_peaks(
         concentrations=concentrations,
         iterations=n_iter,
         residual=last_residual,
-        message="ok",
+        message=(
+            f"ok ({fp.tube_element} {excitation:g} kV "
+            f"{'polychromatic' if fp.polychromatic else 'monochromatic'})"
+        ),
         lines_used=lines_used,
         assumptions=assumptions,
         measured_cation_pct=cation_pct,

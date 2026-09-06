@@ -166,8 +166,8 @@ class MainWindow(QMainWindow):
         self.fp_quantify_action = QAction("&FP Composition (wt%)", self)
         self.fp_quantify_action.setShortcut("Ctrl+Shift+Q")
         self.fp_quantify_action.setStatusTip(
-            "Standardless fundamental-parameters wt% using the matrix model "
-            "and optional H2O / OH / CO2 assumptions."
+            "Standardless FP wt% from a polychromatic tube spectrum "
+            "(continuum + anode lines) and the matrix model."
         )
         self.fp_quantify_action.triggered.connect(self.quantify_fp)
         

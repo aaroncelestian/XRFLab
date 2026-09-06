@@ -29,7 +29,7 @@ from core.composition import VALUE_WT, numbered_replicate_names, strip_replicate
 from core.matrix_model import MatrixAssumptions
 from ui.element_panel import ElementPanel
 from ui.composition_panel import CompositionPanel
-from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts
+from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts, enable_box_zoom
 
 
 class BatchProcessingWorker(QThread):
@@ -830,6 +830,7 @@ class BatchAnalysisPanel(QWidget):
         self.spectrum_plot.setTitle('Spectrum fit', color='k', size='11pt')
         self.spectrum_plot.addLegend(offset=(10, 10))
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.25)
+        enable_box_zoom(self.spectrum_plot)
 
         overlay_row = QHBoxLayout()
         self.normalize_overlay_check = QCheckBox("Normalize overlay")
@@ -860,6 +861,7 @@ class BatchAnalysisPanel(QWidget):
         self.residual_plot.setLabel('bottom', 'Energy (keV)', color='k')
         self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
         self.residual_plot.addLine(y=0, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
+        enable_box_zoom(self.residual_plot)
         
         self.residual_curve = self.residual_plot.plot(
             pen=None, symbol='o', symbolSize=3, symbolBrush='b'

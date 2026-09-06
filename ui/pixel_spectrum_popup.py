@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.mapping.models import MapSpectrum
+from ui.spectrum_widget import enable_box_zoom
 
 
 class PixelSpectrumPopup(QDialog):
@@ -44,6 +45,7 @@ class PixelSpectrumPopup(QDialog):
         self.plot.setLabel("bottom", "Energy (keV)")
         self.plot.setLabel("left", "Counts")
         self.plot.showGrid(x=True, y=True, alpha=0.25)
+        enable_box_zoom(self.plot)
         self.curve = self.plot.plot(pen=pg.mkPen("#1f77b4", width=1.5))
         layout.addWidget(self.plot, stretch=1)
 
