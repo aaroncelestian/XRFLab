@@ -930,7 +930,10 @@ class MainWindow(QMainWindow):
                 if hasattr(spectrum, 'metadata') and spectrum.metadata:
                     self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
 
-                self.refresh_tube_guides()
+                try:
+                    self.refresh_tube_guides()
+                except Exception:
+                    pass
                 self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
             except Exception as e:
                 QMessageBox.critical(
@@ -1830,10 +1833,14 @@ class MainWindow(QMainWindow):
 
         e_min = e_max = None
         spectrum = getattr(self.spectrum_widget, "spectrum_data", None)
-        if spectrum is not None and len(getattr(spectrum, "energy", []) or []):
-            energy = spectrum.energy
-            e_min = float(min(energy))
-            e_max = float(max(energy))
+        energy = getattr(spectrum, "energy", None) if spectrum is not None else None
+        if energy is not None:
+            try:
+                if len(energy):
+                    e_min = float(min(energy))
+                    e_max = float(max(energy))
+            except (TypeError, ValueError):
+                e_min = e_max = None
 
         fit = panel.get_fitting_params() if hasattr(panel, "get_fitting_params") else {}
         # Guides follow the tube anode / kV even if "Include Tube Lines" is off

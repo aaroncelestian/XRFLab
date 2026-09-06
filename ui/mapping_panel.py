@@ -1195,7 +1195,12 @@ class MappingPanel(QWidget):
         self._apply_loaded_project()
         QMessageBox.information(self, "Merge IPJs", report.summary_text())
 
-    def _apply_loaded_project(self) -> None:
+    def _apply_loaded_project(
+        self,
+        preferred_site_id: Optional[str] = None,
+        *,
+        emit_loaded: bool = True,
+    ) -> None:
         """Refresh trees / status after open or merge."""
         if self.project is None:
             return
@@ -1203,7 +1208,10 @@ class MappingPanel(QWidget):
         self._cam_dest_rect_cache.clear()
 
         self._populate_trees()
-        primary = self.project.primary_fov
+        site = None
+        if preferred_site_id:
+            site = self.project.find_site(preferred_site_id)
+        primary = site or self.project.primary_fov
         if primary:
             self._activate_site(primary, switch_to_data=True)
         n_samples = self.project.metadata.get("n_samples", len(self.project.samples))
@@ -1234,7 +1242,120 @@ class MappingPanel(QWidget):
             )
             self.nav_tabs.setCurrentIndex(1)
         self._fill_sample_tab()
-        self.project_loaded.emit(self.project)
+        if emit_loaded:
+            self.project_loaded.emit(self.project)
+
+    def capture_ui_state(self) -> dict:
+        """Snapshot of Proj Data display / selection for .xrfp save."""
+        site_id = self.current_fov.id if self.current_fov is not None else None
+        last_line = None
+        if self._last_line is not None and len(self._last_line) == 4:
+            last_line = [float(v) for v in self._last_line]
+        return {
+            "checked_map_names": sorted(self._checked_map_names),
+            "checked_roi_symbols": sorted(self._checked_roi_symbols),
+            "rgb": bool(self.rgb_check.isChecked()),
+            "rgb_maps": [
+                self.r_combo.currentData(),
+                self.g_combo.currentData(),
+                self.b_combo.currentData(),
+            ],
+            "overlay": bool(self.overlay_check.isChecked()),
+            "overlay_target": self.overlay_target.currentData(),
+            "overlay_opacity": int(self.overlay_slider.value()),
+            "overlay_cmap": self.overlay_cmap.currentData(),
+            "overlay_mask_low": bool(self.overlay_mask_check.isChecked()),
+            "current_site_id": site_id,
+            "workspace_tab": int(self.workspace_tabs.currentIndex()),
+            "nav_tab": int(self.nav_tabs.currentIndex()),
+            "last_line": last_line,
+            "spectrum_overlay_log": bool(
+                getattr(self, "spectrum_overlay_log", None)
+                and self.spectrum_overlay_log.isChecked()
+            ),
+            "spectrum_overlay_norm": bool(
+                getattr(self, "spectrum_overlay_norm", None)
+                and self.spectrum_overlay_norm.isChecked()
+            ),
+        }
+
+    def load_saved_project(
+        self, project, mapping_ui=None, *, drawn_line_scan=None
+    ) -> None:
+        """Restore a MappingProject (and display state) from an .xrfp file."""
+        mapping_ui = dict(mapping_ui or {})
+        self.project = project
+        if project is None:
+            self.current_fov = None
+            self._drawn_line_scan = None
+            self._last_line = None
+            if hasattr(self, "tree"):
+                self.tree.clear()
+            if hasattr(self, "sites_tree"):
+                self.sites_tree.clear()
+            return
+        self._apply_loaded_project(
+            preferred_site_id=mapping_ui.get("current_site_id"),
+            emit_loaded=False,
+        )
+        self._restore_ui_state(mapping_ui, drawn_line_scan=drawn_line_scan)
+
+    def _restore_ui_state(self, mapping_ui: dict, *, drawn_line_scan=None) -> None:
+        names = mapping_ui.get("checked_map_names")
+        if names:
+            self._checked_map_names = {str(n) for n in names}
+            self._populate_data_tree()
+        rois = mapping_ui.get("checked_roi_symbols")
+        if rois:
+            self._checked_roi_symbols = {str(s) for s in rois}
+            self._fill_ls_element_list()
+
+        rgb_maps = mapping_ui.get("rgb_maps") or []
+        if len(rgb_maps) >= 3:
+            self._set_combo_by_data(self.r_combo, rgb_maps[0])
+            self._set_combo_by_data(self.g_combo, rgb_maps[1])
+            self._set_combo_by_data(self.b_combo, rgb_maps[2])
+        if "rgb" in mapping_ui:
+            self.rgb_check.blockSignals(True)
+            self.rgb_check.setChecked(bool(mapping_ui["rgb"]))
+            self.rgb_check.blockSignals(False)
+
+        if mapping_ui.get("overlay_target"):
+            self._select_overlay_target(str(mapping_ui["overlay_target"]))
+        if mapping_ui.get("overlay_opacity") is not None:
+            self.overlay_slider.blockSignals(True)
+            self.overlay_slider.setValue(int(mapping_ui["overlay_opacity"]))
+            self.overlay_slider.blockSignals(False)
+            self.overlay_pct.setText(f"{int(mapping_ui['overlay_opacity'])}%")
+        if mapping_ui.get("overlay_cmap"):
+            self._set_combo_by_data(self.overlay_cmap, mapping_ui["overlay_cmap"])
+        if "overlay_mask_low" in mapping_ui:
+            self.overlay_mask_check.blockSignals(True)
+            self.overlay_mask_check.setChecked(bool(mapping_ui["overlay_mask_low"]))
+            self.overlay_mask_check.blockSignals(False)
+        if "overlay" in mapping_ui and self.overlay_check.isEnabled():
+            self.overlay_check.blockSignals(True)
+            self.overlay_check.setChecked(bool(mapping_ui["overlay"]))
+            self.overlay_check.blockSignals(False)
+
+        last_line = mapping_ui.get("last_line")
+        if last_line is not None and len(last_line) == 4:
+            self._last_line = tuple(float(v) for v in last_line)
+            self.canvas.set_line(*self._last_line)
+            self._replot_last_line()
+        if drawn_line_scan is not None:
+            self._drawn_line_scan = drawn_line_scan
+
+        if hasattr(self, "spectrum_overlay_log") and "spectrum_overlay_log" in mapping_ui:
+            self.spectrum_overlay_log.setChecked(bool(mapping_ui["spectrum_overlay_log"]))
+        if hasattr(self, "spectrum_overlay_norm") and "spectrum_overlay_norm" in mapping_ui:
+            self.spectrum_overlay_norm.setChecked(bool(mapping_ui["spectrum_overlay_norm"]))
+
+        if mapping_ui.get("nav_tab") is not None:
+            self.nav_tabs.setCurrentIndex(int(mapping_ui["nav_tab"]))
+        if mapping_ui.get("workspace_tab") is not None:
+            self.workspace_tabs.setCurrentIndex(int(mapping_ui["workspace_tab"]))
+        self._refresh_canvas()
 
     def _show_sample_info(self) -> None:
         self._fill_sample_tab()
