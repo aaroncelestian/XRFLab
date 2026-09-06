@@ -920,27 +920,41 @@ class MainWindow(QMainWindow):
             "All Supported (*.txt *.csv *.mca *.h5 *.hdf5);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca);;HDF5 Files (*.h5 *.hdf5);;All Files (*)"
         )
         
-        if file_path:
-            try:
-                spectrum = self.io_handler.load_spectrum(file_path)
-                self.session.set_spectrum(spectrum, path=file_path)
-                self.spectrum_widget.set_spectrum(spectrum)
-                
-                # Auto-populate experimental parameters from spectrum metadata
-                if hasattr(spectrum, 'metadata') and spectrum.metadata:
-                    self.element_panel.update_from_spectrum_metadata(spectrum.metadata)
+        if not file_path:
+            return
+        try:
+            spectrum = self.io_handler.load_spectrum(file_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Spectrum",
+                f"Failed to load spectrum:\n{str(e)}"
+            )
+            return
 
-                try:
-                    self.refresh_tube_guides()
-                except Exception:
-                    pass
-                self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error Loading Spectrum",
-                    f"Failed to load spectrum:\n{str(e)}"
-                )
+        self.session.set_spectrum(spectrum, path=file_path)
+        try:
+            self.spectrum_widget.set_spectrum(spectrum)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Displaying Spectrum",
+                f"Loaded the file but could not plot it:\n{str(e)}"
+            )
+            return
+
+        meta = getattr(spectrum, "metadata", None)
+        if isinstance(meta, dict) and meta:
+            try:
+                self.element_panel.update_from_spectrum_metadata(meta)
+            except Exception:
+                pass
+
+        try:
+            self.refresh_tube_guides()
+        except Exception:
+            pass
+        self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
 
     def open_spectrum_as_overlay(self):
         """Add a spectrum to the plot without replacing the current one."""
@@ -1824,8 +1838,14 @@ class MainWindow(QMainWindow):
 
     def refresh_tube_guides(self):
         """Update faint tube-line bands on the Analysis spectrum plot."""
-        from core.xray_data import build_tube_guide_regions
+        try:
+            self._refresh_tube_guides()
+        except Exception:
+            return
 
+    def _refresh_tube_guides(self):
+        from core.xray_data import build_tube_guide_regions
+        import numpy as np
         panel = self.element_panel
         show = True
         if hasattr(panel, "show_tube_guides_check"):
@@ -1835,12 +1855,10 @@ class MainWindow(QMainWindow):
         spectrum = getattr(self.spectrum_widget, "spectrum_data", None)
         energy = getattr(spectrum, "energy", None) if spectrum is not None else None
         if energy is not None:
-            try:
-                if len(energy):
-                    e_min = float(min(energy))
-                    e_max = float(max(energy))
-            except (TypeError, ValueError):
-                e_min = e_max = None
+            arr = np.asarray(energy).reshape(-1)
+            if arr.size:
+                e_min = float(np.nanmin(arr))
+                e_max = float(np.nanmax(arr))
 
         fit = panel.get_fitting_params() if hasattr(panel, "get_fitting_params") else {}
         # Guides follow the tube anode / kV even if "Include Tube Lines" is off

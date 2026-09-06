@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from ui.periodic_table_widget import PeriodicTableWidget
 from core.xray_data import get_element_lines, get_element_info
+from core.spectrum import metadata_text, _as_float
 from core.peak_fitting import (
     PEAK_SHAPE_UI_CHOICES,
     PEAK_SHAPE_UI_DEFAULT,
@@ -996,28 +997,45 @@ class ElementPanel(QWidget):
         Args:
             metadata: Spectrum metadata dictionary
         """
-        metadata = metadata or {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+
+        # Avoid valueChanged → tube_guides_changed while filling fields
+        spins = (
+            self.excitation_spin,
+            self.current_spin,
+            self.live_time_spin,
+            self.angle_spin,
+        )
+        for spin in spins:
+            spin.blockSignals(True)
+        try:
+            self._apply_spectrum_metadata(metadata)
+        finally:
+            for spin in spins:
+                spin.blockSignals(False)
+
+    def _apply_spectrum_metadata(self, metadata: dict) -> None:
 
         # Excitation energy / tube voltage (keV or kV)
         if "excitation_energy" in metadata:
-            self.excitation_spin.setValue(float(metadata["excitation_energy"]))
+            self.excitation_spin.setValue(_as_float(metadata["excitation_energy"], 20.0))
         elif "kv" in metadata:
-            self.excitation_spin.setValue(float(metadata["kv"]))
+            self.excitation_spin.setValue(_as_float(metadata["kv"], 20.0))
 
         # Tube current: prefer explicit mA (IPJ); EMSA PROBECUR is nanoamps
         if "tube_current_ma" in metadata:
-            current = float(metadata["tube_current_ma"])
+            current = _as_float(metadata["tube_current_ma"], 0.0)
             if current > self.current_spin.maximum():
                 self.current_spin.setMaximum(max(current, 50.0))
             self.current_spin.setValue(current)
         elif "ma" in metadata:
-            current = float(metadata["ma"])
+            current = _as_float(metadata["ma"], 0.0)
             if current > self.current_spin.maximum():
                 self.current_spin.setMaximum(max(current, 50.0))
             self.current_spin.setValue(current)
         elif "tube_current" in metadata:
             # Convert from nA to mA (EMSA / some vendor files)
-            current = float(metadata["tube_current"])
+            current = _as_float(metadata["tube_current"], 0.0)
             if current > 1.0:
                 current = current / 1_000_000.0
             if current > self.current_spin.maximum():
@@ -1026,27 +1044,23 @@ class ElementPanel(QWidget):
 
         # Live time (seconds)
         if "live_time" in metadata:
-            live = float(metadata["live_time"])
+            live = _as_float(metadata["live_time"], 100.0)
             if live > self.live_time_spin.maximum():
                 self.live_time_spin.setMaximum(max(live, 10000.0))
             self.live_time_spin.setValue(live)
 
         # Incident angle
         if "incident_angle" in metadata:
-            self.angle_spin.setValue(float(metadata["incident_angle"]))
+            self.angle_spin.setValue(_as_float(metadata["incident_angle"], 45.0))
 
         # Sample Information: prefer an explicit sample_name (mapping send),
         # then the spectrum's own name so Proj Data labels survive the hop.
-        sample_name = (
-            metadata.get("sample_name")
-            or metadata.get("sample")
-            or metadata.get("name")
-        )
+        sample_name = metadata_text(metadata, "sample_name", "sample", "name")
         if sample_name:
-            self.sample_name_edit.setText(str(sample_name))
-        sample_type = metadata.get("sample_type")
+            self.sample_name_edit.setText(sample_name)
+        sample_type = metadata_text(metadata, "sample_type")
         if sample_type:
-            idx = self.sample_type_combo.findText(str(sample_type))
+            idx = self.sample_type_combo.findText(sample_type)
             if idx >= 0:
                 self.sample_type_combo.setCurrentIndex(idx)
     

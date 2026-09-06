@@ -334,20 +334,20 @@ class PeakShapeCalibrator:
         
         return energies, fwhms
     
-    def fit_resolution_model(self, remove_outliers: bool = True, model: str = 'detector') -> Dict[str, float]:
+    def fit_resolution_model(self, remove_outliers: bool = True, model: str = 'linear') -> Dict[str, float]:
         """
         Fit detector resolution model with various functional forms
         
         Args:
             remove_outliers: If True, remove outliers using iterative fitting
-            model: Model type - 'detector', 'linear', 'quadratic', 'exponential', 'power'
+            model: Model type - 'linear', 'detector', 'quadratic', 'exponential', 'power'
         
         Returns:
             Dict with fit parameters and statistics
         
         Models:
-            - 'detector': FWHM(E) = sqrt(FWHM_0^2 + 2.355^2 * epsilon * E)  [Standard detector model]
-            - 'linear': FWHM(E) = a + b*E
+            - 'linear': FWHM(E) = a + b*E  [default; empirical observed peak width]
+            - 'detector': FWHM(E) = sqrt(FWHM_0^2 + 2.355^2 * epsilon * E)
             - 'quadratic': FWHM(E) = a + b*E + c*E^2
             - 'exponential': FWHM(E) = a * exp(b*E)
             - 'power': FWHM(E) = a * E^b
@@ -500,7 +500,7 @@ class PeakShapeCalibrator:
         
         # Plot fitted model based on model type
         e_model = np.linspace(min(energies), max(energies), 200)
-        model_type = results.get('model', 'detector')
+        model_type = results.get('model', 'linear')
         
         if model_type == 'detector':
             fwhm_0 = results['fwhm_0']
@@ -595,7 +595,7 @@ class PeakShapeCalibrator:
         import json
         from datetime import datetime
         
-        model_type = results.get('model', 'detector')
+        model_type = results.get('model', 'linear')
         
         # Base output structure
         output = {
@@ -666,21 +666,21 @@ def main():
         return
     
     # Fit resolution model
-    print("\nFitting detector resolution model...")
+    print("\nFitting linear FWHM model...")
     print("=" * 70)
     try:
         results = calibrator.fit_resolution_model()
         
         print(f"\n✓ Calibration successful!")
-        print(f"  FWHM₀ = {results['fwhm_0']*1000:.1f} ± {results['fwhm_0_err']*1000:.1f} eV")
-        print(f"  ε = {results['epsilon']*1000:.2f} ± {results['epsilon_err']*1000:.2f} eV/keV")
+        print(f"  Intercept = {results['intercept']*1000:.1f} ± {results['intercept_err']*1000:.1f} eV")
+        print(f"  Slope = {results['slope']*1000:.2f} ± {results['slope_err']*1000:.2f} eV/keV")
         print(f"  R² = {results['r_squared']:.4f}")
         print(f"  RMSE = {results['rmse']*1000:.1f} eV")
         
         # Example predictions
         print(f"\nExample FWHM predictions:")
         for E in [1.5, 5.0, 10.0, 15.0]:
-            fwhm = np.sqrt(results['fwhm_0']**2 + 2.355**2 * results['epsilon'] * E)
+            fwhm = results['intercept'] + results['slope'] * E
             print(f"  {E:5.1f} keV → {fwhm*1000:6.1f} eV")
         
         # Save results

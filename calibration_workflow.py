@@ -48,19 +48,19 @@ def step1_fwhm_calibration():
         print("   Check that data files exist in sample_data/data/")
         return None
     
-    # Fit detector model (standard physics-based model)
-    print("\nFitting detector resolution model...")
+    # Fit linear FWHM model (default; best match to measured peak widths)
+    print("\nFitting linear FWHM model...")
     print("-" * 70)
     
     try:
         results = calibrator.fit_resolution_model(
             remove_outliers=True,
-            model='detector'
+            model='linear'
         )
         
         print(f"\n✓ FWHM Calibration successful!")
-        print(f"  FWHM₀ = {results['fwhm_0']*1000:.1f} ± {results['fwhm_0_err']*1000:.1f} eV")
-        print(f"  ε = {results['epsilon']*1000:.2f} ± {results['epsilon_err']*1000:.2f} eV/keV")
+        print(f"  Intercept = {results['intercept']*1000:.1f} ± {results['intercept_err']*1000:.1f} eV")
+        print(f"  Slope = {results['slope']*1000:.2f} ± {results['slope_err']*1000:.2f} eV/keV")
         print(f"  R² = {results['r_squared']:.4f}")
         print(f"  RMSE = {results['rmse']*1000:.1f} eV")
         print(f"  Peaks used: {len(calibrator.measurements)}")
@@ -70,14 +70,14 @@ def step1_fwhm_calibration():
         from datetime import datetime
         
         fwhm_cal = FWHMCalibration(
-            model_type='detector',
+            model_type='linear',
             parameters={
-                'fwhm_0': results['fwhm_0'],
-                'epsilon': results['epsilon']
+                'intercept': results['intercept'],
+                'slope': results['slope']
             },
             parameter_errors={
-                'fwhm_0': results['fwhm_0_err'],
-                'epsilon': results['epsilon_err']
+                'intercept': results['intercept_err'],
+                'slope': results['slope_err']
             },
             r_squared=results['r_squared'],
             rmse=results['rmse'],
@@ -128,8 +128,13 @@ def step2_instrument_calibration(fwhm_calibration_path=None):
     if fwhm_calibration_path and Path(fwhm_calibration_path).exists():
         print(f"Loading FWHM calibration from: {fwhm_calibration_path}")
         fwhm_cal = load_fwhm_calibration(fwhm_calibration_path)
-        print(f"  FWHM₀ = {fwhm_cal.parameters['fwhm_0']*1000:.1f} eV")
-        print(f"  ε = {fwhm_cal.parameters['epsilon']*1000:.2f} eV/keV")
+        print(f"  Model: {fwhm_cal.model_type}")
+        if fwhm_cal.model_type == 'linear':
+            print(f"  Intercept = {fwhm_cal.parameters['intercept']*1000:.1f} eV")
+            print(f"  Slope = {fwhm_cal.parameters['slope']*1000:.2f} eV/keV")
+        elif fwhm_cal.model_type == 'detector':
+            print(f"  FWHM₀ = {fwhm_cal.parameters['fwhm_0']*1000:.1f} eV")
+            print(f"  ε = {fwhm_cal.parameters['epsilon']*1000:.2f} eV/keV")
         print(f"  R² = {fwhm_cal.r_squared:.4f}")
         print()
     else:

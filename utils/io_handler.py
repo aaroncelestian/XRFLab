@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Optional
-from core.spectrum import Spectrum
+from core.spectrum import Spectrum, _as_float
 
 
 class IOHandler:
@@ -275,8 +275,8 @@ class IOHandler:
                     for key in f['metadata'].attrs:
                         metadata[key] = f['metadata'].attrs[key]
                 
-                live_time = metadata.get('live_time', 100.0)
-                real_time = metadata.get('real_time', 100.0)
+                live_time = _as_float(metadata.get('live_time', 100.0), 100.0)
+                real_time = _as_float(metadata.get('real_time', 100.0), 100.0)
             
             return Spectrum(
                 energy=energy,

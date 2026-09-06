@@ -227,6 +227,30 @@ def test_batch_processor_api_alignment(tmp_path, io_handler):
         assert isinstance(r.concentrations, dict)
 
 
+def test_metadata_text_ignores_numpy_arrays():
+    from core.spectrum import metadata_text
+
+    meta = {
+        "sample_name": np.arange(8),
+        "sample": np.array(["basalt"]),
+        "name": "ignored",
+    }
+    assert metadata_text(meta, "sample_name", "sample", "name") == "basalt"
+    assert metadata_text({"name": np.array(["nickelene_1"])}, "name") == "nickelene_1"
+    assert metadata_text({"name": np.linspace(0, 10, 16)}, "name") == ""
+
+
+def test_spectrum_squeezes_column_vectors():
+    from core.spectrum import Spectrum
+
+    energy = np.linspace(0, 10, 8).reshape(-1, 1)
+    counts = np.ones((8, 1))
+    spec = Spectrum(energy=energy, counts=counts, live_time=np.array([12.5]))
+    assert spec.energy.ndim == 1
+    assert spec.counts.ndim == 1
+    assert spec.live_time == pytest.approx(12.5)
+
+
 def test_analysis_session_holds_state():
     from core.session import AnalysisSession
     from core.spectrum import Spectrum

@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from core.xray_data import get_element_lines, build_tube_guide_regions
 from core.peak_fitting import PeakFitter
+from core.spectrum import metadata_text
 
 _OVERLAY_COLORS = [
     "#d32f2f",
@@ -211,8 +212,8 @@ class SpectrumWidget(QWidget):
         return color
 
     def _spectrum_overlay_name(self, spectrum, fallback="spectrum") -> str:
-        meta = getattr(spectrum, "metadata", None) or {}
-        name = meta.get("name") or meta.get("source_label") or fallback
+        meta = getattr(spectrum, "metadata", None)
+        name = metadata_text(meta, "name", "source_label") or fallback
         return str(name)
 
     def add_overlay(self, spectrum, name=None, color=None):
@@ -732,8 +733,8 @@ class SpectrumWidget(QWidget):
             return
 
         primary_peak = 1.0
-        if self.spectrum_data is not None and len(self.spectrum_data.counts):
-            primary_peak = float(np.max(self.spectrum_data.counts)) or 1.0
+        if self.spectrum_data is not None and np.size(self.spectrum_data.counts):
+            primary_peak = float(np.nanmax(self.spectrum_data.counts)) or 1.0
 
         def _y(counts, peak=None):
             y = np.asarray(counts, dtype=float)
@@ -758,9 +759,9 @@ class SpectrumWidget(QWidget):
             return
 
         primary_name = "Measured"
-        meta = getattr(self.spectrum_data, "metadata", None) or {}
+        meta = getattr(self.spectrum_data, "metadata", None)
         if overlays:
-            primary_name = str(meta.get("name") or meta.get("source_label") or "Measured")
+            primary_name = metadata_text(meta, "name", "source_label") or "Measured"
 
         plot_item.plot(
             self.spectrum_data.energy,

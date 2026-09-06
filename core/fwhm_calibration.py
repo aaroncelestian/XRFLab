@@ -130,7 +130,7 @@ def convert_peak_shape_calibration(peak_shape_results: Dict) -> FWHMCalibration:
     """
     from datetime import datetime
     
-    model_type = peak_shape_results.get('model', 'detector')
+    model_type = peak_shape_results.get('model', 'linear')
     
     # Extract parameters (model-specific)
     parameters = {}

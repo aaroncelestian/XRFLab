@@ -7,6 +7,48 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 
+def _as_1d_float(values, name: str) -> np.ndarray:
+    """Coerce energy/counts to a 1-D float64 array."""
+    arr = np.squeeze(np.asarray(values, dtype=np.float64))
+    if arr.ndim == 0:
+        arr = np.atleast_1d(arr)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    return arr
+
+
+def _as_float(value, default: float) -> float:
+    try:
+        arr = np.asarray(value)
+        if arr.size == 0:
+            return float(default)
+        return float(arr.reshape(-1)[0])
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def metadata_text(metadata: Optional[Dict[str, Any]], *keys: str) -> str:
+    """First usable metadata string; never boolean-tests numpy arrays."""
+    if not isinstance(metadata, dict):
+        return ""
+    for key in keys:
+        val = metadata.get(key)
+        if val is None:
+            continue
+        if isinstance(val, np.ndarray):
+            if val.size == 0:
+                continue
+            if val.size > 1:
+                continue
+            val = val.reshape(-1)[0]
+        if isinstance(val, bytes):
+            val = val.decode("utf-8", errors="replace")
+        text = str(val).strip()
+        if text and text.lower() not in {"none", "nan"}:
+            return text
+    return ""
+
+
 @dataclass
 class Spectrum:
     """
@@ -27,15 +69,16 @@ class Spectrum:
     
     def __post_init__(self):
         """Validate spectrum data after initialization"""
-        if len(self.energy) != len(self.counts):
+        self.energy = _as_1d_float(self.energy, "energy")
+        self.counts = _as_1d_float(self.counts, "counts")
+        if self.energy.size != self.counts.size:
             raise ValueError("Energy and counts arrays must have same length")
-        
-        if len(self.energy) == 0:
+        if self.energy.size == 0:
             raise ValueError("Spectrum cannot be empty")
-        
-        # Ensure arrays are numpy arrays
-        self.energy = np.asarray(self.energy, dtype=np.float64)
-        self.counts = np.asarray(self.counts, dtype=np.float64)
+        self.live_time = _as_float(self.live_time, 100.0)
+        self.real_time = _as_float(self.real_time, 100.0)
+        if not isinstance(self.metadata, dict):
+            self.metadata = {}
     
     @property
     def num_channels(self):

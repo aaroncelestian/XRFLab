@@ -41,7 +41,7 @@ class FWHMCalibrationWorker(QThread):
     def __init__(
         self,
         data_dir,
-        model_type='detector',
+        model_type='linear',
         remove_outliers=True,
         tube_kv=None,
         file_peaks=None,
@@ -272,16 +272,17 @@ class FWHMCalibrationPanel(QWidget):
         row.addWidget(QLabel("Type:"))
 
         self.model_combo = QComboBox()
-        self.model_combo.addItem("Detector", "detector")
         self.model_combo.addItem("Linear", "linear")
+        self.model_combo.addItem("Detector", "detector")
         self.model_combo.addItem("Quadratic", "quadratic")
         self.model_combo.addItem("Exponential", "exponential")
         self.model_combo.addItem("Power", "power")
         self.model_combo.setCurrentIndex(0)
         self.model_combo.setToolTip(
-            "Detector (recommended for SDD):\n"
+            "Linear (default): a + b·E\n"
+            "  Best match to measured peak widths on this instrument.\n\n"
+            "Detector (Si Fano physics):\n"
             "  FWHM(E) = √(FWHM₀² + 2.355² · ε · E)\n\n"
-            "Linear: a + b·E\n"
             "Quadratic: a + b·E + c·E²\n"
             "Exponential: a · exp(b·E)\n"
             "Power: a · E^b"
@@ -683,7 +684,7 @@ class FWHMCalibrationPanel(QWidget):
             )
             return
 
-        model_type = self.model_combo.currentData() or "detector"
+        model_type = self.model_combo.currentData() or "linear"
 
         self.progress_output.clear()
         self._clear_metrics()
