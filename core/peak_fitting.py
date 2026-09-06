@@ -155,7 +155,8 @@ class PeakFitter:
     HYPERMET_STEP_AMP = 0.012
     TAIL_GAUSSIAN_FRAC = 0.15
     TAIL_GAUSSIAN_SIGMA_MULT = 3.0
-    USE_CALIBRATED_SHAPES = False  # If True, fix peak shapes during fitting
+    USE_CALIBRATED_SHAPES = False  # If True, lock Gaussian widths to FWHM(E)
+    # Tail-Gaussian and Hypermet never use FWHM calibration (width + tails free)
     # Max allowed center shift during LS (keV). Weak peaks otherwise wander
     # within the old ±0.2 keV window onto neighbors / noise.
     CENTER_SHIFT_FRACTION = 0.25  # fraction of local FWHM
@@ -207,12 +208,18 @@ class PeakFitter:
         cls._fwhm_calibration = detector.fwhm_calibration
 
     @classmethod
+    def fwhm_cal_locks_width(cls, shape) -> bool:
+        """FWHM calibration freezes width only for pure Gaussian fits."""
+        shape = normalize_peak_shape(shape)
+        return bool(cls.USE_CALIBRATED_SHAPES) and shape == 'gaussian'
+
+    @classmethod
     def set_fwhm_calibration(cls, calibration):
         """
-        Apply a detector FWHM calibration for all subsequent peak fits.
-        
-        Uses the calibrated model for width predictions and, when present,
-        fixes peak shapes to those widths during fitting.
+        Apply a detector FWHM calibration for subsequent peak fits.
+
+        Gaussian fits lock width to FWHM(E). Tail-Gaussian and Hypermet
+        ignore the calibration (core width and tail parameters stay free).
         """
         from core.instrument_state import DetectorModel
 
@@ -587,8 +594,11 @@ class PeakFitter:
         # Use energy-dependent FWHM for better initial guess (or locked Compton width)
         fwhm_guess = fwhm_estimate
         sigma_guess = fwhm_guess / 2.355  # Convert FWHM to sigma
-        # Lock width when calibrated shapes are on OR a per-peak fixed_fwhm is given
-        lock_width = PeakFitter.USE_CALIBRATED_SHAPES or (fixed_fwhm is not None)
+        # Lock width for Compton (fixed_fwhm) or Gaussian + FWHM calibration.
+        # Tail-Gaussian / Hypermet never lock to FWHM(E).
+        lock_width = (
+            PeakFitter.fwhm_cal_locks_width(shape) or (fixed_fwhm is not None)
+        )
         dE = 0.0 if fix_center else PeakFitter.center_shift_limit(
             center_guess, known_line=known_line, center_tolerance=center_tolerance
         )

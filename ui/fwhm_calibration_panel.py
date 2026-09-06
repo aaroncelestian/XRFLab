@@ -257,8 +257,7 @@ class FWHMCalibrationPanel(QWidget):
             self.tube_kv_combo.addItem(f"{kv:g} kV", kv)
         self.tube_kv_combo.setToolTip(
             "Tag FWHM peak measurements with the instrument mode used.\n"
-            "FWHM itself is still one FWHM(E) curve — pooling 15/30/50 is fine.\n"
-            "Use Tube Profiles tab for per-kV Rh scatter ratios."
+            "FWHM itself is still one FWHM(E) curve — pooling 15/30/50 is fine."
         )
         row.addWidget(self.tube_kv_combo, 1)
         return group

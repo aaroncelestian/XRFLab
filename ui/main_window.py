@@ -18,7 +18,10 @@ from ui.results_panel import ResultsPanel
 from ui.batch_analysis_panel import BatchAnalysisPanel
 from ui.standards_panel import StandardsPanel
 from ui.fwhm_calibration_panel import FWHMCalibrationPanel
-from ui.tube_profile_panel import TubeProfilePanel
+from ui.tube_profile_panel import (
+    SHOW_TUBE_PROFILE_CALIBRATION,
+    TubeProfilePanel,
+)
 from ui.mapping_panel import MappingPanel
 from utils.io_handler import IOHandler
 from utils.updater import check_for_updates
@@ -254,7 +257,8 @@ class MainWindow(QMainWindow):
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(self.fwhm_calibration_action)
-        tools_menu.addAction(self.tube_profile_action)
+        if SHOW_TUBE_PROFILE_CALIBRATION:
+            tools_menu.addAction(self.tube_profile_action)
         tools_menu.addAction(self.standards_calibration_action)
         
         # Help menu
@@ -331,7 +335,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tab_widget)
     
     def _create_calibration_tab(self):
-        """Nest FWHM, Tube Profiles, and Standards under Calibration."""
+        """Nest FWHM and Standards under Calibration (Tube Profiles optional)."""
         calibration_widget = QWidget()
         layout = QVBoxLayout(calibration_widget)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -354,10 +358,12 @@ class MainWindow(QMainWindow):
         )
         self.calibration_tabs.addTab(self.fwhm_calibration_panel, "FWHM")
 
-        # Step 1b: per-kV tube scatter profiles (15/30/50)
+        # Step 1b: per-kV tube scatter profiles (15/30/50). Panel is always
+        # built for project I/O; the tab is hidden unless the flag is on.
         self.tube_profile_panel = TubeProfilePanel()
         self.tube_profile_panel.library_changed.connect(self.on_tube_profiles_changed)
-        self.calibration_tabs.addTab(self.tube_profile_panel, "Tube Profiles")
+        if SHOW_TUBE_PROFILE_CALIBRATION:
+            self.calibration_tabs.addTab(self.tube_profile_panel, "Tube Profiles")
         
         # Step 2: intensity/response using known concentrations
         self.standards_panel = StandardsPanel()
@@ -384,29 +390,32 @@ class MainWindow(QMainWindow):
             fwhm_txt = "<b>FWHM</b> not set — Calibrate &amp; Use on the FWHM tab"
             fwhm_color = "#b36b00"
 
-        library = None
-        if hasattr(self, "tube_profile_panel"):
-            library = self.tube_profile_panel.get_library()
-        n_meas = 0
-        if library is not None:
-            n_meas = sum(
-                1 for p in library.profiles.values()
-                if getattr(p, "source", None) == "measured"
-            )
-        if n_meas:
-            tube_txt = f"<b>Tube</b> {n_meas} measured mode(s)"
-        else:
-            tube_txt = "<b>Tube</b> defaults (optional blanks)"
-
         std = getattr(self.standards_panel, "calibration_result", None) if hasattr(self, "standards_panel") else None
         if std is not None and getattr(std, "success", False):
             std_txt = "<b>Standards</b> intensity calibration stored"
         else:
             std_txt = "<b>Standards</b> optional — not required for Semi-Quant"
 
+        extra = ""
+        if SHOW_TUBE_PROFILE_CALIBRATION:
+            library = None
+            if hasattr(self, "tube_profile_panel"):
+                library = self.tube_profile_panel.get_library()
+            n_meas = 0
+            if library is not None:
+                n_meas = sum(
+                    1 for p in library.profiles.values()
+                    if getattr(p, "source", None) == "measured"
+                )
+            if n_meas:
+                tube_txt = f"<b>Tube</b> {n_meas} measured mode(s)"
+            else:
+                tube_txt = "<b>Tube</b> defaults (optional blanks)"
+            extra = f"&nbsp;&nbsp;·&nbsp;&nbsp;{tube_txt}"
+
         self.calibration_status.setText(
             f"<span style='color:{fwhm_color}'>{fwhm_txt}</span>"
-            f"&nbsp;&nbsp;·&nbsp;&nbsp;{tube_txt}"
+            f"{extra}"
             f"&nbsp;&nbsp;·&nbsp;&nbsp;{std_txt}"
         )
     
@@ -1915,15 +1924,19 @@ class MainWindow(QMainWindow):
             fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
             epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
             self.status_bar.showMessage(
-                f"FWHM locked for Analysis: FWHM₀={fwhm_0_ev:.1f} eV, "
-                f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f})",
-                5000
+                f"FWHM calibration applied (Gaussian widths locked): "
+                f"FWHM₀={fwhm_0_ev:.1f} eV, "
+                f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f}). "
+                f"Tail-Gaussian and Hypermet ignore FWHM calibration.",
+                8000
             )
         else:
             self.status_bar.showMessage(
-                f"FWHM locked for Analysis: {fwhm_calibration.model_type} model "
-                f"(R²={fwhm_calibration.r_squared:.4f})",
-                5000
+                f"FWHM calibration applied (Gaussian widths locked): "
+                f"{fwhm_calibration.model_type} model "
+                f"(R²={fwhm_calibration.r_squared:.4f}). "
+                f"Tail-Gaussian and Hypermet ignore FWHM calibration.",
+                8000
             )
 
         self._refresh_calibration_status()
@@ -1934,13 +1947,14 @@ class MainWindow(QMainWindow):
         self.session.apply_instrument_to_fitter(self.fitter)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         self.element_panel.update_tube_profile_status(library)
-        n_meas = sum(1 for p in library.profiles.values() if p.source == 'measured')
-        self.status_bar.showMessage(
-            f"Tube profiles active: {n_meas} measured / "
-            f"{len(library.available_kvs)} modes "
-            f"({library.tube_element})",
-            5000
-        )
+        if SHOW_TUBE_PROFILE_CALIBRATION:
+            n_meas = sum(1 for p in library.profiles.values() if p.source == 'measured')
+            self.status_bar.showMessage(
+                f"Tube profiles active: {n_meas} measured / "
+                f"{len(library.available_kvs)} modes "
+                f"({library.tube_element})",
+                5000
+            )
         self._refresh_calibration_status()
     
     def on_calibration_applied(self, calibration_result):

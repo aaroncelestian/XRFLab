@@ -379,6 +379,159 @@ def test_auto_id_finds_hg_l_lines():
     assert "Lβ" in labeled[1]["line"]
 
 
+def _line_energy(symbol, z, series, name):
+    from core.xray_data import get_element_lines
+
+    lines = get_element_lines(symbol, z)
+    return next(l["energy"] for l in lines[series] if l["name"] == name)
+
+
+def test_auto_id_gold_does_not_call_rb_from_l_gamma():
+    """Au Lγ sits on Rb Kα; a gold L-family should not introduce Rb."""
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": _line_energy("Au", 79, "L", "Lα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lβ1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lγ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, summary = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Au" in symbols
+    assert "Rb" not in symbols
+    lg = [
+        p for p in labeled
+        if p.get("element") == "Au" and p.get("line") and "Lγ" in p["line"]
+    ]
+    assert lg, "Au Lγ should be assigned to the ~13.4 keV peak"
+    assert any("skipped Rb" in s for s in summary)
+
+
+def test_auto_id_lead_does_not_call_as_from_l_alpha():
+    """Pb Lα sits on As Kα; Pb Lα+Lβ should not introduce As."""
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": _line_energy("Pb", 82, "L", "Lα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Pb", 82, "L", "Lβ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, summary = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Pb" in symbols
+    assert "As" not in symbols
+    assert any("skipped As" in s for s in summary)
+
+
+def test_auto_id_rb_still_found_from_ka_kb():
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": _line_energy("Rb", 37, "K", "Kα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Rb", 37, "K", "Kβ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Rb" in symbols
+    assert "Au" not in symbols
+
+
+def test_auto_id_gold_and_rb_when_rb_kb_present():
+    """Independent Rb Kβ is enough to keep Rb even when Kα overlaps Au Lγ."""
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": _line_energy("Au", 79, "L", "Lα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lβ1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lγ1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Rb", 37, "K", "Kβ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Au" in symbols
+    assert "Rb" in symbols
+    lg = next(p for p in labeled if p.get("line") and "Lγ" in (p.get("line") or ""))
+    assert lg["element"] == "Au"
+    rb_ka = [
+        p for p in labeled
+        if p.get("element") == "Rb" and (p.get("line") or "").startswith("Kα")
+    ]
+    assert not rb_ka, "Do not double-seed Rb Kα on top of Au Lγ"
+
+
+def test_apply_selected_elements_does_not_double_seed_overlap():
+    import numpy as np
+    from core.fitting import SpectrumFitter
+
+    energy = np.linspace(0.5, 20.0, 2000)
+    fitter = SpectrumFitter()
+    peaks = [
+        {"energy": _line_energy("Au", 79, "L", "Lα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lβ1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lγ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    elements = [{"symbol": "Rb", "z": 37}, {"symbol": "Au", "z": 79}]
+    out = fitter.apply_selected_elements_to_positions(
+        peaks, energy, elements, match_tol_kev=0.08
+    )
+    sample = [p for p in out if not p.get("is_tube_line")]
+    at_13 = [
+        p for p in sample
+        if abs(float(p["energy"]) - _line_energy("Au", 79, "L", "Lγ1")) < 0.08
+    ]
+    assert len(at_13) == 1
+    assert at_13[0]["element"] == "Au"
+    assert "Lγ" in at_13[0]["line"]
+
+
+def test_auto_id_gold_includes_full_l_family():
+    """Once Au L is identified, Lβ3/Lβ4/Lγ2/Lγ3 are seeded for fitting."""
+    from core.smart_peak_id import auto_id_peak_positions
+
+    peaks = [
+        {"energy": _line_energy("Au", 79, "L", "Lα1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lβ1"), "element": None, "line": None, "is_tube_line": False},
+        {"energy": _line_energy("Au", 79, "L", "Lγ1"), "element": None, "line": None, "is_tube_line": False},
+    ]
+    labeled, symbols, _ = auto_id_peak_positions(peaks, excitation_kv=50.0)
+    assert "Au" in symbols
+    names = {
+        p.get("line") for p in labeled
+        if p.get("element") == "Au" and not p.get("is_tube_line")
+    }
+    for required in ("Lα1", "Lβ1", "Lβ3", "Lβ4", "Lγ1", "Ll", "Lη", "Lγ4", "Lβ9"):
+        assert required in names, f"missing Au {required} (have {sorted(names)})"
+
+
+def test_heavy_elements_have_isolated_l_companions():
+    """Ll / Lη / Lγ4 sit away from the main Lα/Lβ envelope for L-line metals."""
+    from core.xray_data import get_element_lines
+    from core.advanced_peak_fitting import get_element_z
+
+    for symbol in ("W", "Pt", "Au", "Hg", "Pb", "Bi"):
+        z = get_element_z(symbol)
+        names = {l["name"] for l in get_element_lines(symbol, z)["L"]}
+        for required in ("Ll", "Lη"):
+            assert required in names, f"{symbol} missing {required}"
+        assert "Lγ4" in names or "Lβ9" in names, f"{symbol} missing Lγ4/Lβ9 ({sorted(names)})"
+
+
+def test_build_peak_positions_gold_includes_full_l_family():
+    import numpy as np
+    from core.fitting import SpectrumFitter
+
+    energy = np.linspace(0.5, 20.0, 4000)
+    fitter = SpectrumFitter()
+    positions = fitter.build_peak_positions(
+        energy,
+        counts_bg_subtracted=None,
+        elements=[{"symbol": "Au", "z": 79}],
+        auto_find_peaks=False,
+        include_tube_lines=False,
+        include_compton=False,
+        excitation_kv=50.0,
+    )
+    names = {p.get("line") for p in positions if p.get("element") == "Au"}
+    for required in ("Lα1", "Lβ1", "Lβ3", "Lβ4", "Lγ1", "Ll", "Lη", "Lγ4", "Lβ9", "Mα1", "Mβ", "Mγ"):
+        assert required in names, f"missing Au {required} (have {sorted(names)})"
+    assert "Kα1" not in names  # ~69 keV, outside this spectrum
+
+
 def test_batch_processor_in_memory_spectrum(io_handler):
     from core.batch_processing import BatchProcessor, BatchProcessingConfig
 

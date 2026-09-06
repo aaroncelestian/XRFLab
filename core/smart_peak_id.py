@@ -136,13 +136,16 @@ def _is_minor_line(line_name: str, diagnostic_name: Optional[str]) -> bool:
 
 
 def _primary_lines(line_map: Dict[str, float]) -> List[Tuple[str, float]]:
-    """Preferred ID lines in priority order."""
+    """Preferred ID / assignment lines in priority order."""
     preferred = [
         'Kα1', 'Kα', 'Kα2',
         'Lα1', 'Lα',
         'Mα1', 'Mα',
-        'Kβ1', 'Kβ',
-        'Lβ1', 'Lβ',
+        'Kβ1', 'Kβ', 'Kβ3', 'Kβ2',
+        'Lβ1', 'Lβ', 'Lβ3', 'Lβ4', 'Lβ2', 'Lβ5', 'Lβ9',
+        'Lγ1', 'Lγ', 'Lγ3', 'Lγ2', 'Lγ4', 'Lγ6',
+        'Ll', 'Lη',
+        'Mβ', 'Mγ',
     ]
     found = []
     for name in preferred:
@@ -151,12 +154,42 @@ def _primary_lines(line_map: Dict[str, float]) -> List[Tuple[str, float]]:
     return found
 
 
-# Major lines shown/seeded once an element is identified (even if undetected)
+# Catalog lines seeded once a series is identified (and used by fitting).
+# Tiny companions (e.g. Au Mα2, 4 eV from Mα1) are dropped by MIN_SEED_REL.
 _MAJOR_LINE_NAMES = {
-    'K': {'Kα1', 'Kα2', 'Kα', 'Kβ1', 'Kβ'},
-    'L': {'Lα1', 'Lα2', 'Lα', 'Lβ1', 'Lβ2', 'Lβ'},
-    'M': {'Mα1', 'Mα2', 'Mα'},
+    'K': {'Kα1', 'Kα2', 'Kα', 'Kβ1', 'Kβ2', 'Kβ3', 'Kβ'},
+    'L': {
+        'Lα1', 'Lα2', 'Lα',
+        'Lβ1', 'Lβ2', 'Lβ3', 'Lβ4', 'Lβ5', 'Lβ9', 'Lβ',
+        'Lγ1', 'Lγ2', 'Lγ3', 'Lγ4', 'Lγ6', 'Lγ',
+        'Ll', 'Lη',
+    },
+    'M': {'Mα1', 'Mα2', 'Mα', 'Mβ', 'Mγ'},
 }
+
+# Skip seeds weaker than this (element-wide relative intensity) unless α1
+MIN_SEED_RELATIVE_INTENSITY = 0.02
+
+MAJOR_LINE_NAMES = _MAJOR_LINE_NAMES
+
+
+def _series_of(line_name: Optional[str]) -> str:
+    if not line_name:
+        return ''
+    if line_name.startswith('K'):
+        return 'K'
+    if line_name.startswith('L'):
+        return 'L'
+    if line_name.startswith('M'):
+        return 'M'
+    return ''
+
+
+def _is_series_alpha(line_name: Optional[str]) -> bool:
+    """True for Kα / Lα / Mα (the series diagnostic)."""
+    if not line_name:
+        return False
+    return 'α' in line_name or str(line_name).lower().startswith(('ka', 'la', 'ma'))
 
 
 def _line_relative_intensities(symbol: str, z: int) -> Dict[str, float]:
@@ -170,6 +203,11 @@ def _line_relative_intensities(symbol: str, z: int) -> Dict[str, float]:
                 continue
             out[str(name)] = float(line.get('relative_intensity', 1.0) or 1.0)
     return out
+
+
+series_of_line = _series_of
+is_series_alpha = _is_series_alpha
+line_relative_intensities = _line_relative_intensities
 
 
 def _major_lines_in_range(
@@ -191,6 +229,8 @@ def _major_lines_in_range(
             if energy < e_min_kev or energy > e_max_kev:
                 continue
             rel = float(line.get('relative_intensity', 1.0) or 1.0)
+            if rel < MIN_SEED_RELATIVE_INTENSITY and not _is_series_alpha(str(name)):
+                continue
             found.append((str(name), energy, rel))
     return found
 
@@ -215,17 +255,6 @@ def add_missing_element_lines(
     if not identified:
         return out, n_added
 
-    def _series_of(line_name: str) -> str:
-        if not line_name:
-            return ''
-        if line_name.startswith('K'):
-            return 'K'
-        if line_name.startswith('L'):
-            return 'L'
-        if line_name.startswith('M'):
-            return 'M'
-        return ''
-
     for symbol in identified:
         z = symbol_z.get(symbol)
         if not z:
@@ -243,18 +272,27 @@ def add_missing_element_lines(
         ):
             if _series_of(line_name) not in observed_series:
                 continue
-            near = False
+            claimed = False
+            occupied_other = False
             for pos in out:
                 if pos.get('is_tube_line'):
                     continue
-                if abs(float(pos.get('energy', 0.0)) - line_e) <= energy_tol_kev:
-                    near = True
-                    if pos.get('element') == symbol and not pos.get('line'):
-                        pos['line'] = line_name
-                    if pos.get('element') == symbol and pos.get('line') == line_name:
-                        pos.setdefault('relative_intensity', rel)
+                if abs(float(pos.get('energy', 0.0)) - line_e) > energy_tol_kev:
+                    continue
+                owner = pos.get('element')
+                if owner == symbol and pos.get('line') == line_name:
+                    pos.setdefault('relative_intensity', rel)
+                    claimed = True
                     break
-            if near:
+                if owner == symbol and not pos.get('line'):
+                    pos['line'] = line_name
+                    pos.setdefault('relative_intensity', rel)
+                    claimed = True
+                    break
+                if owner and owner != symbol:
+                    occupied_other = True
+                    break
+            if claimed or occupied_other:
                 continue
             already = any(
                 p.get('element') == symbol and p.get('line') == line_name
@@ -291,6 +329,10 @@ def _confirming_partners(line_name: str, line_map: Dict[str, float]) -> List[Tup
                 partners.append((name, line_map[name]))
     elif line_name.startswith('Lβ'):
         for name in ('Lα1', 'Lα', 'Lγ1'):
+            if name in line_map:
+                partners.append((name, line_map[name]))
+    elif line_name.startswith('Lγ'):
+        for name in ('Lα1', 'Lα', 'Lβ1', 'Lβ'):
             if name in line_map:
                 partners.append((name, line_map[name]))
     elif line_name.startswith('M'):
@@ -722,6 +764,79 @@ def candidates_at_energy(
     return hits[: max(1, int(max_results))]
 
 
+def _score_element_presence(
+    symbol: str,
+    z: int,
+    sample_indices: Sequence[int],
+    energies: Sequence[float],
+    energy_tol_kev: float,
+    e_min_kev: float,
+    e_max_kev: float,
+    line_map: Dict[str, float],
+    rel_map: Dict[str, float],
+) -> Tuple[float, Optional[int], List[Tuple[int, str, float]]]:
+    """
+    Score how well an element's line family explains measured sample peaks.
+
+    Returns (score, diagnostic_peak_index, hits) where hits are
+    (position_index, line_name, |ΔE|). The diagnostic line must match a peak
+    or the score is 0 (element is not introduced).
+    """
+    diagnostic = _diagnostic_line(line_map, e_max_kev=e_max_kev, e_min_kev=e_min_kev)
+    if not diagnostic:
+        return 0.0, None, []
+    diag_name, diag_e = diagnostic
+
+    diag_hit: Optional[Tuple[int, float]] = None
+    for idx in sample_indices:
+        dist = abs(float(energies[idx]) - diag_e)
+        if dist <= energy_tol_kev and (diag_hit is None or dist < diag_hit[1]):
+            diag_hit = (idx, dist)
+    if diag_hit is None:
+        return 0.0, None, []
+
+    score = 1.0 + max(0.0, 1.0 - diag_hit[1] / energy_tol_kev)
+    hits: List[Tuple[int, str, float]] = [(diag_hit[0], diag_name, diag_hit[1])]
+    used = {diag_hit[0]}
+
+    for partner_name, partner_e in _confirming_partners(diag_name, line_map):
+        if partner_e < e_min_kev or partner_e > e_max_kev:
+            continue
+        best: Optional[Tuple[int, float]] = None
+        for idx in sample_indices:
+            if idx in used:
+                continue
+            dist = abs(float(energies[idx]) - partner_e)
+            if dist <= energy_tol_kev and (best is None or dist < best[1]):
+                best = (idx, dist)
+        if best is None:
+            continue
+        score += 1.5 + max(0.0, 0.5 - best[1] / energy_tol_kev)
+        hits.append((best[0], partner_name, best[1]))
+        used.add(best[0])
+
+    for line_name, line_e in _primary_lines(line_map):
+        if any(h[1] == line_name for h in hits):
+            continue
+        if line_e < e_min_kev or line_e > e_max_kev:
+            continue
+        best = None
+        for idx in sample_indices:
+            if idx in used:
+                continue
+            dist = abs(float(energies[idx]) - line_e)
+            if dist <= energy_tol_kev and (best is None or dist < best[1]):
+                best = (idx, dist)
+        if best is None:
+            continue
+        rel = float(rel_map.get(line_name, 0.2) or 0.2)
+        score += 0.35 * (0.4 + min(1.0, rel))
+        hits.append((best[0], line_name, best[1]))
+        used.add(best[0])
+
+    return score, diag_hit[0], hits
+
+
 def auto_id_peak_positions(
     peak_positions: Sequence[dict],
     candidate_elements: Optional[Sequence[Dict]] = None,
@@ -742,9 +857,15 @@ def auto_id_peak_positions(
     it can be excited, otherwise Lα, else Mα). Minor lines such as Pb Mα
     are labeled only after that diagnostic match — never used to introduce Pb.
 
+    Multi-line elements are accepted first and claim all of their expected
+    lines (including Lγ). A second element is not introduced from a peak that
+    is already explained by a stronger family's companion line — e.g. Au Lγ
+    will not call Rb from Rb Kα unless Rb Kβ is also present as an independent
+    peak. Same pattern for Pb Lα vs As Kα, Hg Lβ vs Br Kα, etc.
+
     After an element is identified, its other major lines (e.g. Fe Kβ when
-    Fe Kα was found) are added at theoretical energies even if they were
-    below the peak-find threshold.
+    Fe Kα was found, Au Lγ when Au Lα was found) are added at theoretical
+    energies even if they were below the peak-find threshold.
 
     Args:
         peak_positions: Peak seed dicts (energy, element, line, is_tube_line, ...)
@@ -773,7 +894,6 @@ def auto_id_peak_positions(
     e_max_obs = e_max_kev if energy_max is None else min(e_max_kev, float(energy_max))
 
     # Diagnostic line per element, plus full primary-line catalog
-    diag_catalog: List[Tuple[str, int, str, float]] = []
     line_catalog: Dict[str, List[Tuple[int, str, float]]] = {}
     line_maps: Dict[str, Dict[str, float]] = {}
     symbol_z: Dict[str, int] = {}
@@ -785,11 +905,6 @@ def auto_id_peak_positions(
         line_map = _line_lookup(symbol, z)
         line_maps[symbol] = line_map
         rel_by_symbol[symbol] = _line_relative_intensities(symbol, z)
-        diagnostic = _diagnostic_line(
-            line_map, e_max_kev=e_max_kev, e_min_kev=e_min_obs
-        )
-        if diagnostic:
-            diag_catalog.append((symbol, z, diagnostic[0], float(diagnostic[1])))
         line_catalog[symbol] = [
             (z, name, float(energy))
             for name, energy in _primary_lines(line_map)
@@ -799,45 +914,68 @@ def auto_id_peak_positions(
         dict(p) for p in (peak_positions or [])
         if float(p.get('energy', 0.0)) >= PeakFitter.MIN_PEAK_ENERGY_KEV
     ]
-    all_energies = [float(p.get('energy', 0.0)) for p in positions]
+    energies = [float(p.get('energy', 0.0)) for p in positions]
+    sample_indices = [
+        i for i, p in enumerate(positions) if not p.get('is_tube_line')
+    ]
 
-    def _partners_ok(symbol: str, line_name: str) -> bool:
-        if not require_confirming_line:
-            return True
-        partners = _confirming_partners(line_name, line_maps.get(symbol, {}))
-        return any(
-            any(abs(ae - pe) <= energy_tol_kev for ae in all_energies)
-            for _, pe in partners
-        )
-
-    # Pass 1: which elements have their diagnostic line on a measured peak?
-    present: set = set()
-    for pos in positions:
-        if pos.get('is_tube_line'):
-            continue
+    prelabeled: set = set()
+    claimed: Dict[int, Tuple[str, str, float]] = {}
+    for i in sample_indices:
+        pos = positions[i]
         if pos.get('element') and pos.get('line'):
-            present.add(pos['element'])
-            continue
-        e_peak = float(pos.get('energy', 0.0))
-        best = None
-        for symbol, z, line_name, line_e in diag_catalog:
-            dist = abs(e_peak - line_e)
-            if dist > energy_tol_kev:
-                continue
-            if best is None or dist < best[0]:
-                best = (dist, symbol, line_name)
-        if best is None:
-            continue
-        _, symbol, line_name = best
-        if _partners_ok(symbol, line_name):
-            present.add(symbol)
+            prelabeled.add(pos['element'])
+            claimed[i] = (pos['element'], pos['line'], 0.0)
 
-    # Pass 2: assign each unlabeled peak to the nearest line of a present element
+    scored: List[Tuple[float, str, int, Optional[int], List[Tuple[int, str, float]]]] = []
+    for elem in candidates:
+        symbol = elem['symbol']
+        z = int(elem['z'])
+        if symbol in prelabeled:
+            continue
+        score, diag_idx, hits = _score_element_presence(
+            symbol, z, sample_indices, energies, energy_tol_kev,
+            e_min_obs, e_max_obs, line_maps.get(symbol, {}),
+            rel_by_symbol.get(symbol, {}),
+        )
+        if score <= 0 or diag_idx is None:
+            continue
+        if require_confirming_line and len(hits) < 2:
+            continue
+        scored.append((score, symbol, z, diag_idx, hits))
+
+    scored.sort(key=lambda t: (-t[0], t[1]))
+
+    present: List[str] = list(prelabeled)
+    skipped: List[str] = []
+
+    for score, symbol, z, diag_idx, hits in scored:
+        independent = [
+            h for h in hits
+            if h[0] != diag_idx and h[0] not in claimed
+        ]
+        if diag_idx in claimed:
+            owner, owner_line, _ = claimed[diag_idx]
+            if owner == symbol:
+                pass
+            elif not independent:
+                skipped.append(
+                    f"  skipped {symbol}: {hits[0][1]} overlaps "
+                    f"{owner} {owner_line} (no independent confirming line)"
+                )
+                continue
+
+        if symbol not in present:
+            present.append(symbol)
+        for peak_idx, line_name, dist in hits:
+            if peak_idx not in claimed:
+                claimed[peak_idx] = (symbol, line_name, dist)
+
     identified: List[str] = []
     summary: List[str] = []
     n_labeled = 0
 
-    for pos in positions:
+    for i, pos in enumerate(positions):
         if pos.get('is_tube_line'):
             continue
         if pos.get('element') and pos.get('line'):
@@ -848,20 +986,24 @@ def auto_id_peak_positions(
                 pos.setdefault('relative_intensity', rel)
             continue
 
-        e_peak = float(pos.get('energy', 0.0))
-        best = None  # (dist, symbol, z, line_name)
-        for symbol in present:
-            for z, line_name, line_e in line_catalog.get(symbol, []):
-                dist = abs(e_peak - line_e)
-                if dist > energy_tol_kev:
-                    continue
-                if best is None or dist < best[0]:
-                    best = (dist, symbol, z, line_name)
+        hit = claimed.get(i)
+        if hit is None:
+            e_peak = float(pos.get('energy', 0.0))
+            best = None
+            for symbol in present:
+                for _z, line_name, line_e in line_catalog.get(symbol, []):
+                    dist = abs(e_peak - line_e)
+                    if dist > energy_tol_kev:
+                        continue
+                    if best is None or dist < best[0]:
+                        best = (dist, symbol, line_name)
+            if best is None:
+                continue
+            dist, symbol, line_name = best
+        else:
+            symbol, line_name, dist = hit
+            e_peak = float(pos.get('energy', 0.0))
 
-        if best is None:
-            continue
-
-        dist, symbol, z, line_name = best
         pos['element'] = symbol
         pos['line'] = line_name
         rel = rel_by_symbol.get(symbol, {}).get(line_name)
@@ -887,6 +1029,7 @@ def auto_id_peak_positions(
         summary.append(
             f"  Added {n_expected} expected line(s) below detection threshold"
         )
+    summary.extend(skipped)
 
     header = [
         f"Auto-ID: labeled {n_labeled} peak(s); "

@@ -5,10 +5,10 @@ Interactive periodic table widget for element selection
 from PySide6.QtWidgets import (
     QWidget, QGridLayout, QPushButton, QLabel, QVBoxLayout,
     QHBoxLayout, QLayout, QScrollArea, QFrame, QMenu, QMessageBox,
-    QSizePolicy,
+    QSizePolicy, QInputDialog,
 )
-from PySide6.QtCore import Qt, Signal, QPoint, QRect, QSize
-from PySide6.QtGui import QFont, QColor, QContextMenuEvent
+from PySide6.QtCore import Qt, Signal, QPoint, QRect, QSize, QSettings
+from PySide6.QtGui import QFont, QColor, QContextMenuEvent, QCursor
 
 
 class _FlowLayout(QLayout):
@@ -204,6 +204,23 @@ class ElementButton(QPushButton):
         return QColor.fromHsv(h, min(255, s + 20), max(0, v - 20), a).name()
 
 
+class _CustomSetButton(QPushButton):
+    """Left-click applies a saved element set; right-click edits it."""
+
+    apply_requested = Signal(int)
+    edit_requested = Signal(int)
+
+    def __init__(self, index: int, label: str, parent=None):
+        super().__init__(label, parent)
+        self.set_index = int(index)
+        self.setMaximumHeight(24)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.clicked.connect(lambda: self.apply_requested.emit(self.set_index))
+        self.customContextMenuRequested.connect(
+            lambda _pos: self.edit_requested.emit(self.set_index)
+        )
+
+
 class PeriodicTableWidget(QWidget):
     """Interactive periodic table for element selection"""
     
@@ -216,9 +233,15 @@ class PeriodicTableWidget(QWidget):
         
         self.element_buttons = {}
         self.selected_elements = []
-        
+        self._custom_sets = [
+            {'name': 'Set 1', 'symbols': []},
+            {'name': 'Set 2', 'symbols': []},
+        ]
+
         self._setup_ui()
         self._create_periodic_table()
+        self._load_custom_sets()
+        self._refresh_custom_set_buttons()
     
     def _setup_ui(self):
         """Setup the widget layout"""
@@ -260,23 +283,19 @@ class PeriodicTableWidget(QWidget):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(3)
 
-        self.select_all_btn = QPushButton("All")
-        self.select_all_btn.setToolTip("Select all elements")
-        self.select_all_btn.setMaximumHeight(24)
-        self.select_all_btn.clicked.connect(self._select_all)
-        button_layout.addWidget(self.select_all_btn)
-
         self.clear_all_btn = QPushButton("Clear")
         self.clear_all_btn.setToolTip("Clear all selections")
         self.clear_all_btn.setMaximumHeight(24)
         self.clear_all_btn.clicked.connect(self._clear_all)
         button_layout.addWidget(self.clear_all_btn)
 
-        self.select_common_btn = QPushButton("Common")
-        self.select_common_btn.setToolTip("Select commonly analyzed elements in XRF")
-        self.select_common_btn.setMaximumHeight(24)
-        self.select_common_btn.clicked.connect(self._select_common_xrf)
-        button_layout.addWidget(self.select_common_btn)
+        self._custom_set_buttons = []
+        for i in range(2):
+            btn = _CustomSetButton(i, self._custom_sets[i]['name'])
+            btn.apply_requested.connect(self._apply_custom_set)
+            btn.edit_requested.connect(self._edit_custom_set)
+            button_layout.addWidget(btn)
+            self._custom_set_buttons.append(btn)
 
         layout.addLayout(button_layout)
     
@@ -490,29 +509,125 @@ class PeriodicTableWidget(QWidget):
         
         self.elements_changed.emit(self.selected_elements)
     
-    def _select_all(self):
-        """Select all elements"""
-        for btn in self.element_buttons.values():
-            btn.setChecked(True)
-    
     def _clear_all(self):
         """Clear all selections"""
         for btn in self.element_buttons.values():
             btn.setChecked(False)
-    
-    def _select_common_xrf(self):
-        """Select commonly analyzed elements in XRF"""
-        from core.smart_peak_id import COMMON_XRF_SYMBOLS
 
-        common_elements = COMMON_XRF_SYMBOLS
-        
-        # Clear all first
-        self._clear_all()
-        
-        # Select common elements
-        for symbol in common_elements:
-            if symbol in self.element_buttons:
-                self.element_buttons[symbol].setChecked(True)
+    def _current_symbols(self):
+        return [
+            e['symbol'] for e in (self.selected_elements or [])
+            if e.get('symbol')
+        ]
+
+    def _apply_custom_set(self, index: int):
+        """Left-click: select the saved elements for this custom set."""
+        if index < 0 or index >= len(self._custom_sets):
+            return
+        entry = self._custom_sets[index]
+        symbols = list(entry.get('symbols') or [])
+        if not symbols:
+            QMessageBox.information(
+                self,
+                entry.get('name') or f'Set {index + 1}',
+                "This set is empty.\n\n"
+                "Select elements on the table, then right-click this button\n"
+                "and choose “Save current selection”.",
+            )
+            return
+        self.set_selected_elements(symbols)
+
+    def _edit_custom_set(self, index: int):
+        """Right-click: save / rename / clear this custom set."""
+        if index < 0 or index >= len(self._custom_sets):
+            return
+        entry = self._custom_sets[index]
+        name = entry.get('name') or f'Set {index + 1}'
+        symbols = list(entry.get('symbols') or [])
+        current = self._current_symbols()
+
+        menu = QMenu(self)
+        save_action = menu.addAction(
+            f"Save current selection ({len(current)})"
+            if current else "Save current selection"
+        )
+        save_action.setEnabled(bool(current))
+        rename_action = menu.addAction("Rename…")
+        clear_action = menu.addAction("Clear this set")
+        clear_action.setEnabled(bool(symbols))
+        chosen = menu.exec(QCursor.pos())
+        if chosen is save_action:
+            entry['symbols'] = current
+            self._save_custom_sets()
+            self._refresh_custom_set_buttons()
+        elif chosen is rename_action:
+            new_name, ok = QInputDialog.getText(
+                self, "Rename element set", "Name:", text=name
+            )
+            if ok:
+                new_name = str(new_name).strip()
+                if new_name:
+                    entry['name'] = new_name
+                    self._save_custom_sets()
+                    self._refresh_custom_set_buttons()
+        elif chosen is clear_action:
+            entry['symbols'] = []
+            self._save_custom_sets()
+            self._refresh_custom_set_buttons()
+
+    def _refresh_custom_set_buttons(self):
+        for i, btn in enumerate(self._custom_set_buttons):
+            entry = self._custom_sets[i]
+            name = entry.get('name') or f'Set {i + 1}'
+            symbols = list(entry.get('symbols') or [])
+            btn.setText(name)
+            if symbols:
+                listed = ', '.join(symbols)
+                btn.setToolTip(
+                    f"Left-click: select {len(symbols)} element"
+                    f"{'s' if len(symbols) != 1 else ''}\n"
+                    f"{listed}\n\n"
+                    "Right-click: save current table selection, rename, or clear"
+                )
+            else:
+                btn.setToolTip(
+                    "Empty set.\n"
+                    "Select elements on the table, then right-click and "
+                    "choose “Save current selection”.\n"
+                    "Left-click applies the saved set."
+                )
+
+    def _load_custom_sets(self):
+        settings = QSettings()
+        settings.beginGroup('periodic_table/custom_sets')
+        for i in range(2):
+            settings.beginGroup(str(i))
+            name = settings.value('name', None)
+            symbols = settings.value('symbols', None)
+            settings.endGroup()
+            if name:
+                self._custom_sets[i]['name'] = str(name)
+            if symbols is None:
+                continue
+            if isinstance(symbols, str):
+                symbols = [s.strip() for s in symbols.split(',') if s.strip()]
+            else:
+                symbols = [str(s) for s in (symbols or []) if s]
+            self._custom_sets[i]['symbols'] = [
+                s for s in symbols if s in self.element_buttons
+            ]
+        settings.endGroup()
+
+    def _save_custom_sets(self):
+        settings = QSettings()
+        settings.beginGroup('periodic_table/custom_sets')
+        settings.remove('')
+        for i, entry in enumerate(self._custom_sets):
+            settings.beginGroup(str(i))
+            settings.setValue('name', entry.get('name') or f'Set {i + 1}')
+            settings.setValue('symbols', list(entry.get('symbols') or []))
+            settings.endGroup()
+        settings.endGroup()
     
     def get_selected_elements(self):
         """Return list of selected elements"""

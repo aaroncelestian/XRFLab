@@ -71,6 +71,7 @@ class SpectrumWidget(QWidget):
         self._pick_marker = None
         self._overlays = []
         self._overlay_color_i = 0
+        self._overlay_plot_items = []
         
         self._setup_ui()
         self._configure_plot()
@@ -251,11 +252,40 @@ class SpectrumWidget(QWidget):
             name=self._spectrum_overlay_name(self.spectrum_data, "Pinned"),
         )
 
-    def clear_overlays(self):
+    def clear_overlays(self, *_args):
+        self._remove_overlay_plot_items()
         self._overlays = []
         self._overlay_color_i = 0
         self._refresh_overlay_controls()
-        self._update_plot()
+        self._update_plot(autorange_y=True)
+
+    def _remove_overlay_plot_items(self):
+        """Drop overlay PlotDataItems even if PlotItem.clear() left them behind."""
+        plot_item = self.plot_widget.getPlotItem()
+        items = list(getattr(self, "_overlay_plot_items", []) or [])
+        self._overlay_plot_items = []
+        try:
+            items.extend(plot_item.listDataItems())
+        except Exception:
+            pass
+        seen = set()
+        for item in items:
+            if item is None or id(item) in seen:
+                continue
+            seen.add(id(item))
+            try:
+                plot_item.removeItem(item)
+            except Exception:
+                try:
+                    plot_item.vb.removeItem(item)
+                except Exception:
+                    pass
+        legend = getattr(plot_item, "legend", None)
+        if legend is not None:
+            try:
+                legend.clear()
+            except Exception:
+                pass
 
     def overlay_count(self) -> int:
         return len(self._overlays)
@@ -269,8 +299,25 @@ class SpectrumWidget(QWidget):
         if hasattr(self, "clear_overlays_button"):
             self.clear_overlays_button.setEnabled(n > 0)
 
+    def _normalize_enabled(self) -> bool:
+        box = getattr(self, "normalize_checkbox", None)
+        return bool(box is not None and box.isChecked())
+
     def _on_normalize_toggled(self, _checked=False):
-        self._update_plot()
+        # Y units change (counts ↔ 0–1); keep the energy zoom.
+        self._update_plot(autorange_y=True)
+
+    def _autorange_y_keep_x(self):
+        plot_item = self.plot_widget.getPlotItem()
+        vb = plot_item.getViewBox()
+        x0, x1 = vb.viewRange()[0]
+        vb.enableAutoRange(axis="y", enable=True)
+        try:
+            vb.updateAutoRange()
+        except Exception:
+            plot_item.autoRange()
+        vb.enableAutoRange(axis="y", enable=False)
+        vb.setXRange(x0, x1, padding=0)
     
     def set_fitted_spectrum(self, fitted_spectrum):
         """Set fitted spectrum data"""
@@ -509,7 +556,7 @@ class SpectrumWidget(QWidget):
                 y = self._intensity_stick_scale() * 1.02
                 text.setPos(energy, y)
                 text.setZValue(-10)
-                plot_item.addItem(text)
+                plot_item.addItem(text, ignoreBounds=True)
                 self._tube_guide_items.append(text)
     
     def _assign_label_positions(self):
@@ -526,12 +573,13 @@ class SpectrumWidget(QWidget):
                 spec['position'] = positions[i % len(positions)]
     
     def _intensity_stick_scale(self):
-        """Counts scale for relative-intensity sticks (fraction of spectrum max)."""
-        if self.spectrum_data is not None and len(self.spectrum_data.counts):
+        """Y scale for relative-intensity sticks, matching the plotted spectra."""
+        if self._normalize_enabled():
+            return 0.85
+        if self.spectrum_data is not None and len(getattr(self.spectrum_data, "counts", [])):
             peak = float(np.nanmax(self.spectrum_data.counts))
             if peak > 0:
                 return 0.85 * peak
-        # No spectrum loaded — arbitrary display units
         return 1000.0
 
     def _draw_peak_marker(self, spec):
@@ -700,17 +748,29 @@ class SpectrumWidget(QWidget):
         plot_item = self.plot_widget.getPlotItem()
         plot_item.showGrid(x=enabled, y=enabled, alpha=0.3)
     
-    def _update_plot(self):
+    def _update_plot(self, autorange_y=False):
         """Update the plot with current data"""
         plot_item = self.plot_widget.getPlotItem()
-        normalize = bool(
-            getattr(self, "normalize_checkbox", None)
-            and self.normalize_checkbox.isChecked()
-        )
+        normalize = self._normalize_enabled()
         plot_item.setLabel("left", "Normalized" if normalize else "Counts", units="")
         saved_specs = list(self._peak_marker_specs)
         saved_tube = list(self._tube_guide_specs)
         tube_vis = self._tube_guides_visible
+
+        # Drop leftover PlotDataItems. PlotItem.clear() does not always remove
+        # curves that were registered with the legend.
+        self._overlay_plot_items = []
+        try:
+            for item in list(plot_item.listDataItems()):
+                plot_item.removeItem(item)
+        except Exception:
+            pass
+        if plot_item.legend is not None:
+            try:
+                plot_item.legend.clear()
+            except Exception:
+                pass
+
         plot_item.clear()
         self.peak_markers.clear()
         self._tube_guide_items.clear()
@@ -730,32 +790,28 @@ class SpectrumWidget(QWidget):
 
         overlays = list(self._overlays or [])
         if self.spectrum_data is None and not overlays:
+            if autorange_y:
+                self._autorange_y_keep_x()
             return
 
-        primary_peak = 1.0
-        if self.spectrum_data is not None and np.size(self.spectrum_data.counts):
-            primary_peak = float(np.nanmax(self.spectrum_data.counts)) or 1.0
-
-        def _y(counts, peak=None):
+        def _y(counts):
             y = np.asarray(counts, dtype=float)
-            if not normalize:
-                return y
-            scale = float(peak if peak is not None else (np.max(y) if y.size else 1.0))
-            if scale <= 0:
-                return y
-            return y / scale
+            return _normalize_counts(y) if normalize else y
 
+        self._overlay_plot_items = []
         for overlay in overlays:
-            plot_item.plot(
+            item = plot_item.plot(
                 overlay["energy"],
                 _y(overlay["counts"]),
                 pen=pg.mkPen(overlay["color"], width=1.5),
                 name=overlay["name"],
             )
+            self._overlay_plot_items.append(item)
 
         if self.spectrum_data is None:
             self.residuals_widget.getPlotItem().clear()
-            self._redraw_peak_markers()
+            if autorange_y:
+                self._autorange_y_keep_x()
             return
 
         primary_name = "Measured"
@@ -765,7 +821,7 @@ class SpectrumWidget(QWidget):
 
         plot_item.plot(
             self.spectrum_data.energy,
-            _y(self.spectrum_data.counts, primary_peak),
+            _y(self.spectrum_data.counts),
             pen=pg.mkPen("b", width=2),
             name=primary_name,
         )
@@ -773,7 +829,7 @@ class SpectrumWidget(QWidget):
         if self.background_data is not None and not overlays:
             plot_item.plot(
                 self.spectrum_data.energy,
-                _y(self.background_data, primary_peak),
+                _y(self.background_data),
                 pen=pg.mkPen("g", width=1, style=Qt.DashLine),
                 name="Background",
             )
@@ -781,7 +837,7 @@ class SpectrumWidget(QWidget):
         if self.fitted_data is not None and not overlays:
             plot_item.plot(
                 self.spectrum_data.energy,
-                _y(self.fitted_data, primary_peak),
+                _y(self.fitted_data),
                 pen=pg.mkPen("r", width=2),
                 name="Fitted",
             )
@@ -789,7 +845,11 @@ class SpectrumWidget(QWidget):
         elif overlays:
             self.residuals_widget.getPlotItem().clear()
 
-        self._redraw_peak_markers()
+        if not overlays:
+            self._redraw_peak_markers()
+
+        if autorange_y:
+            self._autorange_y_keep_x()
 
     def _update_residuals(self):
         """Update residuals plot"""

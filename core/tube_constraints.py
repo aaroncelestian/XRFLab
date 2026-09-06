@@ -183,8 +183,18 @@ def fit_peak_with_amplitude_prior(
     prior = float(amplitude_prior)
     w = float(prior_weight)
 
-    # Prefer locked width + fixed center for tube secondary lines
+    # Gaussian (and Compton fixed_fwhm): lock width to FWHM(E).
+    # Tail-Gaussian / Hypermet: FWHM calibration does not apply — free LS.
     shape = normalize_peak_shape(shape)
+    lock_width = (shape == 'gaussian') or (fixed_fwhm is not None)
+    if not lock_width:
+        return PeakFitter.fit_single_peak(
+            energy, counts, initial_center,
+            shape=shape,
+            known_line=known_line,
+            fix_center=fix_center,
+            fixed_fwhm=fixed_fwhm,
+        )
 
     def residual(params):
         amp = params[0]
@@ -269,6 +279,10 @@ def fit_overlap_doublet(
         a_t0 = float(tube_amplitude_prior)
 
     shape = normalize_peak_shape(shape)
+    # Joint locked-FWHM doublet is Gaussian-only. Other shapes fall back to
+    # sequential free-width fits in the caller (FWHM calibration does not apply).
+    if shape != 'gaussian':
+        return None, None
 
     def model(a_t, a_s):
         return (

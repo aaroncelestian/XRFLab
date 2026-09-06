@@ -34,7 +34,7 @@ class DetectorModel:
         return float(np.sqrt(self.fwhm_0**2 + (2.355**2) * self.epsilon * e))
 
     def apply_fwhm_calibration(self, calibration) -> None:
-        """Attach an FWHMCalibration and lock shapes when present."""
+        """Attach an FWHMCalibration; Gaussian fits lock width to FWHM(E)."""
         self.fwhm_calibration = calibration
         if calibration is None:
             self.use_calibrated_shapes = False

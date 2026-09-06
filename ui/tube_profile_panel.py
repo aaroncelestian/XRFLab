@@ -19,6 +19,10 @@ from core.tube_profile import (
 )
 from utils.io_handler import IOHandler
 
+# Keep the panel, project I/O, and fitting hooks. Flip to True to restore
+# the Calibration tab, Tools menu item, and Analysis status line.
+SHOW_TUBE_PROFILE_CALIBRATION = False
+
 
 class TubeProfilePanel(QWidget):
     """Measure and manage per-kV tube scatter profiles from blank spectra."""

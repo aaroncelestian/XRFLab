@@ -92,6 +92,57 @@ def test_tail_gaussian_area_includes_wide_component():
     assert analytic > gauss_only * 1.2
 
 
+def test_fwhm_calibration_locks_gaussian_only():
+    from core.fwhm_calibration import FWHMCalibration
+
+    energy = np.linspace(5.8, 7.0, 500)
+    true_sigma = 0.040
+    counts = PeakFitter.gaussian(energy, 1200.0, 6.40, true_sigma)
+
+    cal = FWHMCalibration(
+        model_type="linear",
+        parameters={"intercept": 0.30, "slope": 0.0},
+        parameter_errors={"intercept": 0.0, "slope": 0.0},
+        r_squared=0.99,
+        rmse=0.001,
+        aic=0.0,
+        bic=0.0,
+        n_peaks=4,
+        energy_range=(1.0, 20.0),
+        calibration_date="2026-01-01T00:00:00",
+    )
+
+    prev_active = PeakFitter._active
+    prev_use = PeakFitter.USE_CALIBRATED_SHAPES
+    prev_cal = PeakFitter._fwhm_calibration
+    try:
+        PeakFitter._active = None
+        PeakFitter.USE_CALIBRATED_SHAPES = True
+        PeakFitter._fwhm_calibration = cal
+
+        assert PeakFitter.fwhm_cal_locks_width("gaussian")
+        assert not PeakFitter.fwhm_cal_locks_width("tail_gaussian")
+        assert not PeakFitter.fwhm_cal_locks_width("hypermet")
+
+        locked = PeakFitter.fit_single_peak(
+            energy, counts, 6.40, shape="gaussian", known_line=True
+        )
+        assert locked is not None
+        assert abs(locked.fwhm - 0.30) < 0.01
+
+        for shape in ("tail_gaussian", "hypermet"):
+            peak = PeakFitter.fit_single_peak(
+                energy, counts, 6.40, shape=shape, known_line=True
+            )
+            assert peak is not None
+            assert abs(peak.fwhm - 0.30) > 0.05
+            assert abs(peak.fwhm - 2.355 * true_sigma) < 0.05
+    finally:
+        PeakFitter._active = prev_active
+        PeakFitter.USE_CALIBRATED_SHAPES = prev_use
+        PeakFitter._fwhm_calibration = prev_cal
+
+
 def test_fit_tail_gaussian_and_hypermet_on_synthetic():
     energy = np.linspace(5.8, 7.0, 400)
     true = PeakFitter.tail_gaussian(energy, 900.0, 6.40, 0.055, 0.15, 0.16)

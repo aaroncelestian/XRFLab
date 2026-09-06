@@ -69,12 +69,23 @@ def get_element_lines(symbol, z):
             ('Lβ2', xrl.LB2_LINE),
             ('Lβ3', xrl.LB3_LINE),
             ('Lβ4', xrl.LB4_LINE),
+            ('Lβ5', getattr(xrl, 'LB5_LINE', None)),
+            ('Lβ9', getattr(xrl, 'LB9_LINE', None)),
             ('Lγ1', xrl.LG1_LINE),
             ('Lγ2', xrl.LG2_LINE),
             ('Lγ3', xrl.LG3_LINE),
+            ('Lγ4', getattr(xrl, 'LG4_LINE', None)),
+            ('Lγ6', getattr(xrl, 'LG6_LINE', None)),
+            ('Ll', xrl.LL_LINE),  # Lι (L3-M1); Au ~8.49 keV
         ]
+        if hasattr(xrl, 'LE_LINE'):
+            l_lines.append(('Lη', xrl.LE_LINE))  # L2-M1; Au ~10.31 keV
+        elif hasattr(xrl, 'LH_LINE'):
+            l_lines.append(('Lη', xrl.LH_LINE))
         
         for name, line_code in l_lines:
+            if line_code is None:
+                continue
             try:
                 energy = xrl.LineEnergy(z, line_code)
                 if energy > 0:
@@ -136,7 +147,9 @@ def _normalize_series_intensities(lines):
         'Kβ1': 0.17, 'Kβ': 0.17, 'Kβ2': 0.05, 'Kβ3': 0.09,
         'Lα1': 1.00, 'Lα': 1.00, 'Lα2': 0.11,
         'Lβ1': 0.60, 'Lβ': 0.60, 'Lβ2': 0.25, 'Lβ3': 0.10, 'Lβ4': 0.08,
-        'Lγ1': 0.12, 'Lγ2': 0.04, 'Lγ3': 0.03,
+        'Lβ5': 0.03, 'Lβ9': 0.03,
+        'Lγ1': 0.12, 'Lγ2': 0.04, 'Lγ3': 0.03, 'Lγ4': 0.03, 'Lγ6': 0.02,
+        'Ll': 0.05, 'Lη': 0.03,
         'Mα1': 1.00, 'Mα': 1.00, 'Mα2': 0.50, 'Mβ': 0.60, 'Mγ': 0.15,
     }
 

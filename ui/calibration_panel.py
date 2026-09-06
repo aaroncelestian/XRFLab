@@ -563,7 +563,7 @@ class CalibrationPanel(QWidget):
         PeakFitter.FWHM_0 = self.calibration_result.fwhm_0
         PeakFitter.EPSILON = self.calibration_result.epsilon
         PeakFitter.VOIGT_GAMMA_RATIO = self.calibration_result.voigt_gamma_ratio
-        PeakFitter.USE_CALIBRATED_SHAPES = True  # Enable fixed-shape fitting
+        PeakFitter.USE_CALIBRATED_SHAPES = True  # Lock Gaussian widths to FWHM(E)
         
         # Emit signal
         self.calibration_complete.emit(self.calibration_result)
@@ -571,8 +571,9 @@ class CalibrationPanel(QWidget):
         QMessageBox.information(
             self,
             "Applied",
-            "Calibration applied! Peak shapes are now fixed.\n"
-            "Only intensity and position will be refined during fitting."
+            "Calibration applied! Gaussian widths are locked to FWHM(E).\n"
+            "Tail-Gaussian and Hypermet ignore this calibration "
+            "(width and tails stay free)."
         )
     
     def _save_calibration(self):

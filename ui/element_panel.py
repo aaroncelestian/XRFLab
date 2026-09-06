@@ -16,8 +16,11 @@ from core.spectrum import metadata_text, _as_float
 from core.peak_fitting import (
     PEAK_SHAPE_UI_CHOICES,
     PEAK_SHAPE_UI_DEFAULT,
+    normalize_peak_shape,
     peak_shape_ui_label,
 )
+
+_FWHM_STATUS_UNSET = object()
 
 
 class ElementPanel(QWidget):
@@ -38,6 +41,7 @@ class ElementPanel(QWidget):
         self.selected_elements = []
         self._peak_list_data = []  # List of peak dicts shown in the UI
         self._identify_candidates = []
+        self._fwhm_calibration = None
         self._setup_ui()
     
     def _setup_ui(self):
@@ -585,10 +589,10 @@ class ElementPanel(QWidget):
         self.peak_shape_combo.addItems([label for label, _ in PEAK_SHAPE_UI_CHOICES])
         self.peak_shape_combo.setCurrentText(PEAK_SHAPE_UI_DEFAULT)
         self.peak_shape_combo.setToolTip(
-            "Gaussian: detector core only (simple / FWHM calibration).\n"
-            "Tail-Gaussian: default — low-energy tail, stable for EDXRF.\n"
+            "Gaussian: detector core only. FWHM calibration locks widths.\n"
+            "Tail-Gaussian: default — low-energy tail. FWHM calibration is not used.\n"
             "Hypermet: Gaussian + exponential ICC tail + step/shelf "
-            "(Phillips–Marlow)."
+            "(Phillips–Marlow). FWHM calibration is not used."
         )
         shape_layout.addWidget(self.peak_shape_combo)
         layout.addLayout(shape_layout)
@@ -601,6 +605,9 @@ class ElementPanel(QWidget):
             "color: #994400; font-weight: bold; padding: 4px;"
         )
         layout.addWidget(self.fwhm_status_label)
+        self.peak_shape_combo.currentIndexChanged.connect(
+            lambda *_: self.update_fwhm_status()
+        )
 
         self.tube_profile_status_label = QLabel(
             "Tube profile: defaults (measure blanks at 15/30/50 kV)"
@@ -610,6 +617,8 @@ class ElementPanel(QWidget):
             "color: #994400; font-weight: bold; padding: 4px;"
         )
         layout.addWidget(self.tube_profile_status_label)
+        from ui.tube_profile_panel import SHOW_TUBE_PROFILE_CALIBRATION
+        self.tube_profile_status_label.setVisible(SHOW_TUBE_PROFILE_CALIBRATION)
 
         self.escape_peaks_check = QCheckBox("Include Escape Peaks")
         self.escape_peaks_check.setChecked(True)
@@ -1064,49 +1073,68 @@ class ElementPanel(QWidget):
             if idx >= 0:
                 self.sample_type_combo.setCurrentIndex(idx)
     
-    def update_fwhm_status(self, fwhm_calibration=None):
+    def update_fwhm_status(self, fwhm_calibration=_FWHM_STATUS_UNSET):
         """
         Update Fitting-tab FWHM status from an applied calibration (or clear it).
 
-        When calibration is active, Analysis locks peak widths to FWHM(E).
+        Pass a calibration to store it; call with no argument to refresh after
+        the peak-shape model changes. FWHM calibration locks widths for
+        Gaussian only — Tail-Gaussian and Hypermet ignore it.
         """
-        if fwhm_calibration is None:
+        if fwhm_calibration is not _FWHM_STATUS_UNSET:
+            self._fwhm_calibration = fwhm_calibration
+
+        cal = self._fwhm_calibration
+        shape = normalize_peak_shape(self.peak_shape_combo.currentText())
+        warn_style = "color: #994400; font-weight: bold; padding: 4px;"
+        ok_style = "color: #1b7a1b; font-weight: bold; padding: 4px;"
+
+        if cal is None:
             self.fwhm_status_label.setText(
                 "FWHM: no calibration — widths free in LS"
             )
-            self.fwhm_status_label.setStyleSheet(
-                "color: #994400; font-weight: bold; padding: 4px;"
-            )
+            self.fwhm_status_label.setStyleSheet(warn_style)
             return
 
-        if getattr(fwhm_calibration, 'model_type', None) == 'detector':
-            params = getattr(fwhm_calibration, 'parameters', {}) or {}
+        if getattr(cal, 'model_type', None) == 'detector':
+            params = getattr(cal, 'parameters', {}) or {}
             fwhm_0_ev = float(params.get('fwhm_0', 0.0)) * 1000.0
             epsilon = float(params.get('epsilon', 0.0))
-            r2 = getattr(fwhm_calibration, 'r_squared', None)
+            r2 = getattr(cal, 'r_squared', None)
             r2_txt = f"  R²={r2:.4f}" if r2 is not None else ""
-            text = (
-                f"FWHM locked: detector model  "
-                f"FWHM₀={fwhm_0_ev:.1f} eV  ε={epsilon:.4g}{r2_txt}"
+            cal_summary = (
+                f"detector model  FWHM₀={fwhm_0_ev:.1f} eV  "
+                f"ε={epsilon:.4g}{r2_txt}"
             )
         else:
-            model = getattr(fwhm_calibration, 'model_type', 'unknown')
-            r2 = getattr(fwhm_calibration, 'r_squared', None)
+            model = getattr(cal, 'model_type', 'unknown')
+            r2 = getattr(cal, 'r_squared', None)
             r2_txt = f"  R²={r2:.4f}" if r2 is not None else ""
-            text = f"FWHM locked: {model} model{r2_txt}"
+            cal_summary = f"{model} model{r2_txt}"
 
-        # Example width at Fe Kα for intuition
+        fe_txt = ""
         try:
             from core.peak_fitting import PeakFitter
             fe_fwhm_ev = float(PeakFitter.calculate_fwhm(6.403)) * 1000.0
-            text += f"  (≈{fe_fwhm_ev:.0f} eV @ Fe Kα)"
+            fe_txt = f"  (≈{fe_fwhm_ev:.0f} eV @ Fe Kα)"
         except Exception:
             pass
 
-        self.fwhm_status_label.setText(text)
-        self.fwhm_status_label.setStyleSheet(
-            "color: #1b7a1b; font-weight: bold; padding: 4px;"
+        if shape == 'gaussian':
+            self.fwhm_status_label.setText(
+                f"FWHM locked: {cal_summary}{fe_txt}"
+            )
+            self.fwhm_status_label.setStyleSheet(ok_style)
+            return
+
+        shape_label = peak_shape_ui_label(shape)
+        self.fwhm_status_label.setText(
+            f"FWHM calibration is not applied to {shape_label}. "
+            f"Width and tail parameters are free in LS. "
+            f"Switch to Gaussian to lock widths to FWHM(E) "
+            f"({cal_summary}{fe_txt})."
         )
+        self.fwhm_status_label.setStyleSheet(warn_style)
 
     def update_tube_profile_status(self, library=None):
         """Show which per-kV tube profiles are available for Analysis."""
@@ -1265,6 +1293,7 @@ class ElementPanel(QWidget):
             idx = self.peak_shape_combo.findText(label)
             if idx >= 0:
                 self.peak_shape_combo.setCurrentIndex(idx)
+        self.update_fwhm_status()
         self.escape_peaks_check.setChecked(bool(state.get("escape_peaks", True)))
         self.pileup_check.setChecked(bool(state.get("pileup", False)))
         self.tube_lines_check.setChecked(bool(state.get("tube_lines", True)))

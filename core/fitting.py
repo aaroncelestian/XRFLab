@@ -3,7 +3,7 @@ Main fitting engine for XRF spectra
 """
 
 import numpy as np
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from core.background import BackgroundModeler
@@ -14,6 +14,17 @@ from core.xray_data import (
     get_tube_compton_lines,
     compton_seed_diagnostics,
 )
+from core.smart_peak_id import (
+    MAJOR_LINE_NAMES,
+    MIN_SEED_RELATIVE_INTENSITY,
+    is_series_alpha,
+    line_relative_intensities,
+    series_of_line,
+)
+
+# Soft prior for Kβ / Lβ / Lγ vs the series α line (matrix-dependent, so looser
+# than tube-profile priors). Keeps Au Lγ from fitting as a free primary peak.
+SAMPLE_AMPLITUDE_PRIOR_WEIGHT = 0.18
 
 
 @dataclass
@@ -99,6 +110,27 @@ class SpectrumFitter:
         self.peak_fitter.activate()
         self.last_compton_warning = None  # Set by build_peak_positions / fit
 
+    @staticmethod
+    def _copy_peak_position(p: dict) -> dict:
+        """Copy a peak-seed dict, preserving optional fit metadata."""
+        out = {
+            'energy': float(p['energy']),
+            'element': p.get('element'),
+            'line': p.get('line'),
+            'is_tube_line': bool(p.get('is_tube_line', False)),
+        }
+        if p.get('fixed_fwhm') is not None:
+            out['fixed_fwhm'] = float(p['fixed_fwhm'])
+        if p.get('exclusion_half_width_kev') is not None:
+            out['exclusion_half_width_kev'] = float(p['exclusion_half_width_kev'])
+        if p.get('relative_intensity') is not None:
+            out['relative_intensity'] = float(p['relative_intensity'])
+        if p.get('inferred'):
+            out['inferred'] = True
+        if p.get('expected_relative_intensity') is not None:
+            out['expected_relative_intensity'] = float(p['expected_relative_intensity'])
+        return out
+
     def set_tube_profile_library(self, library):
         """Attach per-kV tube profile library for ratio constraints / flags."""
         self.tube_profile_library = library
@@ -176,25 +208,27 @@ class SpectrumFitter:
                 if symbol and z:
                     lines = get_element_lines(symbol, z)
 
-                    major_lines = {
-                        'K': ['Kα1', 'Kα2', 'Kβ1'],
-                        'L': ['Lα1', 'Lα2', 'Lβ1', 'Lβ2'],
-                        'M': ['Mα1', 'Mα2']
-                    }
-
                     for series in ['K', 'L', 'M']:
+                        allowed = MAJOR_LINE_NAMES.get(series, set())
                         for line in lines.get(series, []):
                             line_name = line['name']
-                            line_energy = line['energy']
-
-                            if line_name in major_lines.get(series, []):
-                                if e_lo <= line_energy <= e_hi:
-                                    peak_positions.append({
-                                        'energy': line_energy,
-                                        'element': symbol,
-                                        'line': line_name,
-                                        'is_tube_line': False
-                                    })
+                            line_energy = float(line['energy'])
+                            rel = float(line.get('relative_intensity', 1.0) or 1.0)
+                            if line_name not in allowed:
+                                continue
+                            if (
+                                rel < MIN_SEED_RELATIVE_INTENSITY
+                                and not is_series_alpha(line_name)
+                            ):
+                                continue
+                            if e_lo <= line_energy <= e_hi:
+                                peak_positions.append({
+                                    'energy': line_energy,
+                                    'element': symbol,
+                                    'line': line_name,
+                                    'is_tube_line': False,
+                                    'relative_intensity': rel,
+                                })
 
         if include_tube_lines and tube_element:
             print(f"Including {tube_element} tube lines at {excitation_kv} keV...")
@@ -323,22 +357,14 @@ class SpectrumFitter:
         Re-label peaks from the current Elements-tab selection.
 
         Clears previous sample labels (tube lines kept), then:
-        - labels unknowns near selected-element lines
-        - adds missing theoretical line seeds
+        - labels unknowns near selected-element lines (multi-line elements first)
+        - adds missing theoretical line seeds only when that energy is free
 
         This lets the user uncheck false IDs / check missing ones and refit.
+        Occupied energies are not double-seeded (Au Lγ will not also get Rb Kα).
         """
         positions = [
-            {
-                'energy': float(p['energy']),
-                'element': p.get('element'),
-                'line': p.get('line'),
-                'is_tube_line': bool(p.get('is_tube_line', False)),
-                **({'fixed_fwhm': float(p['fixed_fwhm'])}
-                   if p.get('fixed_fwhm') is not None else {}),
-                **({'exclusion_half_width_kev': float(p['exclusion_half_width_kev'])}
-                   if p.get('exclusion_half_width_kev') is not None else {}),
-            }
+            self._copy_peak_position(p)
             for p in (peak_positions or [])
             if float(p.get('energy', 0.0)) >= PeakFitter.MIN_PEAK_ENERGY_KEV
         ]
@@ -352,6 +378,7 @@ class SpectrumFitter:
                 n_cleared += 1
             pos['element'] = None
             pos['line'] = None
+            pos.pop('inferred', None)
 
         if not elements:
             if n_cleared:
@@ -362,66 +389,103 @@ class SpectrumFitter:
         if not elements:
             return positions
 
-        major_lines = {
-            'K': {'Kα1', 'Kα2', 'Kα', 'Kβ1', 'Kβ3', 'Kβ'},
-            'L': {'Lα1', 'Lα2', 'Lα', 'Lβ1', 'Lβ2', 'Lβ'},
-            'M': {'Mα1', 'Mα2', 'Mα'},
-        }
-
         n_labeled = 0
         n_added = 0
         e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
         e_max = float(energy[-1])
 
+        elem_lines: List[Tuple] = []
         for elem in elements:
             symbol = elem.get('symbol', '')
             z = elem.get('z', 0)
             if not symbol or not z:
                 continue
-
+            catalog = []
             lines = get_element_lines(symbol, z)
             for series in ['K', 'L', 'M']:
+                allowed = MAJOR_LINE_NAMES.get(series, set())
                 for line in lines.get(series, []):
                     line_name = line['name']
                     line_energy = float(line['energy'])
-                    if line_name not in major_lines.get(series, set()):
+                    if line_name not in allowed:
                         continue
                     if not (e_min <= line_energy <= e_max):
                         continue
+                    rel = float(line.get('relative_intensity', 1.0) or 1.0)
+                    if (
+                        rel < MIN_SEED_RELATIVE_INTENSITY
+                        and not is_series_alpha(line_name)
+                    ):
+                        continue
+                    catalog.append((line_name, line_energy, rel))
+            if catalog:
+                elem_lines.append((symbol, int(z), catalog))
 
-                    # Closest existing peak within tolerance
-                    best_idx = None
-                    best_dist = match_tol_kev
-                    for i, pos in enumerate(positions):
-                        if pos.get('is_tube_line'):
-                            continue
-                        dist = abs(pos['energy'] - line_energy)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_idx = i
+        def _match_count(catalog):
+            n = 0
+            for pos in positions:
+                if pos.get('is_tube_line') or pos.get('inferred'):
+                    continue
+                e0 = float(pos['energy'])
+                if any(abs(e0 - le) <= match_tol_kev for _, le, _ in catalog):
+                    n += 1
+            return n
 
-                    if best_idx is not None:
-                        pos = positions[best_idx]
-                        # Prefer leaving an already-assigned closer match alone
-                        if not pos.get('element'):
-                            pos['element'] = symbol
-                            pos['line'] = line_name
-                            n_labeled += 1
+        # Multi-line families first so Au Lγ claims 13.4 keV before Rb Kα
+        elem_lines.sort(key=lambda item: (-_match_count(item[2]), item[0]))
+
+        def _energy_taken_by_other(line_energy, symbol):
+            for pos in positions:
+                if pos.get('is_tube_line'):
+                    continue
+                owner = pos.get('element')
+                if not owner or owner == symbol:
+                    continue
+                if abs(float(pos['energy']) - line_energy) <= match_tol_kev:
+                    return True
+            return False
+
+        for symbol, z, catalog in elem_lines:
+            for line_name, line_energy, rel in catalog:
+                best_idx = None
+                best_dist = match_tol_kev
+                for i, pos in enumerate(positions):
+                    if pos.get('is_tube_line'):
+                        continue
+                    dist = abs(pos['energy'] - line_energy)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
+
+                if best_idx is not None:
+                    pos = positions[best_idx]
+                    if not pos.get('element'):
+                        pos['element'] = symbol
+                        pos['line'] = line_name
+                        pos['relative_intensity'] = rel
+                        n_labeled += 1
+                        continue
+                    if pos.get('element') == symbol and pos.get('line') == line_name:
+                        pos.setdefault('relative_intensity', rel)
+                        continue
+                    if pos.get('element') != symbol:
                         continue
 
-                    already = any(
-                        p.get('element') == symbol
-                        and p.get('line') == line_name
-                        for p in positions
-                    )
-                    if not already:
-                        positions.append({
-                            'energy': line_energy,
-                            'element': symbol,
-                            'line': line_name,
-                            'is_tube_line': False,
-                        })
-                        n_added += 1
+                if _energy_taken_by_other(line_energy, symbol):
+                    continue
+                already = any(
+                    p.get('element') == symbol and p.get('line') == line_name
+                    for p in positions
+                )
+                if not already:
+                    positions.append({
+                        'energy': line_energy,
+                        'element': symbol,
+                        'line': line_name,
+                        'is_tube_line': False,
+                        'relative_intensity': rel,
+                    })
+                    n_added += 1
 
         print(
             f"Applied {len(elements)} selected element(s) to peak list: "
@@ -514,16 +578,7 @@ class SpectrumFitter:
 
         if peak_positions is not None:
             peak_positions = [
-                {
-                    'energy': float(p['energy']),
-                    'element': p.get('element'),
-                    'line': p.get('line'),
-                    'is_tube_line': p.get('is_tube_line', False),
-                    **({'fixed_fwhm': float(p['fixed_fwhm'])}
-                       if p.get('fixed_fwhm') is not None else {}),
-                    **({'exclusion_half_width_kev': float(p['exclusion_half_width_kev'])}
-                       if p.get('exclusion_half_width_kev') is not None else {}),
-                }
+                self._copy_peak_position(p)
                 for p in peak_positions
                 if float(p['energy']) >= PeakFitter.MIN_PEAK_ENERGY_KEV
             ]
@@ -786,21 +841,85 @@ class SpectrumFitter:
                     self.peak_fitter, energy, residual_counts, peak
                 )
 
-        for pos in sorted(sample_remaining, key=_local_height, reverse=True):
+        rel_cache: Dict[str, Dict[str, float]] = {}
+
+        def _rel_for(symbol, line_name, pos=None):
+            if pos is not None and pos.get('relative_intensity') is not None:
+                return float(pos['relative_intensity'])
+            if not symbol or not line_name:
+                return None
+            if symbol not in rel_cache:
+                from core.advanced_peak_fitting import get_element_z
+                z = int(get_element_z(symbol) or 0)
+                rel_cache[symbol] = line_relative_intensities(symbol, z) if z else {}
+            val = rel_cache[symbol].get(line_name)
+            return float(val) if val is not None else None
+
+        def _companion_amplitude_prior(pos):
+            """Scale from the already-fitted series α line (Lγ from Lα, Kβ from Kα)."""
+            el = pos.get('element')
+            line = pos.get('line')
+            if not el or not line or pos.get('is_tube_line'):
+                return None
+            if is_series_alpha(line):
+                return None
+            ser = series_of_line(line)
+            if not ser:
+                return None
+            ref = None
+            for pk in fitted_peaks:
+                if pk.is_tube_line or pk.element != el:
+                    continue
+                if series_of_line(pk.line) != ser:
+                    continue
+                if is_series_alpha(pk.line):
+                    ref = pk
+                    break
+            if ref is None:
+                return None
+            r_this = _rel_for(el, line, pos)
+            r_ref = _rel_for(el, ref.line)
+            if r_this is None or r_ref is None or r_ref <= 0:
+                return None
+            return float(ref.amplitude) * (float(r_this) / float(r_ref))
+
+        def _sample_sort_key(pos):
+            alpha = 0 if is_series_alpha(pos.get('line')) else 1
+            return (alpha, -_local_height(pos))
+
+        for pos in sorted(sample_remaining, key=_sample_sort_key):
             known_line = bool(pos.get('element') and pos.get('line'))
             local_h = _local_height(pos)
             residual_max = float(np.nanmax(residual_counts)) if residual_counts.size else 0.0
             fix_center = known_line or (
                 residual_max > 0 and local_h < 0.05 * residual_max
             )
-            peak = self.peak_fitter.fit_single_peak(
-                energy, residual_counts,
-                initial_center=pos['energy'],
-                shape=peak_shape,
-                known_line=known_line,
-                fix_center=fix_center,
-                fixed_fwhm=pos.get('fixed_fwhm'),
-            )
+            amp_prior = _companion_amplitude_prior(pos) if known_line else None
+            if amp_prior is not None:
+                peak = fit_peak_with_amplitude_prior(
+                    energy, residual_counts,
+                    initial_center=pos['energy'],
+                    shape=peak_shape,
+                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fix_center=True,
+                    amplitude_prior=amp_prior,
+                    prior_weight=SAMPLE_AMPLITUDE_PRIOR_WEIGHT,
+                    known_line=True,
+                )
+                if peak is not None:
+                    tube_constraint_notes.append(
+                        f"{pos.get('element')} {pos.get('line')}: "
+                        f"series prior A={amp_prior:.1f} → {peak.amplitude:.1f}"
+                    )
+            else:
+                peak = self.peak_fitter.fit_single_peak(
+                    energy, residual_counts,
+                    initial_center=pos['energy'],
+                    shape=peak_shape,
+                    known_line=known_line,
+                    fix_center=fix_center,
+                    fixed_fwhm=pos.get('fixed_fwhm'),
+                )
             if peak is not None:
                 _label_peak(peak, pos)
                 fitted_peaks.append(peak)
