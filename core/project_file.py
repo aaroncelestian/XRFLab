@@ -425,10 +425,15 @@ def _write_batch_result(group, result) -> None:
     group.attrs["fit_time"] = float(result.fit_time)
     group.attrs["error_message"] = result.error_message or ""
     group.attrs["quantification_method"] = result.quantification_method or ""
+    group.attrs["fp_success"] = bool(getattr(result, "fp_success", False))
+    group.attrs["fp_message"] = str(getattr(result, "fp_message", "") or "")
     _write_json(group, "elements_found", list(result.elements_found or []))
     _write_json(group, "concentrations", result.concentrations or {})
     _write_json(group, "concentration_errors", result.concentration_errors or {})
     _write_json(group, "peak_areas", result.peak_areas or {})
+    _write_json(group, "peaks", list(getattr(result, "peaks", None) or []))
+    _write_json(group, "fp_wt", getattr(result, "fp_wt", None) or {})
+    _write_json(group, "fp_formula_wt", getattr(result, "fp_formula_wt", None) or {})
     _write_array(group, "fitted_spectrum", result.fitted_spectrum)
     _write_array(group, "residuals", result.residuals)
     _write_array(group, "energy", result.energy)
@@ -471,6 +476,11 @@ def _read_batch_result(group):
         quantification_method=str(
             group.attrs.get("quantification_method", "semi_quant_area")
         ),
+        peaks=list(_read_json(group, "peaks", []) or []),
+        fp_wt=dict(_read_json(group, "fp_wt", {}) or {}),
+        fp_formula_wt=dict(_read_json(group, "fp_formula_wt", {}) or {}),
+        fp_success=bool(group.attrs.get("fp_success", False)),
+        fp_message=str(group.attrs.get("fp_message", "") or ""),
     )
 
 
@@ -499,14 +509,26 @@ def _batch_config_dict(config) -> dict:
         "output_directory": (
             str(config.output_directory) if getattr(config, "output_directory", None) else None
         ),
+        "sample_contains_tube_element": bool(
+            getattr(config, "sample_contains_tube_element", False)
+        ),
+        "scatter_angle_deg": float(getattr(config, "scatter_angle_deg", 90.0)),
+        "compton_fwhm_kev": float(getattr(config, "compton_fwhm_kev", 0.5)),
+        "matrix": (
+            config.matrix_assumptions.to_dict()
+            if getattr(config, "matrix_assumptions", None) is not None
+            else None
+        ),
     }
 
 
 def _batch_config_from_dict(data: dict):
     from core.batch_processing import BatchProcessingConfig
+    from core.matrix_model import MatrixAssumptions
 
     data = data or {}
     out_dir = data.get("output_directory")
+    matrix = data.get("matrix")
     return BatchProcessingConfig(
         elements=list(data.get("elements") or []),
         excitation_energy=float(data.get("excitation_energy", 20.0)),
@@ -527,6 +549,14 @@ def _batch_config_from_dict(data: dict):
         save_individual_fits=bool(data.get("save_individual_fits", True)),
         save_plots=bool(data.get("save_plots", False)),
         output_directory=Path(out_dir) if out_dir else None,
+        sample_contains_tube_element=bool(
+            data.get("sample_contains_tube_element", False)
+        ),
+        scatter_angle_deg=float(data.get("scatter_angle_deg", 90.0)),
+        compton_fwhm_kev=float(data.get("compton_fwhm_kev", 0.5)),
+        matrix_assumptions=(
+            MatrixAssumptions.from_dict(matrix) if matrix else None
+        ),
     )
 
 

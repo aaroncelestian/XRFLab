@@ -11,6 +11,7 @@ IPJ_FILES = {
     "dylan": SAMPLE_DIR / "dylan_corsetti_slide_1_STROM.ipj",
     "emerald": SAMPLE_DIR / "ca emerald with citrine.ipj",
 }
+NICKELENE = Path(__file__).resolve().parents[1] / "sample_data" / "nickelene.ipj"
 
 
 def _have_olefile():
@@ -495,3 +496,85 @@ def test_point_spectra_skip_sum_and_spectra_only_flag(barstow, dylan):
     ls_fov = next(f for f in dylan.fovs if f.line_scans)
     ls_points = ls_fov.point_spectra()
     assert len(ls_points) == ls_fov.line_scans[0].n_points or len(ls_points) >= ls_fov.line_scans[0].n_points
+
+
+def test_peak_labels_one_letter_symbol_does_not_desync():
+    """Y is stored as 9 bytes (flags=1); a 10-byte stride used to drop Y/Zr/Pd."""
+    import struct
+
+    from utils.ipj_loader import parse_peak_label_bytes
+
+    def rec(z, name, energy_ev):
+        flags = len(name)
+        return struct.pack("<HH", z, flags) + name.encode("ascii") + struct.pack(
+            "<f", energy_ev
+        )
+
+    body = rec(28, "Ni", 7478.27) + rec(39, "Y", 14958.63) + rec(40, "Zr", 15775.34)
+    raw = struct.pack("<II", 2, 3) + body
+    labels = parse_peak_label_bytes(raw)
+    assert [p["element"] for p in labels] == ["Ni", "Y", "Zr"]
+    assert labels[1]["energy_kev"] == pytest.approx(14.95863, abs=1e-4)
+    assert labels[2]["energy_kev"] == pytest.approx(15.77534, abs=1e-4)
+
+
+def test_energy_calibration_uses_ka_not_l_lines():
+    """L-line energies must not pull a 4096-bin XGT spectrum to 5 eV/ch."""
+    from utils.ipj_loader import _infer_energy_calibration, _xgt_energy_offset_ev
+
+    n = 4096
+    counts = np.zeros(n, dtype=np.float64)
+    ev = 10.0
+    off = _xgt_energy_offset_ev(ev)
+    ni_ka, as_ka, ni_la = 7478.27, 10543.85, 851.47
+    for e in (ni_ka, as_ka):
+        ch = int(round((e - off) / ev))
+        counts[ch - 2 : ch + 3] = [1000, 4000, 12000, 4000, 1000]
+    peaks = [
+        {"element": "Ni", "energy_ev": ni_ka},
+        {"element": "Ni", "energy_ev": 8264.79},
+        {"element": "Ni", "energy_ev": ni_la},
+        {"element": "As", "energy_ev": as_ka},
+        {"element": "As", "energy_ev": 1282.02},
+    ]
+    gain, offset = _infer_energy_calibration(counts, peaks)
+    assert gain == 10.0
+    assert offset == -400.0
+    ni_ch = int(round((ni_ka - offset) / gain))
+    assert counts[ni_ch] == 12000
+
+
+def test_nickelene_ni_as_energy_scale():
+    """Nickeline spots: Ni Kα ~7.48 keV and As Kα ~10.54 keV, not Ca at 3.7 keV."""
+    from utils.ipj_loader import load_ipj
+
+    if not NICKELENE.exists():
+        pytest.skip("nickelene.ipj not present")
+    proj = load_ipj(NICKELENE)
+    assert proj.fovs
+    spectra = proj.all_spectra()
+    assert len(spectra) >= 3
+    for ms in spectra:
+        sp = ms.spectrum
+        assert sp.num_channels == 4096
+        assert float(sp.metadata.get("ev_per_channel")) == 10.0
+        assert float(sp.metadata.get("energy_offset_ev")) == -400.0
+        els = {p.get("element") for p in ms.peak_labels}
+        assert "Ni" in els and "As" in els
+        assert "Y" in els
+        # Strongest channels must land on As Kα (~10.54) or Ni Kα (~7.48)
+        i = int(np.argmax(sp.counts))
+        e_max = float(sp.energy[i])
+        assert e_max < 11.0
+        near_as = 10.3 < e_max < 10.8
+        near_ni = 7.3 < e_max < 7.7
+        assert near_as or near_ni, f"{ms.name} max at {e_max:.3f} keV"
+        # Ni Kα channel must be a real peak, not empty (the 5 eV/ch failure)
+        ni_idx = int(np.argmin(np.abs(sp.energy - 7.478)))
+        as_idx = int(np.argmin(np.abs(sp.energy - 10.544)))
+        assert sp.counts[ni_idx] > 1000
+        assert sp.counts[as_idx] > 1000
+        # The halved scale put those peaks at ~3.73 / ~5.26 keV
+        ca_idx = int(np.argmin(np.abs(sp.energy - 3.73)))
+        assert sp.counts[ni_idx] > sp.counts[ca_idx] * 5
+

@@ -17,6 +17,7 @@ import numpy as np
 from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
 from core.calibration import CalibrationResult
+from core.matrix_model import MatrixAssumptions
 from core.spectrum import Spectrum
 from utils.io_handler import IOHandler
 
@@ -72,6 +73,99 @@ def rename_files_in_place(pairs):
         raise
 
 
+def _peak_dicts(peaks) -> List[dict]:
+    payload = []
+    for peak in peaks or []:
+        if hasattr(peak, "to_dict"):
+            payload.append(peak.to_dict())
+        elif isinstance(peak, dict):
+            payload.append(dict(peak))
+    return payload
+
+
+def peaks_for_fp(result: "BatchFitResult"):
+    """Peak objects for FP: stored peaks, else reconstruct from peak_areas."""
+    from core.peak_fitting import Peak
+
+    peaks = []
+    for item in getattr(result, "peaks", None) or []:
+        if isinstance(item, Peak):
+            peaks.append(item)
+        elif isinstance(item, dict) and "energy" in item:
+            try:
+                peaks.append(Peak.from_dict(item))
+            except Exception:
+                continue
+    if peaks:
+        return peaks
+    for element, lines in (getattr(result, "peak_areas", None) or {}).items():
+        if not isinstance(lines, dict):
+            continue
+        for line, area in lines.items():
+            try:
+                peaks.append(
+                    Peak(
+                        energy=0.0,
+                        amplitude=0.0,
+                        fwhm=0.0,
+                        area=float(area),
+                        element=str(element),
+                        line=str(line),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+    return peaks
+
+
+def apply_fp_quantification(
+    results: List["BatchFitResult"],
+    assumptions: Optional[MatrixAssumptions] = None,
+    experimental_params: Optional[Dict[str, Any]] = None,
+    *,
+    tube_element=None,
+    sample_contains_tube_element: bool = False,
+) -> int:
+    """Fill fp_wt / fp_formula_wt on each successful fit. Returns success count."""
+    from core.fp_quantification import quantify_from_peaks
+
+    assumptions = assumptions or MatrixAssumptions()
+    params = dict(experimental_params or {})
+    n_ok = 0
+    for result in results or []:
+        if not getattr(result, "fit_success", False):
+            result.fp_wt = {}
+            result.fp_formula_wt = {}
+            result.fp_success = False
+            result.fp_message = result.error_message or "Fit failed"
+            continue
+        peaks = peaks_for_fp(result)
+        fp = quantify_from_peaks(
+            peaks,
+            assumptions,
+            params,
+            tube_element=tube_element or params.get("tube_element"),
+            sample_contains_tube_element=bool(
+                sample_contains_tube_element
+                or params.get("sample_contains_tube_element")
+            ),
+        )
+        result.fp_success = bool(fp.success)
+        result.fp_message = str(fp.message or "")
+        if fp.success:
+            result.fp_wt = {
+                str(k): float(v) for k, v in (fp.element_wt or {}).items()
+            }
+            result.fp_formula_wt = {
+                str(k): float(v) for k, v in (fp.formula_wt or {}).items()
+            }
+            n_ok += 1
+        else:
+            result.fp_wt = {}
+            result.fp_formula_wt = {}
+    return n_ok
+
+
 @dataclass
 class BatchFitResult:
     """Results from fitting a single spectrum in batch mode"""
@@ -92,6 +186,11 @@ class BatchFitResult:
     fit_time: float = 0.0
     error_message: str = ""
     quantification_method: str = "semi_quant_area"
+    peaks: List[Any] = field(default_factory=list)
+    fp_wt: Dict[str, float] = field(default_factory=dict)
+    fp_formula_wt: Dict[str, float] = field(default_factory=dict)
+    fp_success: bool = False
+    fp_message: str = ""
 
 
 @dataclass
@@ -132,6 +231,9 @@ class BatchProcessingConfig:
     save_individual_fits: bool = True
     save_plots: bool = False
     output_directory: Optional[Path] = None
+
+    # FP composition (same matrix model as Analysis → Composition)
+    matrix_assumptions: Optional[MatrixAssumptions] = None
 
 
 class BatchProcessor:
@@ -329,7 +431,7 @@ class BatchProcessor:
         elements_found = sorted(concentrations.keys())
         fit_time = (datetime.now() - start_time).total_seconds()
 
-        return BatchFitResult(
+        result = BatchFitResult(
             spectrum_name=name,
             spectrum_path=path,
             fit_success=True,
@@ -346,7 +448,24 @@ class BatchProcessor:
             element_contributions=None,
             fit_time=fit_time,
             quantification_method="semi_quant_area",
+            peaks=_peak_dicts(fit_result.peaks),
         )
+        apply_fp_quantification(
+            [result],
+            self.config.matrix_assumptions,
+            {
+                "excitation_energy": float(
+                    self.config.excitation_energy or self.config.excitation_kv or 50.0
+                ),
+                "incident_angle": float(self.config.incident_angle or 45.0),
+                "takeoff_angle": float(
+                    self.config.takeoff_angle or self.config.incident_angle or 45.0
+                ),
+            },
+            tube_element=self.config.tube_element,
+            sample_contains_tube_element=self.config.sample_contains_tube_element,
+        )
+        return result
 
     def export_results(self, output_path: Path, format: str = "csv"):
         if format == "csv":
@@ -367,6 +486,11 @@ class BatchProcessor:
                 all_elements.update(result.concentrations.keys())
             all_elements = sorted(all_elements)
 
+            wt_elements = set()
+            for result in self.results:
+                wt_elements.update((result.fp_wt or {}).keys())
+            wt_elements = sorted(wt_elements)
+
             fieldnames = [
                 "Spectrum",
                 "Success",
@@ -374,9 +498,12 @@ class BatchProcessor:
                 "R²",
                 "Fit Time (s)",
                 "Method",
+                "FP ok",
             ]
             for element in all_elements:
                 fieldnames.append(f"{element} (rel %)")
+            for element in wt_elements:
+                fieldnames.append(f"{element} (wt%)")
 
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -389,10 +516,14 @@ class BatchProcessor:
                     "R²": f"{result.r_squared:.4f}",
                     "Fit Time (s)": f"{result.fit_time:.2f}",
                     "Method": result.quantification_method,
+                    "FP ok": bool(result.fp_success),
                 }
                 for element in all_elements:
                     conc = result.concentrations.get(element, 0.0)
                     row[f"{element} (rel %)"] = f"{conc:.4f}"
+                for element in wt_elements:
+                    wt = (result.fp_wt or {}).get(element, 0.0)
+                    row[f"{element} (wt%)"] = f"{wt:.4f}"
                 writer.writerow(row)
 
     def _export_excel(self, output_path: Path):
@@ -411,6 +542,9 @@ class BatchProcessor:
                 }
                 for element, conc in result.concentrations.items():
                     row[f"{element} (rel %)"] = conc
+                for element, wt in (result.fp_wt or {}).items():
+                    row[f"{element} (wt%)"] = wt
+                row["FP ok"] = bool(result.fp_success)
                 data.append(row)
 
             df = pd.DataFrame(data)
@@ -435,6 +569,9 @@ class BatchProcessor:
                     "concentrations": result.concentrations,
                     "concentration_errors": result.concentration_errors,
                     "quantification_method": result.quantification_method,
+                    "fp_wt": result.fp_wt,
+                    "fp_formula_wt": result.fp_formula_wt,
+                    "fp_success": result.fp_success,
                     "fit_time": result.fit_time,
                     "error_message": result.error_message,
                 }

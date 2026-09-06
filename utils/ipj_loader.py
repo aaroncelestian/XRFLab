@@ -46,6 +46,9 @@ _SPECTRUM_HEADER = 10
 _DEFAULT_EV_PER_CHANNEL = 10.0
 _DEFAULT_N_CHANNELS = 4096
 _XGT_ZERO_CHANNEL = 40.0
+# Single-letter symbols (H, B, C, N, O, F, P, S, K, V, Y, I, W, U).
+# PeakLabels stores name length in the flags word; these Z values are a fallback.
+_ONE_LETTER_Z = frozenset({1, 5, 6, 7, 8, 9, 15, 16, 19, 23, 39, 53, 74, 92})
 # XGT2Data stage X/Y: float64 micrometres at these offsets (contiguous).
 # Older code mis-read float32 at 154/162 — those bytes are the high half of
 # these doubles and only *look* like plausible millimetre coordinates.
@@ -1141,40 +1144,61 @@ def _acquisition_metadata(
     return meta
 
 
-def _read_peak_labels(
-    ole: "olefile.OleFileIO",
-    path: Sequence[str],
-) -> List[Dict[str, Any]]:
-    if not ole.exists(list(path)):
-        return []
-    raw = ole.openstream(list(path)).read()
+def _peak_label_name_len(z: int, flags: int) -> int:
+    """INCA PeakLabels: flags is the element-symbol length (1 or 2)."""
+    if flags in (1, 2):
+        return int(flags)
+    return 1 if z in _ONE_LETTER_Z else 2
+
+
+def parse_peak_label_bytes(raw: bytes) -> List[Dict[str, Any]]:
+    """Decode an INCA PeakLabels stream (used by tests and ``_read_peak_labels``).
+
+    Record: u16 Z, u16 name_len, ``name_len`` ASCII chars, float32 energy_eV.
+    Two-letter symbols are 10 bytes; Y/W/U/… are 9 bytes. A fixed 10-byte
+    stride desynchronizes at the first one-letter symbol and drops the rest.
+    """
     if len(raw) < 12:
         return []
-    # Header: u32 version?, u32 count
     count = struct.unpack_from("<I", raw, 4)[0]
     if count <= 0 or count > 5000:
         return []
     records: List[Dict[str, Any]] = []
     off = 8
-    # Record: u16 Z, u16 unk, 2-char element, float32 energy_eV  (10 bytes)
     for _ in range(count):
-        if off + 10 > len(raw):
+        if off + 9 > len(raw):
             break
-        z, unk = struct.unpack_from("<HH", raw, off)
-        el = raw[off + 4 : off + 6].decode("ascii", errors="replace").strip()
-        energy_ev = struct.unpack_from("<f", raw, off + 6)[0]
-        if 1 <= z <= 118 and 100 < energy_ev < 120000:
+        z, flags = struct.unpack_from("<HH", raw, off)
+        if not (1 <= z <= 118):
+            break
+        nlen = _peak_label_name_len(z, flags)
+        rec_len = 4 + nlen + 4
+        if off + rec_len > len(raw):
+            break
+        el = raw[off + 4 : off + 4 + nlen].decode("ascii", errors="replace")
+        el = "".join(c for c in el if c.isalpha())
+        energy_ev = struct.unpack_from("<f", raw, off + 4 + nlen)[0]
+        if el and 100.0 < energy_ev < 120000.0:
             records.append(
                 {
                     "z": int(z),
                     "element": el,
                     "energy_ev": float(energy_ev),
                     "energy_kev": float(energy_ev) / 1000.0,
-                    "flags": int(unk),
+                    "flags": int(flags),
                 }
             )
-        off += 10
+        off += rec_len
     return records
+
+
+def _read_peak_labels(
+    ole: "olefile.OleFileIO",
+    path: Sequence[str],
+) -> List[Dict[str, Any]]:
+    if not ole.exists(list(path)):
+        return []
+    return parse_peak_label_bytes(ole.openstream(list(path)).read())
 
 
 def _read_label(
@@ -1207,6 +1231,35 @@ def _xgt_energy_offset_ev(ev_per_ch: float) -> float:
     return -_XGT_ZERO_CHANNEL * float(ev_per_ch)
 
 
+def _ka_energies_ev(peaks: Sequence[Dict[str, Any]]) -> Dict[str, float]:
+    """First listed energy per element (INCA stores Kα, then Kβ, then L)."""
+    by_el: Dict[str, float] = {}
+    for p in peaks:
+        el = "".join(c for c in str(p.get("element") or "") if c.isalpha())
+        e = p.get("energy_ev")
+        if not el or e is None:
+            continue
+        if el not in by_el:
+            by_el[el] = float(e)
+    return by_el
+
+
+def _score_ev_per_channel(
+    counts: np.ndarray,
+    energies_ev: Sequence[float],
+    ev_per_ch: float,
+) -> float:
+    """Sum of counts near channels predicted by labeled line energies."""
+    off = _xgt_energy_offset_ev(ev_per_ch)
+    n = len(counts)
+    score = 0.0
+    for e_ev in energies_ev:
+        ch = int(round((float(e_ev) - off) / ev_per_ch))
+        if 5 <= ch < n - 5:
+            score += float(counts[ch - 5 : ch + 6].max())
+    return score
+
+
 def _infer_energy_calibration(
     counts: np.ndarray,
     peaks: List[Dict[str, Any]],
@@ -1214,76 +1267,40 @@ def _infer_energy_calibration(
     """
     Return (eV/channel, offset_eV) for E = offset + channel * gain.
 
-    XGT/INCA 4096-bin spectra are 10 eV/ch with a -400 eV intercept. Without
-    that offset, Ca Kα at channel 410 is plotted at 4.10 keV instead of 3.69.
+    XGT/INCA 4096-bin spectra are 10 eV/ch with a -400 eV intercept. Gain
+    candidates are scored with **Kα** energies (first label per element).
+    Using L-line energies (~0.3–1 keV) used to pick 5 eV/ch from noise, so
+    Ni Kα at 7.48 keV was plotted at 3.73 keV and identified as Ca.
     """
-    ev = _infer_ev_per_channel(counts, peaks)
-    offset = _xgt_energy_offset_ev(ev)
-    if peaks:
-        # Re-score gain using the XGT intercept so labeled Ka lines land on
-        # the observed maxima (channel = (E - offset) / gain).
-        by_el: Dict[str, float] = {}
-        for p in peaks:
-            el = p.get("element")
-            e = p.get("energy_ev")
-            if not el or e is None:
-                continue
-            if el not in by_el or e < by_el[el]:
-                by_el[el] = float(e)
-        best = ev
-        best_score = -1.0
-        for cand in (5.0, 10.0, 20.0):
-            off = _xgt_energy_offset_ev(cand)
-            score = 0.0
-            for e_ev in list(by_el.values())[:6]:
-                ch = int(round((e_ev - off) / cand))
-                if 5 <= ch < len(counts) - 5:
-                    window = counts[ch - 5 : ch + 6]
-                    score += float(window.max())
-            if score > best_score:
-                best_score = score
-                best = cand
-        ev = best
-        offset = _xgt_energy_offset_ev(ev)
-    return float(ev), float(offset)
+    default = _DEFAULT_EV_PER_CHANNEL
+    ka = _ka_energies_ev(peaks)
+    if not ka:
+        return float(default), _xgt_energy_offset_ev(default)
+
+    energies = list(ka.values())[:8]
+    scores = {
+        cand: _score_ev_per_channel(counts, energies, cand)
+        for cand in (5.0, 10.0, 20.0)
+    }
+    # Prefer the XGT 10 eV/ch scale unless another gain is clearly better.
+    best = default
+    best_score = scores[default]
+    for cand, score in scores.items():
+        if cand == default:
+            continue
+        if score > best_score * 1.25:
+            best = cand
+            best_score = score
+    return float(best), _xgt_energy_offset_ev(best)
 
 
 def _infer_ev_per_channel(
     counts: np.ndarray,
     peaks: List[Dict[str, Any]],
 ) -> float:
-    """
-    Prefer 10 eV/ch (common XGT). If peak labels exist, refine using the
-    strongest labeled Ka-like line near a local maximum.
-    """
-    candidates = [5.0, 10.0, 20.0]
-    if not peaks:
-        return _DEFAULT_EV_PER_CHANNEL
-
-    # Use first few unique element Ka energies (~primary)
-    by_el: Dict[str, float] = {}
-    for p in peaks:
-        el = p["element"]
-        e = p["energy_ev"]
-        # Prefer ~K-alpha region: for Z, rough Ka energy
-        if el not in by_el or abs(e - by_el[el]) > 500:
-            # keep lowest energy per element as Ka-ish
-            if el not in by_el or e < by_el[el]:
-                by_el[el] = e
-
-    best = _DEFAULT_EV_PER_CHANNEL
-    best_score = -1.0
-    for ev in candidates:
-        score = 0.0
-        for e_ev in list(by_el.values())[:6]:
-            ch = int(round(e_ev / ev))
-            if 5 <= ch < len(counts) - 5:
-                window = counts[ch - 5 : ch + 6]
-                score += float(window.max())
-        if score > best_score:
-            best_score = score
-            best = ev
-    return best
+    """Return eV/channel; see ``_infer_energy_calibration``."""
+    ev, _offset = _infer_energy_calibration(counts, peaks)
+    return ev
 
 
 def _child_storages(ole: "olefile.OleFileIO", base: Sequence[str]) -> List[str]:

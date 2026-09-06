@@ -8,6 +8,8 @@ import numpy as np
 
 from core.composition import (
     GroupMode,
+    VALUE_WT,
+    apply_value_source,
     assign_samples,
     close_to_100,
     convert_values,
@@ -305,3 +307,48 @@ def test_export_sample_means_csv(tmp_path):
     text = out.read_text()
     assert "Sample" in text and "B01" in text
     assert "Fe" in text and "Si" in text
+
+
+def test_rows_keep_fp_wt_and_relative():
+    result = SimpleNamespace(
+        spectrum_name="spot",
+        spectrum_path="/spot.txt",
+        concentrations={"Si": 80.0, "Fe": 20.0},
+        fp_wt={"Si": 30.0, "Fe": 10.0, "O": 60.0},
+        fp_formula_wt={"SiO2": 64.2, "FeO": 12.9},
+        fit_success=True,
+    )
+    rows = rows_from_batch_results([result])
+    assert rows[0].relative["Si"] == 80.0
+    assert rows[0].values["Si"] == 80.0
+    assert rows[0].wt["Si"] == 30.0
+    assert rows[0].formula_wt["SiO2"] == 64.2
+
+    apply_value_source(rows, VALUE_WT, as_oxides=False)
+    assert rows[0].values["Si"] == 30.0
+    assert "O" in rows[0].values
+
+    apply_value_source(rows, VALUE_WT, as_oxides=True)
+    assert "SiO2" in rows[0].values
+    assert rows[0].values["SiO2"] == 64.2
+
+    apply_value_source(rows, "relative")
+    assert rows[0].values["Si"] == 80.0
+
+
+def test_composition_row_roundtrip_includes_wt():
+    from core.composition import CompositionRow
+
+    row = CompositionRow(
+        name="a",
+        source_id="/a.txt",
+        sample="a",
+        values={"Si": 80.0},
+        relative={"Si": 80.0},
+        wt={"Si": 30.0, "O": 70.0},
+        formula_wt={"SiO2": 100.0},
+    )
+    restored = CompositionRow.from_dict(row.to_dict())
+    assert restored.wt["Si"] == 30.0
+    assert restored.formula_wt["SiO2"] == 100.0
+    assert restored.relative["Si"] == 80.0

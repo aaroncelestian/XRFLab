@@ -297,3 +297,29 @@ def test_coerce_matrix_kind_from_combo_strings():
     assert coerce_matrix_kind("Carbonate") == MatrixKind.CARBONATE
     assert coerce_matrix_kind("Oxide / silicate") == MatrixKind.OXIDE
     assert coerce_matrix_kind(MatrixKind.HYDROXIDE) == MatrixKind.HYDROXIDE
+
+
+def test_apply_fp_quantification_from_peak_areas():
+    from core.batch_processing import BatchFitResult, apply_fp_quantification
+
+    result = BatchFitResult(
+        spectrum_name="qtz",
+        spectrum_path="qtz.txt",
+        fit_success=True,
+        chi_squared=1.0,
+        r_squared=0.99,
+        elements_found=["Si"],
+        concentrations={"Si": 100.0},
+        concentration_errors={},
+        peak_areas={"Si": {"Kα1": 1000.0}},
+    )
+    n_ok = apply_fp_quantification(
+        [result],
+        MatrixAssumptions(kind=MatrixKind.OXIDE),
+        {"excitation_energy": 50.0, "incident_angle": 45.0},
+    )
+    assert n_ok == 1
+    assert result.fp_success
+    assert result.fp_wt["Si"] > 0
+    assert "O" in result.fp_wt
+    assert abs(result.fp_formula_wt["SiO2"] - 100.0) < 0.5

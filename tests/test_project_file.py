@@ -182,6 +182,12 @@ def test_batch_results_roundtrip(tmp_path):
         concentrations={"Fe": 55.0, "Ca": 45.0},
         concentration_errors={},
         peak_areas={"Fe": {"Kα1": 1000.0}},
+        peaks=[{"energy": 6.4, "amplitude": 1.0, "fwhm": 0.15, "area": 1000.0,
+                "element": "Fe", "line": "Kα1", "shape": "gaussian",
+                "shape_params": {}, "is_tube_line": False, "fixed_fwhm": None}],
+        fp_wt={"Fe": 40.0, "Ca": 30.0, "O": 30.0},
+        fp_formula_wt={"FeO": 51.5, "CaO": 42.0},
+        fp_success=True,
         fitted_spectrum=np.ones(16),
         residuals=np.zeros(16),
         energy=np.linspace(0, 10, 16),
@@ -209,6 +215,9 @@ def test_batch_results_roundtrip(tmp_path):
     br = loaded.batch["results"][0]
     assert br.spectrum_name == "spot1"
     assert br.concentrations["Fe"] == pytest.approx(55.0)
+    assert br.fp_wt["Fe"] == pytest.approx(40.0)
+    assert br.fp_success is True
+    assert br.peaks[0]["element"] == "Fe"
     np.testing.assert_allclose(br.fitted_spectrum, result.fitted_spectrum)
     assert "Fe" in br.element_contributions
 

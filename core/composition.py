@@ -2,9 +2,9 @@
 Bulk-rock composition tables: group replicate spectra, average samples,
 and prepare correlate / ternary / ratio coordinates.
 
-Intensities are whatever Batch produced (typically area-normalized
-semi-quant). Oxide conversion and closing are optional display steps —
-they do not turn relative intensities into fundamental-parameters wt%.
+Batch stores both area-normalized relative intensities and FP wt% when
+the matrix model is applied. Oxide conversion on relative intensities is
+a display convenience — it is not the same as FP compound wt%.
 """
 
 from __future__ import annotations
@@ -64,6 +64,9 @@ _OXIDE_AS_FE3O4 = dict(_OXIDE_AS_FEO)
 _OXIDE_AS_FE3O4["Fe"] = ("Fe3O4", 1.3820)
 
 SQRT3_OVER_2 = 0.8660254037844386
+_LIGHT_ELEMENTS = frozenset({"H", "C", "O", "N", "F"})
+VALUE_RELATIVE = "relative"
+VALUE_WT = "wt"
 
 
 class GroupMode(str, Enum):
@@ -85,6 +88,9 @@ class CompositionRow:
     values: Dict[str, float]
     success: bool = True
     metadata: Dict[str, object] = field(default_factory=dict)
+    relative: Dict[str, float] = field(default_factory=dict)
+    wt: Dict[str, float] = field(default_factory=dict)
+    formula_wt: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -94,19 +100,33 @@ class CompositionRow:
             "values": {str(k): float(v) for k, v in (self.values or {}).items()},
             "success": bool(self.success),
             "metadata": dict(self.metadata or {}),
+            "relative": {str(k): float(v) for k, v in (self.relative or {}).items()},
+            "wt": {str(k): float(v) for k, v in (self.wt or {}).items()},
+            "formula_wt": {
+                str(k): float(v) for k, v in (self.formula_wt or {}).items()
+            },
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "CompositionRow":
+        values = {
+            str(k): float(v) for k, v in (data.get("values") or {}).items()
+        }
+        relative = {
+            str(k): float(v) for k, v in (data.get("relative") or {}).items()
+        } or dict(values)
         return cls(
             name=str(data.get("name") or ""),
             source_id=str(data.get("source_id") or ""),
             sample=str(data.get("sample") or data.get("name") or ""),
-            values={
-                str(k): float(v) for k, v in (data.get("values") or {}).items()
-            },
+            values=values,
             success=bool(data.get("success", True)),
             metadata=dict(data.get("metadata") or {}),
+            relative=relative,
+            wt={str(k): float(v) for k, v in (data.get("wt") or {}).items()},
+            formula_wt={
+                str(k): float(v) for k, v in (data.get("formula_wt") or {}).items()
+            },
         )
 
 
@@ -131,17 +151,59 @@ def rows_from_batch_results(results: Iterable) -> List[CompositionRow]:
         name = str(getattr(result, "spectrum_name", "") or "spectrum")
         path = str(getattr(result, "spectrum_path", "") or name)
         conc = getattr(result, "concentrations", None) or {}
-        values = {str(k): float(v) for k, v in dict(conc).items()}
+        relative = {str(k): float(v) for k, v in dict(conc).items()}
+        wt = {
+            str(k): float(v)
+            for k, v in dict(getattr(result, "fp_wt", None) or {}).items()
+        }
+        formula_wt = {
+            str(k): float(v)
+            for k, v in dict(getattr(result, "fp_formula_wt", None) or {}).items()
+        }
         rows.append(
             CompositionRow(
                 name=name,
                 source_id=path,
                 sample=name,
-                values=values,
+                values=dict(relative),
                 success=bool(getattr(result, "fit_success", True)),
+                relative=relative,
+                wt=wt,
+                formula_wt=formula_wt,
             )
         )
     return rows
+
+
+def apply_value_source(
+    rows: Sequence[CompositionRow],
+    source: str = VALUE_RELATIVE,
+    *,
+    as_oxides: bool = False,
+    fe_as: str = "FeO",
+) -> None:
+    """Set ``row.values`` from relative intensities or FP wt%."""
+    use_wt = str(source or VALUE_RELATIVE).lower() == VALUE_WT
+    for row in rows:
+        if use_wt:
+            if as_oxides:
+                if row.formula_wt:
+                    row.values = dict(row.formula_wt)
+                elif row.wt:
+                    measured = {
+                        k: v
+                        for k, v in row.wt.items()
+                        if k not in _LIGHT_ELEMENTS
+                    }
+                    row.values = convert_values(
+                        measured, as_oxides=True, fe_as=fe_as, close=False
+                    )
+                else:
+                    row.values = dict(row.relative or row.values)
+            else:
+                row.values = dict(row.wt or row.relative or row.values)
+        else:
+            row.values = dict(row.relative or row.values)
 
 
 def strip_replicate_suffix(stem: str) -> str:

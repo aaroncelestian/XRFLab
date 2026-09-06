@@ -19,6 +19,7 @@ class ResultsPanel(QWidget):
     element_selected = Signal(str)  # Element symbol clicked in results table
     quantify_requested = Signal()  # Emitted when Run Quant is clicked
     fp_quantify_requested = Signal()
+    export_fp_requested = Signal()
     matrix_assumptions_changed = Signal()
     
     def __init__(self, parent=None):
@@ -132,6 +133,30 @@ class ResultsPanel(QWidget):
             lambda _checked=False: self.fp_quantify_requested.emit()
         )
         layout.addWidget(self.fp_button)
+
+        self.export_fp_button = QPushButton("Export wt%")
+        self.export_fp_button.setToolTip(
+            "Export the FP composition table (element, wt%, source, line)."
+        )
+        self.export_fp_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+        """)
+        self.export_fp_button.clicked.connect(
+            lambda _checked=False: self.export_fp_requested.emit()
+        )
+        layout.addWidget(self.export_fp_button)
         layout.addStretch()
         return widget
 
@@ -568,6 +593,9 @@ class ResultsPanel(QWidget):
     
     def get_results(self):
         return self.results_data
+
+    def get_fp_results(self):
+        return self.fp_results_data
     
     def _on_table_cell_clicked(self, row, data):
         if 0 <= row < len(data):

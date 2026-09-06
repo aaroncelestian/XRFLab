@@ -16,7 +16,9 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -38,7 +40,10 @@ from core.composition import (
     DEFAULT_GROUP_REGEX,
     GroupMode,
     SQRT3_OVER_2,
+    VALUE_RELATIVE,
+    VALUE_WT,
     SampleSummary,
+    apply_value_source,
     assign_samples,
     component_keys,
     convert_values,
@@ -58,6 +63,7 @@ from core.composition import (
     ternary_points,
     ternary_xy,
 )
+from core.matrix_model import MatrixAssumptions, MatrixKind, coerce_matrix_kind
 
 _MEAN_BRUSH = pg.mkBrush(0, 0, 139, 220)
 _MEAN_PEN = pg.mkPen("k", width=1)
@@ -104,6 +110,8 @@ class CompositionPanel(QWidget):
     from_batch_requested = Signal()
     sample_activated = Signal(str, list)  # sample name, member spectrum names
     open_in_batch_requested = Signal(str, list)
+    fp_recompute_requested = Signal()
+    display_mode_changed = Signal(str)
 
     def __init__(self, parent=None, *, embedded_in_batch: bool = False):
         super().__init__(parent)
@@ -117,6 +125,7 @@ class CompositionPanel(QWidget):
         self._embedded_in_batch = bool(embedded_in_batch)
         self._composition_view = None
         self._trends_view = None
+        self._value_source_user_set = False
         self._ensure_parts()
 
     def _ensure_parts(self) -> None:
@@ -125,6 +134,7 @@ class CompositionPanel(QWidget):
         self._source_group = None
         self._build_group_group()
         self._build_display_group()
+        self._build_fp_group()
         self._build_spectrum_table_group()
         self._build_table_group()
         self._build_export_group()
@@ -174,6 +184,7 @@ class CompositionPanel(QWidget):
         inner_layout.setContentsMargins(0, 0, 0, 0)
         inner_layout.addWidget(self._group_box)
         inner_layout.addWidget(self._display_box)
+        inner_layout.addWidget(self._fp_box)
         inner_layout.addWidget(self._spectrum_table_box, stretch=1)
         inner_layout.addWidget(self._table_box, stretch=1)
         inner_layout.addWidget(self._export_box)
@@ -181,8 +192,7 @@ class CompositionPanel(QWidget):
         layout.addWidget(scroll, stretch=1)
 
         self.status_label = QLabel(
-            "Relative intensities from batch fits. Group replicates, then open "
-            "Trends for plots."
+            "Group replicates, then choose FP wt% or relative intensity."
         )
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: #555;")
@@ -225,6 +235,7 @@ class CompositionPanel(QWidget):
         layout.addWidget(self._build_source_group())
         layout.addWidget(self._build_group_group())
         layout.addWidget(self._build_display_group())
+        layout.addWidget(self._build_fp_group())
         layout.addWidget(self._build_table_group(), stretch=1)
         layout.addWidget(self._build_export_group())
         return widget
@@ -315,11 +326,26 @@ class CompositionPanel(QWidget):
         group = QGroupBox("Display")
         layout = QVBoxLayout(group)
 
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("Values"))
+        self.value_combo = QComboBox()
+        self.value_combo.addItem("FP wt%", VALUE_WT)
+        self.value_combo.addItem("Relative intensity", VALUE_RELATIVE)
+        self.value_combo.setToolTip(
+            "FP wt% uses the matrix model below (same as Analysis → Composition).\n"
+            "Relative intensity is area-normalized semi-quant from the fit."
+        )
+        self.value_combo.currentIndexChanged.connect(self._on_value_source_changed)
+        source_row.addWidget(self.value_combo, stretch=1)
+        layout.addLayout(source_row)
+
         row = QHBoxLayout()
         self.oxides_check = QCheckBox("Oxides")
         self.oxides_check.setToolTip(
-            "Convert element intensities with standard oxide factors "
-            "(Si→SiO2, Fe→FeO, …). Still relative intensity, not FP wt%."
+            "FP wt%: show compound formulas from the matrix model "
+            "(SiO2, FeO, …).\n"
+            "Relative intensity: convert with standard oxide factors "
+            "(still not FP wt%)."
         )
         self.oxides_check.toggled.connect(self._on_display_changed)
         row.addWidget(self.oxides_check)
@@ -354,6 +380,78 @@ class CompositionPanel(QWidget):
         self._display_box = group
         return group
 
+    def _build_fp_group(self) -> QGroupBox:
+        group = QGroupBox("FP matrix (for wt%)")
+        layout = QVBoxLayout(group)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+
+        self.matrix_combo = QComboBox()
+        self.matrix_combo.addItem(
+            "Measured only (metal / sulfide)", MatrixKind.MEASURED.value
+        )
+        self.matrix_combo.addItem("Oxide / silicate", MatrixKind.OXIDE.value)
+        self.matrix_combo.addItem("Carbonate", MatrixKind.CARBONATE.value)
+        self.matrix_combo.addItem("Hydroxide", MatrixKind.HYDROXIDE.value)
+        self.matrix_combo.setToolTip(
+            "Same models as Analysis → Composition. "
+            "Compute FP wt% after changing the model or knobs."
+        )
+        grid.addWidget(QLabel("Model"), 0, 0)
+        grid.addWidget(self.matrix_combo, 0, 1, 1, 3)
+
+        self.fp_fe_combo = QComboBox()
+        self.fp_fe_combo.addItems(["FeO", "Fe2O3", "Fe3O4"])
+        self.fp_fe_combo.setEnabled(False)
+        grid.addWidget(QLabel("Fe as"), 1, 0)
+        grid.addWidget(self.fp_fe_combo, 1, 1)
+
+        self.fp_h2o_spin = QDoubleSpinBox()
+        self.fp_h2o_spin.setRange(0.0, 80.0)
+        self.fp_h2o_spin.setDecimals(2)
+        self.fp_h2o_spin.setSingleStep(0.5)
+        self.fp_h2o_spin.setSuffix(" wt%")
+        self.fp_oh_spin = QDoubleSpinBox()
+        self.fp_oh_spin.setRange(0.0, 80.0)
+        self.fp_oh_spin.setDecimals(2)
+        self.fp_oh_spin.setSingleStep(0.5)
+        self.fp_oh_spin.setSuffix(" wt%")
+        self.fp_co2_spin = QDoubleSpinBox()
+        self.fp_co2_spin.setRange(0.0, 80.0)
+        self.fp_co2_spin.setDecimals(2)
+        self.fp_co2_spin.setSingleStep(0.5)
+        self.fp_co2_spin.setSuffix(" wt%")
+        grid.addWidget(QLabel("H₂O"), 2, 0)
+        grid.addWidget(self.fp_h2o_spin, 2, 1)
+        grid.addWidget(QLabel("OH"), 2, 2)
+        grid.addWidget(self.fp_oh_spin, 2, 3)
+        grid.addWidget(QLabel("CO₂"), 3, 0)
+        grid.addWidget(self.fp_co2_spin, 3, 1)
+        layout.addLayout(grid)
+
+        self.fp_compute_btn = QPushButton("Compute FP wt%")
+        self.fp_compute_btn.setToolTip(
+            "Recalculate fundamental-parameters wt% for every fitted spectrum "
+            "using this matrix model. Does not refit peaks."
+        )
+        self.fp_compute_btn.clicked.connect(self.fp_recompute_requested.emit)
+        layout.addWidget(self.fp_compute_btn)
+
+        self.fp_hint = QLabel(
+            "Process All computes FP wt% automatically. "
+            "Change the model here and recompute without refitting."
+        )
+        self.fp_hint.setWordWrap(True)
+        self.fp_hint.setStyleSheet("color: #555; font-size: 11px;")
+        layout.addWidget(self.fp_hint)
+
+        self.matrix_combo.currentIndexChanged.connect(self._refresh_fp_hint)
+        self.fp_fe_combo.currentTextChanged.connect(self._refresh_fp_hint)
+        self._fp_box = group
+        self._refresh_fp_hint()
+        return group
+
     def _build_spectrum_table_group(self) -> QGroupBox:
         group = QGroupBox("All spectra (composition)")
         layout = QVBoxLayout(group)
@@ -363,7 +461,8 @@ class CompositionPanel(QWidget):
         self.spectrum_table.setAlternatingRowColors(True)
         self.spectrum_table.setToolTip(
             "Each row is one fitted spectrum. Formula column summarizes "
-            "relative intensities (oxide display follows options above)."
+            "the displayed values (FP wt% or relative intensity; oxide "
+            "display follows the options above)."
         )
         self.spectrum_table.itemSelectionChanged.connect(
             self._on_spectrum_table_selection
@@ -527,6 +626,12 @@ class CompositionPanel(QWidget):
     def load_batch_results(self, results) -> None:
         """Replace the table from BatchFitResult objects."""
         self.rows = rows_from_batch_results(results or [])
+        has_wt = any(row.wt for row in self.rows)
+        if has_wt and not self._value_source_user_set:
+            self._set_value_source(VALUE_WT, user=False)
+        elif not has_wt:
+            self._set_value_source(VALUE_RELATIVE, user=False)
+        self._apply_value_source()
         if self._current_mode() == GroupMode.SEQUENTIAL:
             self._suggest_sequential_counts()
         self._apply_grouping()
@@ -579,6 +684,7 @@ class CompositionPanel(QWidget):
             self._fill_table()
             self._refresh_plots()
             return
+        self._apply_value_source()
         used = assign_samples(
             self.rows,
             self._current_mode(),
@@ -618,34 +724,116 @@ class CompositionPanel(QWidget):
             f"{extra}{mismatch}"
         )
         self.status_label.setText(
-            f"Plotting {n_samp} sample means. Click a row or point to inspect "
-            "that pellet’s spectra in Batch."
+            f"Plotting {n_samp} sample means ({self._value_source_label()}). "
+            "Click a row or point to inspect that pellet’s spectra in Batch."
         )
         self._fill_spectrum_table()
         self._fill_table()
         self._fill_combos()
         self._refresh_plots()
 
+    def _value_source(self) -> str:
+        data = self.value_combo.currentData()
+        return data if data in (VALUE_WT, VALUE_RELATIVE) else VALUE_RELATIVE
+
+    def _value_source_label(self) -> str:
+        return "FP wt%" if self._value_source() == VALUE_WT else "relative intensity"
+
+    def _set_value_source(self, source: str, *, user: bool = True) -> None:
+        target = VALUE_WT if source == VALUE_WT else VALUE_RELATIVE
+        idx = self.value_combo.findData(target)
+        if idx < 0:
+            return
+        self.value_combo.blockSignals(True)
+        self.value_combo.setCurrentIndex(idx)
+        self.value_combo.blockSignals(False)
+        if user:
+            self._value_source_user_set = True
+
+    def _on_value_source_changed(self) -> None:
+        self._value_source_user_set = True
+        self._on_display_changed()
+        self.display_mode_changed.emit(self._value_source())
+
+    def _apply_value_source(self) -> None:
+        apply_value_source(
+            self.rows,
+            self._value_source(),
+            as_oxides=self._as_oxides(),
+            fe_as=self._fe_as(),
+        )
+
     def _as_oxides(self) -> bool:
         return self.oxides_check.isChecked()
 
     def _fe_as(self) -> str:
+        if self._value_source() == VALUE_WT:
+            return self.fp_fe_combo.currentText() or "FeO"
         return self.fe_combo.currentText() or "FeO"
 
     def _close(self) -> bool:
         return self.close_check.isChecked()
 
+    def _oxide_factors_active(self) -> bool:
+        """Oxide-factor conversion applies only to relative intensities."""
+        return self._as_oxides() and self._value_source() != VALUE_WT
+
     def _on_display_changed(self) -> None:
-        self.fe_combo.setEnabled(self._as_oxides())
+        self.fe_combo.setEnabled(self._as_oxides() and self._value_source() != VALUE_WT)
+        self._apply_value_source()
+        if self.rows:
+            self.summaries = summarize_samples(self.rows)
         self._fill_spectrum_table()
         self._fill_table()
         self._fill_combos()
         self._refresh_plots()
 
+    def get_matrix_assumptions(self) -> MatrixAssumptions:
+        kind = coerce_matrix_kind(self.matrix_combo.currentData())
+        if kind == MatrixKind.MEASURED:
+            kind = coerce_matrix_kind(self.matrix_combo.currentText())
+        return MatrixAssumptions(
+            kind=kind,
+            fe_as=self.fp_fe_combo.currentText() or "FeO",
+            h2o_wt=float(self.fp_h2o_spin.value()),
+            oh_wt=float(self.fp_oh_spin.value()),
+            co2_wt=float(self.fp_co2_spin.value()),
+        )
+
+    def set_matrix_assumptions(self, assumptions: MatrixAssumptions) -> None:
+        if assumptions is None:
+            return
+        kind = assumptions.kind
+        kind_val = kind.value if isinstance(kind, MatrixKind) else str(kind)
+        self.matrix_combo.blockSignals(True)
+        self.fp_fe_combo.blockSignals(True)
+        try:
+            idx = self.matrix_combo.findData(kind_val)
+            if idx < 0:
+                idx = self.matrix_combo.findText(str(kind_val))
+            if idx >= 0:
+                self.matrix_combo.setCurrentIndex(idx)
+            if assumptions.fe_as:
+                self.fp_fe_combo.setCurrentText(str(assumptions.fe_as))
+            self.fp_h2o_spin.setValue(float(assumptions.h2o_wt))
+            self.fp_oh_spin.setValue(float(assumptions.oh_wt))
+            self.fp_co2_spin.setValue(float(assumptions.co2_wt))
+        finally:
+            self.matrix_combo.blockSignals(False)
+            self.fp_fe_combo.blockSignals(False)
+        self._refresh_fp_hint()
+
+    def _refresh_fp_hint(self) -> None:
+        if not hasattr(self, "fp_hint"):
+            return
+        assumptions = self.get_matrix_assumptions()
+        self.fp_fe_combo.setEnabled(assumptions.kind == MatrixKind.OXIDE)
+        self.fp_hint.setText(assumptions.hint())
+
     def _keys(self) -> list:
         return component_keys(
             self.summaries,
-            as_oxides=self._as_oxides(),
+            as_oxides=self._oxide_factors_active(),
             fe_as=self._fe_as(),
             close=self._close(),
         )
@@ -700,13 +888,13 @@ class CompositionPanel(QWidget):
             self.table.setItem(i, 1, n_item)
             vals = display_values(
                 summary,
-                as_oxides=self._as_oxides(),
+                as_oxides=self._oxide_factors_active(),
                 fe_as=self._fe_as(),
                 close=self._close(),
             )
             std_vals = convert_values(
                 summary.std,
-                as_oxides=self._as_oxides(),
+                as_oxides=self._oxide_factors_active(),
                 fe_as=self._fe_as(),
                 close=False,
             )
@@ -727,7 +915,7 @@ class CompositionPanel(QWidget):
         self._filling_spectrum_table = True
         keys = component_keys(
             self.summaries,
-            as_oxides=self._as_oxides(),
+            as_oxides=self._oxide_factors_active(),
             fe_as=self._fe_as(),
             close=self._close(),
         )
@@ -737,7 +925,7 @@ class CompositionPanel(QWidget):
                 found.update(
                     convert_values(
                         row.values,
-                        as_oxides=self._as_oxides(),
+                        as_oxides=self._oxide_factors_active(),
                         fe_as=self._fe_as(),
                         close=self._close(),
                     ).keys()
@@ -759,7 +947,7 @@ class CompositionPanel(QWidget):
             formula_item = QTableWidgetItem(
                 row_composition_summary(
                     row,
-                    as_oxides=self._as_oxides(),
+                    as_oxides=self._oxide_factors_active(),
                     fe_as=self._fe_as(),
                     close=self._close(),
                 )
@@ -768,7 +956,7 @@ class CompositionPanel(QWidget):
             self.spectrum_table.setItem(i, 2, formula_item)
             vals = convert_values(
                 row.values,
-                as_oxides=self._as_oxides(),
+                as_oxides=self._oxide_factors_active(),
                 fe_as=self._fe_as(),
                 close=self._close(),
             )
@@ -896,7 +1084,7 @@ class CompositionPanel(QWidget):
 
     def _kw(self) -> dict:
         return {
-            "as_oxides": self._as_oxides(),
+            "as_oxides": self._oxide_factors_active(),
             "fe_as": self._fe_as(),
             "close": self._close(),
         }
@@ -958,7 +1146,14 @@ class CompositionPanel(QWidget):
         plot.clear()
         xk = self.corr_x.currentText()
         yk = self.corr_y.currentText()
-        unit = "% (closed)" if self._close() else ("oxide units" if self._as_oxides() else "rel. %")
+        if self._close():
+            unit = "% (closed)"
+        elif self._value_source() == VALUE_WT:
+            unit = "wt% (formula)" if self._as_oxides() else "wt%"
+        elif self._as_oxides():
+            unit = "oxide units"
+        else:
+            unit = "rel. %"
         plot.setLabel("bottom", f"{xk}  {unit}", color="k")
         plot.setLabel("left", f"{yk}  {unit}", color="k")
         if not self.summaries or not xk or not yk:
@@ -1121,6 +1316,8 @@ class CompositionPanel(QWidget):
             "oxides": bool(self.oxides_check.isChecked()),
             "fe_as": self.fe_combo.currentText(),
             "close": bool(self.close_check.isChecked()),
+            "value_source": self._value_source(),
+            "matrix": self.get_matrix_assumptions().to_dict(),
             "errorbars": bool(self.errorbar_check.isChecked()),
             "plot_tab": (
                 int(self.plot_tabs.currentIndex())
@@ -1174,14 +1371,21 @@ class CompositionPanel(QWidget):
         self.close_check.blockSignals(True)
         self.close_check.setChecked(bool(state.get("close", False)))
         self.close_check.blockSignals(False)
+        if state.get("value_source"):
+            self._set_value_source(str(state["value_source"]), user=True)
+        if state.get("matrix"):
+            self.set_matrix_assumptions(
+                MatrixAssumptions.from_dict(state["matrix"])
+            )
         self.errorbar_check.blockSignals(True)
         self.errorbar_check.setChecked(bool(state.get("errorbars", True)))
         self.errorbar_check.blockSignals(False)
-        self.fe_combo.setEnabled(self._as_oxides())
+        self.fe_combo.setEnabled(self._as_oxides() and self._value_source() != VALUE_WT)
 
         self.rows = [
             CompositionRow.from_dict(r) for r in (state.get("rows") or [])
         ]
+        self._apply_value_source()
         self._selected_sample = state.get("selected_sample")
         if not self.rows:
             self.summaries = []

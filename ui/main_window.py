@@ -99,6 +99,12 @@ class MainWindow(QMainWindow):
         self.open_action.setStatusTip("Open an XRF spectrum file")
         self.open_action.triggered.connect(self.open_spectrum)
 
+        self.open_overlay_action = QAction("Open as &Overlay...", self)
+        self.open_overlay_action.setStatusTip(
+            "Add a spectrum on top of the current plot for comparison"
+        )
+        self.open_overlay_action.triggered.connect(self.open_spectrum_as_overlay)
+
         self.open_ipj_action = QAction("Open &IPJ Project...", self)
         self.open_ipj_action.setStatusTip(
             "Open an Oxford INCA / Horiba XGT .ipj mapping project"
@@ -128,8 +134,16 @@ class MainWindow(QMainWindow):
         self.save_project_as_action.triggered.connect(self.save_project_as)
         
         self.export_results_action = QAction("&Export Results...", self)
-        self.export_results_action.setStatusTip("Export analysis results")
+        self.export_results_action.setStatusTip(
+            "Export semi-quant relative intensities from the Results tab"
+        )
         self.export_results_action.triggered.connect(self.export_results)
+
+        self.export_fp_action = QAction("Export FP Composition (&wt%)...", self)
+        self.export_fp_action.setStatusTip(
+            "Export fundamental-parameters wt% from Analysis → Composition"
+        )
+        self.export_fp_action.triggered.connect(self.export_fp_results)
         
         self.exit_action = QAction("E&xit", self)
         self.exit_action.setShortcut(QKeySequence.Quit)
@@ -213,6 +227,7 @@ class MainWindow(QMainWindow):
         # File menu
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.open_overlay_action)
         file_menu.addAction(self.open_ipj_action)
         file_menu.addAction(self.merge_ipj_action)
         file_menu.addAction(self.open_project_action)
@@ -221,6 +236,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_project_as_action)
         file_menu.addSeparator()
         file_menu.addAction(self.export_results_action)
+        file_menu.addAction(self.export_fp_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         
@@ -280,6 +296,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.batch_analysis_panel, "Batch Analysis")
         # Connect to Analysis tab's element panel for settings
         self.batch_analysis_panel.set_element_panel(self.element_panel)
+        self.batch_analysis_panel.set_results_panel(self.results_panel)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         self.batch_analysis_panel.spectrum_selected.connect(
             self.on_batch_composition_spectrum_selected
@@ -421,6 +438,7 @@ class MainWindow(QMainWindow):
             lambda: self.quantify_fp(live=True)
         )
         self.results_panel.export_button.clicked.connect(self.export_results)
+        self.results_panel.export_fp_requested.connect(self.export_fp_results)
 
         self.refresh_tube_guides()
         
@@ -672,6 +690,7 @@ class MainWindow(QMainWindow):
         self.session.fp_result = analysis.get("fp_result")
 
         self.results_panel.clear_results()
+        self.spectrum_widget.clear_overlays()
         self.spectrum_widget.set_fitted_spectrum(None)
         self.spectrum_widget.set_background(None)
         self.spectrum_widget.clear_peak_markers()
@@ -867,6 +886,31 @@ class MainWindow(QMainWindow):
                     f"Failed to load spectrum:\n{str(e)}"
                 )
 
+    def open_spectrum_as_overlay(self):
+        """Add a spectrum to the plot without replacing the current one."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Spectrum as Overlay",
+            "",
+            "All Supported (*.txt *.csv *.mca *.h5 *.hdf5);;Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca);;HDF5 Files (*.h5 *.hdf5);;All Files (*)"
+        )
+        if not file_path:
+            return
+        try:
+            spectrum = self.io_handler.load_spectrum(file_path)
+            from pathlib import Path as _Path
+            name = _Path(file_path).stem
+            if getattr(spectrum, "metadata", None) is not None:
+                spectrum.metadata.setdefault("name", name)
+            self.spectrum_widget.add_overlay(spectrum, name=name)
+            self.status_bar.showMessage(f"Overlay: {name}", 5000)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error Loading Overlay",
+                f"Failed to load spectrum:\n{str(e)}",
+            )
+
     def open_ipj_project(self):
         """Open an INCA/XGT .ipj mapping project in the Mapping tab."""
         self.tab_widget.setCurrentWidget(self.mapping_panel)
@@ -976,25 +1020,68 @@ class MainWindow(QMainWindow):
         )
     
     def export_results(self):
-        """Export analysis results"""
+        """Export semi-quant relative intensities from the Results tab."""
+        results = self.results_panel.get_results()
+        if not results:
+            QMessageBox.information(
+                self,
+                "Export Results",
+                "No semi-quant results to export. Run Semi-Quant on the Results tab.\n\n"
+                "To export FP wt%, use File → Export FP Composition (wt%) "
+                "or the Export wt% button on Composition.",
+            )
+            return
+        self._export_result_rows(
+            results,
+            title="Export Results",
+            default_name="semi_quant.csv",
+        )
+
+    def export_fp_results(self):
+        """Export FP wt% from the Composition tab."""
+        results = self.results_panel.get_fp_results()
+        if not results:
+            QMessageBox.information(
+                self,
+                "Export FP Composition",
+                "No FP wt% results to export. Run FP Composition on the Composition tab.",
+            )
+            return
+        rows = []
+        for item in results:
+            role = item.get("role")
+            rows.append(
+                {
+                    "Element": item.get("element"),
+                    "wt%": item.get("concentration"),
+                    "Source": "assumed" if role == "assumed" else "measured",
+                    "Line": item.get("line", ""),
+                }
+            )
+        self._export_result_rows(
+            rows,
+            title="Export FP Composition (wt%)",
+            default_name="fp_composition_wt.csv",
+        )
+
+    def _export_result_rows(self, rows, *, title, default_name):
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Results",
-            "",
-            "CSV Files (*.csv);;Excel Files (*.xlsx);;All Files (*)"
+            title,
+            default_name,
+            "CSV Files (*.csv);;Excel Files (*.xlsx);;All Files (*)",
         )
-        
-        if file_path:
-            try:
-                results = self.results_panel.get_results()
-                self.io_handler.export_results(results, file_path)
-                self.status_bar.showMessage(f"Exported: {file_path}", 5000)
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Error Exporting Results",
-                    f"Failed to export results:\n{str(e)}"
-                )
+        if not file_path:
+            return
+        try:
+            self.io_handler.export_results(rows, file_path)
+            self.status_bar.showMessage(f"Exported: {file_path}", 5000)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                title,
+                f"Failed to export results:\n{str(e)}",
+            )
     
     def fit_spectrum(self):
         """Fit the current spectrum"""

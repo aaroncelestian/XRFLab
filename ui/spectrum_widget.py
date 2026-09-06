@@ -12,6 +12,27 @@ from PySide6.QtGui import QColor
 from core.xray_data import get_element_lines, build_tube_guide_regions
 from core.peak_fitting import PeakFitter
 
+_OVERLAY_COLORS = [
+    "#d32f2f",
+    "#388e3c",
+    "#f57c00",
+    "#7b1fa2",
+    "#0097a7",
+    "#c2185b",
+    "#689f38",
+    "#5d4037",
+    "#455a64",
+    "#e65100",
+]
+
+
+def _normalize_counts(counts, scale_to=1.0):
+    y = np.asarray(counts, dtype=float)
+    peak = float(np.max(y)) if y.size else 0.0
+    if peak <= 0:
+        return y
+    return y * (float(scale_to) / peak)
+
 
 class SpectrumWidget(QWidget):
     """Widget for displaying XRF spectra with interactive features"""
@@ -32,6 +53,8 @@ class SpectrumWidget(QWidget):
         self._tube_guides_visible = True
         self._energy_pick_mode = False
         self._pick_marker = None
+        self._overlays = []
+        self._overlay_color_i = 0
         
         self._setup_ui()
         self._configure_plot()
@@ -78,12 +101,37 @@ class SpectrumWidget(QWidget):
         self.log_y_checkbox.setStyleSheet(small_btn_style)
         self.log_y_checkbox.toggled.connect(self._on_log_y_toggled)
         bottom_bar.addWidget(self.log_y_checkbox)
+
+        self.pin_overlay_button = QPushButton("Pin overlay")
+        self.pin_overlay_button.setToolTip(
+            "Keep the current spectrum on the plot when you load another one"
+        )
+        self.pin_overlay_button.setStyleSheet(small_btn_style)
+        self.pin_overlay_button.setFixedHeight(22)
+        self.pin_overlay_button.clicked.connect(self.pin_current_overlay)
+        bottom_bar.addWidget(self.pin_overlay_button)
+
+        self.clear_overlays_button = QPushButton("Clear overlays")
+        self.clear_overlays_button.setToolTip("Remove comparison spectra from the plot")
+        self.clear_overlays_button.setStyleSheet(small_btn_style)
+        self.clear_overlays_button.setFixedHeight(22)
+        self.clear_overlays_button.clicked.connect(self.clear_overlays)
+        bottom_bar.addWidget(self.clear_overlays_button)
+
+        self.normalize_checkbox = QCheckBox("Normalize")
+        self.normalize_checkbox.setToolTip(
+            "Scale each spectrum to its own maximum for shape comparison"
+        )
+        self.normalize_checkbox.setStyleSheet(small_btn_style)
+        self.normalize_checkbox.toggled.connect(self._on_normalize_toggled)
+        bottom_bar.addWidget(self.normalize_checkbox)
         
         self.info_label = QLabel("Energy: -- keV | Counts: --")
         self.info_label.setStyleSheet("padding: 2px 5px; background-color: #f0f0f0;")
         bottom_bar.addWidget(self.info_label, stretch=1)
         
         layout.addLayout(bottom_bar)
+        self._refresh_overlay_controls()
     
     def _configure_plot(self):
         """Configure plot appearance and behavior"""
@@ -135,6 +183,72 @@ class SpectrumWidget(QWidget):
             spectrum: Spectrum object with energy and counts arrays
         """
         self.spectrum_data = spectrum
+        self._update_plot()
+
+    def _next_overlay_color(self) -> str:
+        color = _OVERLAY_COLORS[self._overlay_color_i % len(_OVERLAY_COLORS)]
+        self._overlay_color_i += 1
+        return color
+
+    def _spectrum_overlay_name(self, spectrum, fallback="spectrum") -> str:
+        meta = getattr(spectrum, "metadata", None) or {}
+        name = meta.get("name") or meta.get("source_label") or fallback
+        return str(name)
+
+    def add_overlay(self, spectrum, name=None, color=None):
+        """Keep a comparison spectrum on the plot (does not replace the primary)."""
+        if spectrum is None:
+            return
+        energy = np.asarray(getattr(spectrum, "energy", None), dtype=float)
+        counts = np.asarray(getattr(spectrum, "counts", None), dtype=float)
+        if energy.size == 0 or counts.size == 0 or energy.size != counts.size:
+            return
+        label = str(name or self._spectrum_overlay_name(spectrum))
+        existing = {ov["name"] for ov in self._overlays}
+        base = label
+        n = 2
+        while label in existing:
+            label = f"{base} ({n})"
+            n += 1
+        self._overlays.append(
+            {
+                "name": label,
+                "energy": energy.copy(),
+                "counts": counts.copy(),
+                "color": color or self._next_overlay_color(),
+            }
+        )
+        self._refresh_overlay_controls()
+        self._update_plot()
+
+    def pin_current_overlay(self):
+        """Pin the currently displayed spectrum as a comparison overlay."""
+        if self.spectrum_data is None:
+            return
+        self.add_overlay(
+            self.spectrum_data,
+            name=self._spectrum_overlay_name(self.spectrum_data, "Pinned"),
+        )
+
+    def clear_overlays(self):
+        self._overlays = []
+        self._overlay_color_i = 0
+        self._refresh_overlay_controls()
+        self._update_plot()
+
+    def overlay_count(self) -> int:
+        return len(self._overlays)
+
+    def _refresh_overlay_controls(self):
+        n = len(self._overlays)
+        if hasattr(self, "pin_overlay_button"):
+            self.pin_overlay_button.setText(
+                "Pin overlay" if n == 0 else f"Pin overlay ({n})"
+            )
+        if hasattr(self, "clear_overlays_button"):
+            self.clear_overlays_button.setEnabled(n > 0)
+
+    def _on_normalize_toggled(self, _checked=False):
         self._update_plot()
     
     def set_fitted_spectrum(self, fitted_spectrum):
@@ -568,7 +682,11 @@ class SpectrumWidget(QWidget):
     def _update_plot(self):
         """Update the plot with current data"""
         plot_item = self.plot_widget.getPlotItem()
-        # Preserve markers across clear/redraw
+        normalize = bool(
+            getattr(self, "normalize_checkbox", None)
+            and self.normalize_checkbox.isChecked()
+        )
+        plot_item.setLabel("left", "Normalized" if normalize else "Counts", units="")
         saved_specs = list(self._peak_marker_specs)
         saved_tube = list(self._tube_guide_specs)
         tube_vis = self._tube_guides_visible
@@ -588,41 +706,70 @@ class SpectrumWidget(QWidget):
 
         # Tube guides behind the measured curve
         self._redraw_tube_guides()
-        
-        if self.spectrum_data is None:
+
+        overlays = list(self._overlays or [])
+        if self.spectrum_data is None and not overlays:
             return
-        
-        # Plot measured spectrum
+
+        primary_peak = 1.0
+        if self.spectrum_data is not None and len(self.spectrum_data.counts):
+            primary_peak = float(np.max(self.spectrum_data.counts)) or 1.0
+
+        def _y(counts, peak=None):
+            y = np.asarray(counts, dtype=float)
+            if not normalize:
+                return y
+            scale = float(peak if peak is not None else (np.max(y) if y.size else 1.0))
+            if scale <= 0:
+                return y
+            return y / scale
+
+        for overlay in overlays:
+            plot_item.plot(
+                overlay["energy"],
+                _y(overlay["counts"]),
+                pen=pg.mkPen(overlay["color"], width=1.5),
+                name=overlay["name"],
+            )
+
+        if self.spectrum_data is None:
+            self.residuals_widget.getPlotItem().clear()
+            self._redraw_peak_markers()
+            return
+
+        primary_name = "Measured"
+        meta = getattr(self.spectrum_data, "metadata", None) or {}
+        if overlays:
+            primary_name = str(meta.get("name") or meta.get("source_label") or "Measured")
+
         plot_item.plot(
             self.spectrum_data.energy,
-            self.spectrum_data.counts,
-            pen=pg.mkPen('b', width=2),
-            name='Measured'
+            _y(self.spectrum_data.counts, primary_peak),
+            pen=pg.mkPen("b", width=2),
+            name=primary_name,
         )
-        
-        # Plot background if available
-        if self.background_data is not None:
+
+        if self.background_data is not None and not overlays:
             plot_item.plot(
                 self.spectrum_data.energy,
-                self.background_data,
-                pen=pg.mkPen('g', width=1, style=Qt.DashLine),
-                name='Background'
+                _y(self.background_data, primary_peak),
+                pen=pg.mkPen("g", width=1, style=Qt.DashLine),
+                name="Background",
             )
-        
-        # Plot fitted spectrum if available
-        if self.fitted_data is not None:
+
+        if self.fitted_data is not None and not overlays:
             plot_item.plot(
                 self.spectrum_data.energy,
-                self.fitted_data,
-                pen=pg.mkPen('r', width=2),
-                name='Fitted'
+                _y(self.fitted_data, primary_peak),
+                pen=pg.mkPen("r", width=2),
+                name="Fitted",
             )
-            
-            # Update residuals
             self._update_residuals()
-        
-        # Restore peak markers on top of spectra
+        elif overlays:
+            self.residuals_widget.getPlotItem().clear()
+
         self._redraw_peak_markers()
+
     def _update_residuals(self):
         """Update residuals plot"""
         if self.spectrum_data is None or self.fitted_data is None:

@@ -21,12 +21,15 @@ from core.batch_processing import (
     BatchProcessor,
     BatchProcessingConfig,
     BatchFitResult,
+    apply_fp_quantification,
     rename_files_in_place,
     sanitize_sample_name,
 )
-from core.composition import numbered_replicate_names, strip_replicate_suffix
+from core.composition import VALUE_WT, numbered_replicate_names, strip_replicate_suffix
+from core.matrix_model import MatrixAssumptions
 from ui.element_panel import ElementPanel
 from ui.composition_panel import CompositionPanel
+from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts
 
 
 class BatchProcessingWorker(QThread):
@@ -67,12 +70,18 @@ class BatchAnalysisPanel(QWidget):
         self.results = []
         self.current_result = None
         self.element_panel = None  # Will be set from main window
+        self._results_panel = None
         self._instrument_state = None
         self._memory_spectra = {}  # display name -> Spectrum (IPJ / Mapping)
+        self._overlay_curves = []
         self.composition_panel = CompositionPanel(embedded_in_batch=True)
         self.composition_panel.sample_activated.connect(self._on_composition_sample_activated)
         self.composition_panel.open_in_batch_requested.connect(
             self._on_composition_open_in_batch
+        )
+        self.composition_panel.fp_recompute_requested.connect(self._recompute_fp)
+        self.composition_panel.display_mode_changed.connect(
+            lambda _mode: self._on_composition_display_changed()
         )
         
         self._init_ui()
@@ -86,6 +95,14 @@ class BatchAnalysisPanel(QWidget):
         """Set reference to Analysis tab's element panel"""
         self.element_panel = element_panel
         self._update_settings_summary()
+
+    def set_results_panel(self, results_panel):
+        """Share Analysis matrix assumptions for FP wt%."""
+        self._results_panel = results_panel
+        if results_panel is not None:
+            self.composition_panel.set_matrix_assumptions(
+                results_panel.get_matrix_assumptions()
+            )
     
     def _init_ui(self):
         """Initialize the user interface with sub-tabs"""
@@ -139,6 +156,60 @@ class BatchAnalysisPanel(QWidget):
         if names:
             self.select_spectra(names)
             self.left_tab_widget.setCurrentIndex(2)
+
+    def _matrix_assumptions(self) -> MatrixAssumptions:
+        return self.composition_panel.get_matrix_assumptions()
+
+    def _experimental_params(self) -> dict:
+        if self.element_panel:
+            params = dict(self.element_panel.get_experimental_params())
+        else:
+            params = {
+                "excitation_energy": float(self.config.excitation_energy or 50.0),
+                "incident_angle": float(self.config.incident_angle or 45.0),
+            }
+        params.setdefault("takeoff_angle", params.get("incident_angle", 45.0))
+        return params
+
+    def _recompute_fp(self) -> None:
+        if not self.results:
+            QMessageBox.information(
+                self,
+                "FP Composition",
+                "Process spectra first, then compute FP wt%.",
+            )
+            return
+        assumptions = self._matrix_assumptions()
+        self.config.matrix_assumptions = assumptions
+        n_ok = apply_fp_quantification(
+            self.results,
+            assumptions,
+            self._experimental_params(),
+            tube_element=self.config.tube_element,
+            sample_contains_tube_element=self.config.sample_contains_tube_element,
+        )
+        if self.processor is not None:
+            self.processor.results = self.results
+        self.composition_panel._value_source_user_set = True
+        if n_ok:
+            self.composition_panel._set_value_source("wt", user=True)
+        self.sync_composition()
+        self._populate_element_checkboxes()
+        if n_ok == 0:
+            QMessageBox.warning(
+                self,
+                "FP Composition",
+                "FP wt% could not be computed. Fit labeled sample peaks first.",
+            )
+        else:
+            n_fail = sum(1 for r in self.results if r.fit_success and not r.fp_success)
+            extra = f" ({n_fail} failed)" if n_fail else ""
+            self.progress_label.setText(
+                f"FP wt% for {n_ok} spectrum{'s' if n_ok != 1 else ''}{extra}"
+            )
+
+    def _on_composition_display_changed(self) -> None:
+        self._populate_element_checkboxes()
 
     def sync_composition(self) -> None:
         """Refresh embedded composition tables from the latest batch fits."""
@@ -317,8 +388,11 @@ class BatchAnalysisPanel(QWidget):
             self.config.compton_fwhm_kev = float(
                 self.element_panel.compton_fwhm_spin.value()
             ) / 1000.0
+            self.config.incident_angle = float(self.element_panel.angle_spin.value())
+            self.config.takeoff_angle = float(self.element_panel.angle_spin.value())
             if self._instrument_state is not None:
                 self.config.instrument_state = self._instrument_state
+            self.config.matrix_assumptions = self._matrix_assumptions()
 
         except Exception as e:
             self.settings_elements.setText("error")
@@ -648,8 +722,10 @@ class BatchAnalysisPanel(QWidget):
         ])
         self.results_table.horizontalHeader().setStretchLastSection(True)
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.results_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.results_table.setToolTip("Select a row to show its fit on the right")
+        self.results_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.results_table.setToolTip(
+            "Select a row to show its fit. Shift/Cmd-click several rows to overlay spectra."
+        )
         self.results_table.itemSelectionChanged.connect(self._on_spectrum_selected)
         layout.addWidget(self.results_table)
 
@@ -754,6 +830,16 @@ class BatchAnalysisPanel(QWidget):
         self.spectrum_plot.setTitle('Spectrum fit', color='k', size='11pt')
         self.spectrum_plot.addLegend(offset=(10, 10))
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.25)
+
+        overlay_row = QHBoxLayout()
+        self.normalize_overlay_check = QCheckBox("Normalize overlay")
+        self.normalize_overlay_check.setToolTip(
+            "When several spectra are selected, scale each to its own max"
+        )
+        self.normalize_overlay_check.toggled.connect(self._on_spectrum_selected)
+        overlay_row.addWidget(self.normalize_overlay_check)
+        overlay_row.addStretch()
+        layout.addLayout(overlay_row)
         
         # Measured spectrum
         self.measured_curve = self.spectrum_plot.plot(
@@ -874,6 +960,8 @@ class BatchAnalysisPanel(QWidget):
         if not self.config.elements:
             QMessageBox.warning(self, "No Elements", "Please select elements to fit.")
             return
+
+        self._update_settings_summary()
         
         jobs = []
         for i in range(self.file_list.count()):
@@ -884,6 +972,12 @@ class BatchAnalysisPanel(QWidget):
                 jobs.append(spec)
             else:
                 jobs.append(Path(name))
+
+        if self._results_panel is not None:
+            self.composition_panel.set_matrix_assumptions(
+                self._results_panel.get_matrix_assumptions()
+            )
+        self.config.matrix_assumptions = self._matrix_assumptions()
         
         # Create processor
         self.processor = BatchProcessor(self.config)
@@ -919,8 +1013,8 @@ class BatchAnalysisPanel(QWidget):
         self._update_summary()
         
         # Populate element checkboxes for trends
-        self._populate_element_checkboxes()
         self.sync_composition()
+        self._populate_element_checkboxes()
 
         self.results_ready.emit()
         self.left_tab_widget.setCurrentIndex(2)
@@ -929,8 +1023,8 @@ class BatchAnalysisPanel(QWidget):
             self,
             "Processing Complete",
             f"Processed {len(results)} spectra.\n"
-            "Review fits on Results, compositions on Composition, and "
-            "plots on Trends.",
+            "Review fits on Results, compositions (FP wt% or relative intensity) "
+            "on Composition, and plots on Trends.",
         )
     
     def _on_processing_error(self, error_message):
@@ -988,30 +1082,88 @@ class BatchAnalysisPanel(QWidget):
         self.summary_text.setPlainText(summary)
     
     def select_spectra(self, names):
-        """Select the first matching spectrum so its fit is shown."""
+        """Select matching spectra so their fits (or overlay) are shown."""
         if not names or not self.results:
             return
         wanted = {str(n) for n in names}
+        rows = []
         for i, result in enumerate(self.results):
             if result.spectrum_name in wanted or Path(result.spectrum_path).name in wanted:
-                self.results_table.selectRow(i)
-                self._display_fit_result(result)
-                return
+                rows.append(i)
+        if not rows:
+            return
+        self.results_table.blockSignals(True)
+        self.results_table.clearSelection()
+        for i in rows:
+            self.results_table.selectRow(i)
+        self.results_table.blockSignals(False)
+        self._on_spectrum_selected()
+
+    def _selected_results(self):
+        rows = sorted(
+            {
+                index.row()
+                for index in self.results_table.selectedIndexes()
+            }
+        )
+        return [self.results[i] for i in rows if 0 <= i < len(self.results)]
 
     def _on_spectrum_selected(self):
         """Handle spectrum selection from results table"""
-        selected_rows = self.results_table.selectedIndexes()
-        if not selected_rows:
+        selected = self._selected_results()
+        if not selected:
             return
-        
-        row = selected_rows[0].row()
-        result = self.results[row]
-        
-        self._display_fit_result(result)
-    
+        if len(selected) > 1:
+            self._display_overlay(selected)
+            return
+        self._display_fit_result(selected[0])
+
+    def _clear_overlay_curves(self):
+        for curve in self._overlay_curves:
+            self.spectrum_plot.removeItem(curve)
+        self._overlay_curves = []
+
+    def _display_overlay(self, results):
+        """Overlay measured spectra of several selected fits."""
+        self.current_result = results[0]
+        self._clear_overlay_curves()
+        for curve in self.element_curves.values():
+            self.spectrum_plot.removeItem(curve)
+        self.element_curves.clear()
+        self.measured_curve.setData([], [])
+        self.fitted_curve.setData([], [])
+        self.residual_curve.setData([], [])
+
+        normalize = bool(self.normalize_overlay_check.isChecked())
+        self.spectrum_plot.setLabel(
+            "left", "Normalized" if normalize else "Counts", color="k"
+        )
+        names = []
+        for i, result in enumerate(results):
+            if result.energy is None or result.measured_counts is None:
+                continue
+            y = result.measured_counts
+            if normalize:
+                y = _normalize_counts(y)
+            color = _OVERLAY_COLORS[i % len(_OVERLAY_COLORS)]
+            curve = self.spectrum_plot.plot(
+                x=result.energy,
+                y=y,
+                pen=pg.mkPen(color, width=2),
+                name=result.spectrum_name,
+            )
+            self._overlay_curves.append(curve)
+            names.append(result.spectrum_name)
+        title = f"Overlay ({len(names)} spectra)"
+        if len(names) <= 3:
+            title = " + ".join(names)
+        self.spectrum_plot.setTitle(title, color="k")
+
     def _display_fit_result(self, result: BatchFitResult):
         """Display fit result in plot"""
         self.current_result = result
+        self._clear_overlay_curves()
+        self.spectrum_plot.setLabel("left", "Counts", color="k")
         
         if result.energy is None or result.measured_counts is None:
             return
@@ -1022,6 +1174,8 @@ class BatchAnalysisPanel(QWidget):
         # Plot fitted spectrum
         if result.fitted_spectrum is not None:
             self.fitted_curve.setData(x=result.energy, y=result.fitted_spectrum)
+        else:
+            self.fitted_curve.setData([], [])
         
         # Plot element contributions
         # Clear existing element curves
@@ -1107,6 +1261,8 @@ class BatchAnalysisPanel(QWidget):
         all_elements = set()
         for result in self.results:
             all_elements.update(result.concentrations.keys())
+            if self.composition_panel._value_source() == VALUE_WT:
+                all_elements.update((result.fp_wt or {}).keys())
         
         # Create checkbox for each element
         for element in sorted(all_elements):
@@ -1165,6 +1321,9 @@ class BatchAnalysisPanel(QWidget):
     
     def _create_element_trend_plot(self, element):
         """Create concentration trend plot for a single element"""
+        use_wt = self.composition_panel._value_source() == VALUE_WT
+        ylabel = "wt%" if use_wt else "Relative Intensity"
+        title_kind = "wt%" if use_wt else "Relative Intensity"
         # Create plot widget
         plot_widget = pg.GraphicsLayoutWidget()
         plot_widget.setBackground('w')
@@ -1172,9 +1331,9 @@ class BatchAnalysisPanel(QWidget):
         
         # Create plot
         plot = plot_widget.addPlot()
-        plot.setLabel('left', f'{element} Relative Intensity', units='%', color='k')
+        plot.setLabel('left', f'{element} {ylabel}', units='%', color='k')
         plot.setLabel('bottom', 'Spectrum Number', color='k')
-        plot.setTitle(f'{element} Concentration Trend', color='k', size='12pt')
+        plot.setTitle(f'{element} {title_kind} Trend', color='k', size='12pt')
         plot.showGrid(x=True, y=True, alpha=0.3)
         
         # Extract data
@@ -1183,9 +1342,10 @@ class BatchAnalysisPanel(QWidget):
         errors = []
         
         for i, result in enumerate(self.results):
-            if element in result.concentrations:
+            values = (result.fp_wt or {}) if use_wt else result.concentrations
+            if element in values:
                 spectrum_numbers.append(i + 1)
-                concentrations.append(result.concentrations[element])
+                concentrations.append(values[element])
                 errors.append(result.concentration_errors.get(element, 0))
         
         if not spectrum_numbers:
@@ -1233,7 +1393,7 @@ class BatchAnalysisPanel(QWidget):
                 slope = coeffs[0]
                 if abs(slope) > 0.001:
                     plot.setTitle(
-                        f'{element} Relative Intensity Trend (slope: {slope:+.4f} %/spectrum)',
+                        f'{element} {title_kind} Trend (slope: {slope:+.4f} %/spectrum)',
                         color='k', size='12pt'
                     )
             except:
