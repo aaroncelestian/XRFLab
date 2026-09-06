@@ -42,6 +42,8 @@ class TubeProfile:
     spectrum_path: Optional[str] = None
     measured_date: Optional[str] = None
     notes: str = ''
+    scatterer: str = ''  # e.g. 'air', 'Fe', 'polymer'
+    skipped_tube_lines: List[str] = field(default_factory=list)
 
     def ratio(self, line: str, default: float = 1.0) -> float:
         return float(self.line_ratios.get(line, default))
@@ -73,6 +75,8 @@ class TubeProfile:
             spectrum_path=data.get('spectrum_path'),
             measured_date=data.get('measured_date'),
             notes=str(data.get('notes', '')),
+            scatterer=str(data.get('scatterer', '')),
+            skipped_tube_lines=list(data.get('skipped_tube_lines') or []),
         )
 
 
@@ -125,8 +129,144 @@ def default_tube_profile(tube_element: str = 'Rh', tube_kv: float = 50.0) -> Tub
         compton_scale=compton,
         reference_line=ref,
         source='default',
-        notes='Built-in approximate ratios; replace with blank measurement',
+        notes='Built-in approximate ratios; replace with a scatter / known-material measurement',
     )
+
+
+# Known scatterers for tube-profile measurement when a true empty-beam
+# blank is not possible. Air is valid; a polymer or foil is often cleaner.
+SCATTERER_PRESETS: Dict[str, dict] = {
+    "air": {
+        "label": "Air scatter (Ar)",
+        "elements": ["Ar"],
+        "hint": "Ar Kα (~2.96 keV) can sit near Rh L; those L lines are skipped.",
+    },
+    "polymer": {
+        "label": "Polymer / carbon (no XRF lines)",
+        "elements": [],
+        "hint": "Best practical blank: C/O/H have no lines in the typical XRF range.",
+    },
+    "Al": {
+        "label": "Aluminum",
+        "elements": ["Al"],
+        "hint": "Al K is far from Rh L and Rh K — a good foil scatterer.",
+    },
+    "Si": {
+        "label": "Silicon / quartz / glass",
+        "elements": ["Si"],
+        "hint": "Si Kα ~1.74 keV; keep away from materials with lines near the tube anode.",
+    },
+    "Mg": {
+        "label": "Magnesium",
+        "elements": ["Mg"],
+        "hint": "Mg K is well below Rh L.",
+    },
+    "Ti": {
+        "label": "Titanium",
+        "elements": ["Ti"],
+        "hint": "Sample lines are fitted as Ti; overlapping tube lines are skipped.",
+    },
+    "Fe": {
+        "label": "Iron / steel",
+        "elements": ["Fe"],
+        "hint": "Use a foil you already have for FWHM. Fe K does not overlap Rh K/L.",
+    },
+    "Cu": {
+        "label": "Copper",
+        "elements": ["Cu"],
+        "hint": "Cu K is between Rh L and Rh K — usually a clean scatterer.",
+    },
+    "Zn": {
+        "label": "Zinc",
+        "elements": ["Zn"],
+        "hint": "Zn K is between Rh L and Rh K.",
+    },
+    "other": {
+        "label": "Other element…",
+        "elements": None,
+        "hint": "Pick the main element in the scatterer. Overlapping tube lines are skipped.",
+    },
+}
+
+# Two typical SDD widths — skip tube lines this close to a sample line
+TUBE_SAMPLE_OVERLAP_KEV = 0.30
+
+
+def _element_dicts(symbols: Optional[List[str]]) -> List[dict]:
+    from core.advanced_peak_fitting import get_element_z
+
+    out = []
+    for symbol in symbols or []:
+        sym = str(symbol).strip()
+        if not sym:
+            continue
+        z = get_element_z(sym)
+        if z:
+            out.append({"symbol": sym, "z": int(z)})
+    return out
+
+
+def sample_emission_energies(symbols: Optional[List[str]]) -> List[Tuple[str, str, float]]:
+    """Return (symbol, line, energy_keV) for major lines of the scatterer."""
+    from core.xray_data import get_element_lines
+
+    lines_out: List[Tuple[str, str, float]] = []
+    for elem in _element_dicts(symbols):
+        symbol = elem["symbol"]
+        series = get_element_lines(symbol, elem["z"])
+        for entries in series.values():
+            for item in entries:
+                energy = float(item.get("energy") or 0.0)
+                name = str(item.get("name") or "")
+                if energy >= 0.5 and name:
+                    lines_out.append((symbol, name, energy))
+    return lines_out
+
+
+def tube_line_overlaps_sample(
+    energy_kev: float,
+    sample_lines: List[Tuple[str, str, float]],
+    overlap_tol_kev: float = TUBE_SAMPLE_OVERLAP_KEV,
+) -> Optional[Tuple[str, str, float]]:
+    """If *energy_kev* is within *overlap_tol_kev* of a sample line, return that line."""
+    e0 = float(energy_kev)
+    best = None
+    best_d = overlap_tol_kev
+    for symbol, name, energy in sample_lines:
+        delta = abs(e0 - float(energy))
+        if delta <= best_d:
+            best_d = delta
+            best = (symbol, name, energy)
+    return best
+
+
+def tube_areas_from_peaks(
+    peaks,
+    sample_elements: Optional[List[str]] = None,
+    overlap_tol_kev: float = TUBE_SAMPLE_OVERLAP_KEV,
+) -> Tuple[Dict[str, float], List[str]]:
+    """
+    Sum tube/Compton peak areas, dropping lines that overlap scatterer emission.
+
+    Returns (areas_by_line, skipped_line_names).
+    """
+    sample_lines = sample_emission_energies(sample_elements)
+    areas: Dict[str, float] = {}
+    skipped: List[str] = []
+    for peak in peaks or []:
+        if not getattr(peak, "is_tube_line", False):
+            continue
+        line = getattr(peak, "line", None)
+        if not line:
+            continue
+        energy = float(getattr(peak, "energy", 0.0) or 0.0)
+        hit = tube_line_overlaps_sample(energy, sample_lines, overlap_tol_kev)
+        if hit is not None:
+            if line not in skipped:
+                skipped.append(str(line))
+            continue
+        areas[str(line)] = areas.get(str(line), 0.0) + float(getattr(peak, "area", 0.0) or 0.0)
+    return areas, skipped
 
 
 @dataclass

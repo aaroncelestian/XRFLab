@@ -6,9 +6,9 @@ enhancement, PCA / ratio / particle analysis, and drawn intensity profiles.
 Line scan tab: collected line / multipoint spectra, ROI profiles, and
 area-normalized semi-quant along that series.
 
-Spectra can be sent to Analysis (one at a time) or Batch Analysis
-(selected subset, whole line scan, site, or project). Spectra-only IPJ
-files open in Analysis with every point queued for batch fitting.
+Spectra can be sent to Analysis (one, or several as overlays) or Batch
+Analysis (selected subset, whole line scan, site, or project). Spectra-only
+IPJ files open in Analysis with every point queued for batch fitting.
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 
 from core.batch_processing import sanitize_sample_name
 from core.composition import numbered_replicate_names, strip_replicate_suffix
+from core.peak_fitting import normalize_peak_shape
 
 from core.mapping.camera import (
     StageCamera,
@@ -83,6 +84,7 @@ from core.mapping.display import (
     ratio_map,
     upsample_map,
 )
+from core.mapping.merge import analysis_sample_label
 from core.mapping.models import (
     ElementMap,
     LineScan,
@@ -103,6 +105,7 @@ from core.mapping.profiles import (
 from ui.collapsible_section import CollapsibleSection
 from ui.map_canvas import MapCanvas
 from ui.pixel_spectrum_popup import PixelSpectrumPopup
+from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts, enable_box_zoom
 
 
 def _diverging_lut():
@@ -121,6 +124,7 @@ class MappingPanel(QWidget):
     """Top-level Mapping tab widget."""
 
     spectrum_send_requested = Signal(object, object)  # Spectrum, peak_labels list
+    spectra_compare_requested = Signal(list)  # [(Spectrum, peak_labels, name), ...]
     spectra_batch_requested = Signal(list)  # [(display_name, Spectrum), ...]
     project_loaded = Signal(object)  # MappingProject
     status_message = Signal(str)
@@ -258,8 +262,8 @@ class MappingPanel(QWidget):
         rename_data_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         rename_data_shortcut.activated.connect(self._rename_selected_data_item)
         data_hint = QLabel(
-            "Shift/Ctrl-click to select spectra · F2 / Rename… for Sample_1, Sample_2, … · "
-            "Send selected → Batch for bulk fitting"
+            "Shift/Ctrl-click to select spectra · overlay them here or send to Analysis · "
+            "F2 / Rename… for Sample_1, Sample_2, … · Send selected → Batch for bulk fitting"
         )
         data_hint.setWordWrap(True)
         data_hint.setStyleSheet("color: #666; font-size: 11px;")
@@ -782,7 +786,8 @@ class MappingPanel(QWidget):
         quant_sec.addWidget(self.send_sum_btn)
         self.send_btn = QPushButton("Send spectrum → Analysis")
         self.send_btn.setToolTip(
-            "Send the selected tree spectrum, or a picked pixel / line-mean spectrum"
+            "Send the selected tree spectrum, or a picked pixel / line-mean spectrum. "
+            "Shift/Ctrl-click several spectra to overlay them in Analysis."
         )
         self.send_btn.clicked.connect(self._send_selected_spectrum)
         quant_sec.addWidget(self.send_btn)
@@ -853,10 +858,44 @@ class MappingPanel(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.plot_tabs_label = QLabel("Drawn transect & correlations")
+        self.plot_tabs_label = QLabel("Spectra overlay, drawn transect & correlations")
         right_layout.addWidget(self.plot_tabs_label)
 
         self.map_plot_tabs = QTabWidget()
+
+        overlay_tab = QWidget()
+        overlay_layout = QVBoxLayout(overlay_tab)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setSpacing(4)
+        overlay_hint = QLabel(
+            "Select spectra in Data (Shift/Ctrl-click) to overlay them. "
+            "Send spectrum → Analysis loads one, or overlays several."
+        )
+        overlay_hint.setWordWrap(True)
+        overlay_hint.setStyleSheet("color: #555; font-size: 11px;")
+        overlay_layout.addWidget(overlay_hint)
+        overlay_ctrl = QHBoxLayout()
+        self.spectrum_overlay_log = QCheckBox("Log Y")
+        self.spectrum_overlay_log.toggled.connect(self._on_spectrum_overlay_log)
+        overlay_ctrl.addWidget(self.spectrum_overlay_log)
+        self.spectrum_overlay_norm = QCheckBox("Normalize")
+        self.spectrum_overlay_norm.setToolTip(
+            "Scale each spectrum to its own maximum for shape comparison"
+        )
+        self.spectrum_overlay_norm.toggled.connect(self._refresh_spectrum_overlay_plot)
+        overlay_ctrl.addWidget(self.spectrum_overlay_norm)
+        overlay_ctrl.addStretch(1)
+        overlay_layout.addLayout(overlay_ctrl)
+        self.spectrum_overlay_plot = pg.PlotWidget(title="Selected spectra")
+        self.spectrum_overlay_plot.setBackground("w")
+        self.spectrum_overlay_plot.setLabel("bottom", "Energy", units="keV")
+        self.spectrum_overlay_plot.setLabel("left", "Counts")
+        self.spectrum_overlay_plot.showGrid(x=True, y=True, alpha=0.25)
+        self.spectrum_overlay_plot.addLegend(offset=(10, 10))
+        enable_box_zoom(self.spectrum_overlay_plot)
+        overlay_layout.addWidget(self.spectrum_overlay_plot)
+        self.map_plot_tabs.addTab(overlay_tab, "Spectra")
+        self._spectrum_overlay_tab = overlay_tab
 
         profile_tab = QWidget()
         profile_layout = QVBoxLayout(profile_tab)
@@ -2089,7 +2128,10 @@ class MappingPanel(QWidget):
         act_ren.setShortcut(QKeySequence("F2"))
         menu.addAction(act_ren)
         if payload[0] == "spectrum":
-            act_an = QAction("Send to Analysis", self)
+            if n_spec > 1:
+                act_an = QAction(f"Overlay {n_spec} spectra in Analysis", self)
+            else:
+                act_an = QAction("Send to Analysis", self)
             act_an.triggered.connect(self._send_selected_spectrum)
             menu.addAction(act_an)
             act_b = QAction("Send to Batch Analysis", self)
@@ -3380,6 +3422,8 @@ class MappingPanel(QWidget):
     def _on_tree_selection(self) -> None:
         items = self.tree.selectedItems()
         if not items:
+            self._refresh_send_button_label()
+            self._refresh_spectrum_overlay_plot()
             return
         payload = items[0].data(0, Qt.UserRole)
         if not payload:
@@ -3422,14 +3466,24 @@ class MappingPanel(QWidget):
             fov = self._find_fov(payload[1])
             if fov and fov is not self.current_fov:
                 self._activate_site(fov)
-            self.info_label.setText(f"Selected spectrum: {payload[2]}")
+            spec_items = self._selected_spectrum_tree_items()
+            n_spec = len(spec_items)
+            if n_spec > 1:
+                names = [it.text(0) for it in spec_items[:8]]
+                extra = "…" if n_spec > 8 else ""
+                self.info_label.setText(
+                    f"Selected {n_spec} spectra: {', '.join(names)}{extra}"
+                )
+            else:
+                self.info_label.setText(f"Selected spectrum: {payload[2]}")
             ls = self._collected_line_scan()
-            if ls is not None and ls.is_multipoint:
+            if n_spec <= 1 and ls is not None and ls.is_multipoint:
                 if self.workspace_tabs.currentIndex() != 1:
                     self.workspace_tabs.setCurrentIndex(1)
                 if not self._last_ls_profiles:
                     self._plot_ipj_line_scan(ls)
-            self._highlight_line_scan_point_by_name(payload[2])
+            if n_spec <= 1:
+                self._highlight_line_scan_point_by_name(payload[2])
         elif kind == "linescan":
             fov = self._find_fov(payload[1])
             if fov and fov is not self.current_fov:
@@ -3440,6 +3494,16 @@ class MappingPanel(QWidget):
                         self._plot_ipj_line_scan(ls, switch_tab=True)
                         self._update_line_scan_page()
                         break
+        self._refresh_send_button_label()
+        self._refresh_spectrum_overlay_plot()
+        if (
+            kind == "spectrum"
+            and len(self._selected_spectrum_tree_items()) >= 2
+            and hasattr(self, "_spectrum_overlay_tab")
+        ):
+            if hasattr(self, "workspace_tabs"):
+                self.workspace_tabs.setCurrentIndex(0)
+            self.map_plot_tabs.setCurrentWidget(self._spectrum_overlay_tab)
 
     # -------------------------------------------------------- line tools
     def _uncheck_draw_buttons(self, except_btn=None) -> None:
@@ -3685,9 +3749,15 @@ class MappingPanel(QWidget):
     def _show_pixel_spectrum(self, ms: MapSpectrum) -> None:
         if self._pixel_popup is None:
             self._pixel_popup = PixelSpectrumPopup(self)
-            self._pixel_popup.send_requested.connect(self.spectrum_send_requested.emit)
+            self._pixel_popup.send_requested.connect(self._on_pixel_send_requested)
             self._pixel_popup.finished.connect(self._on_pixel_popup_closed)
         self._pixel_popup.set_spectrum(ms)
+
+    def _on_pixel_send_requested(self, spectrum, peak_labels) -> None:
+        ms = self._picked_spectrum
+        if ms is not None and ms.spectrum is spectrum:
+            self._stamp_analysis_metadata(ms)
+        self.spectrum_send_requested.emit(spectrum, peak_labels)
 
     def _on_pixel_popup_closed(self, _result: int = 0) -> None:
         # Leaving pick mode when the viewer is closed feels natural
@@ -3840,6 +3910,7 @@ class MappingPanel(QWidget):
         # Select it in the data tree if present
         for i in range(self.tree.topLevelItemCount()):
             self._select_spectrum_in_tree(self.tree.topLevelItem(i), ms.name)
+        self._stamp_analysis_metadata(ms, fov)
         self.spectrum_send_requested.emit(ms.spectrum, ms.peak_labels)
         self.status_message.emit(
             f"Sent Sum Spectrum “{ms.name}” to Analysis — "
@@ -4589,7 +4660,11 @@ class MappingPanel(QWidget):
         return None
 
     def _send_selected_spectrum(self) -> None:
-        ms = self._selected_map_spectrum()
+        selected = self._collect_selected_map_spectra()
+        if len(selected) > 1:
+            self._send_spectra_to_analysis(selected)
+            return
+        ms = selected[0] if selected else self._selected_map_spectrum()
         if ms is None:
             QMessageBox.information(
                 self,
@@ -4597,8 +4672,102 @@ class MappingPanel(QWidget):
                 "Select a spectrum in the tree, or Pick pixel spectrum from the cube.",
             )
             return
+        self._stamp_analysis_metadata(ms)
         self.spectrum_send_requested.emit(ms.spectrum, ms.peak_labels)
         self.status_message.emit(f"Sent “{ms.name}” to Analysis")
+
+    def _send_spectra_to_analysis(self, spectra: list) -> None:
+        """Load the first spectrum in Analysis and overlay the rest."""
+        payloads = []
+        for ms in spectra:
+            self._stamp_analysis_metadata(ms)
+            payloads.append(
+                (ms.spectrum, ms.peak_labels, self._batch_display_name(ms))
+            )
+        self.spectra_compare_requested.emit(payloads)
+        n = len(payloads)
+        self.status_message.emit(f"Sent {n} spectra to Analysis as overlay")
+
+    def _stamp_analysis_metadata(
+        self, ms: MapSpectrum, fov: Optional[MappingFOV] = None
+    ) -> str:
+        """Write sample/spectrum labels onto the Spectrum so Analysis can show them."""
+        site = fov or (
+            self.project.find_fov_for_spectrum(ms) if self.project else self.current_fov
+        )
+        sample = self._sample_name_for_site(site) if site else ""
+        label = analysis_sample_label(ms.name, sample)
+        spec = ms.spectrum
+        meta = spec.metadata if isinstance(getattr(spec, "metadata", None), dict) else None
+        if meta is not None:
+            meta["name"] = ms.name
+            if label:
+                meta["sample_name"] = label
+            if site is not None:
+                sample_obj = self._sample_for_site(site)
+                if sample_obj is not None:
+                    typ = str(sample_obj.metadata.get("sample_type") or "")
+                    if typ:
+                        meta["sample_type"] = typ
+        return label
+
+    def _refresh_send_button_label(self) -> None:
+        if not hasattr(self, "send_btn"):
+            return
+        n = len(self._collect_selected_map_spectra())
+        if n > 1:
+            self.send_btn.setText(f"Overlay {n} spectra → Analysis")
+        else:
+            self.send_btn.setText("Send spectrum → Analysis")
+
+    def _on_spectrum_overlay_log(self, checked: bool) -> None:
+        if hasattr(self, "spectrum_overlay_plot"):
+            self.spectrum_overlay_plot.setLogMode(y=bool(checked))
+
+    def _refresh_spectrum_overlay_plot(self) -> None:
+        if not hasattr(self, "spectrum_overlay_plot"):
+            return
+        plot = self.spectrum_overlay_plot
+        plot.clear()
+        legend = getattr(plot.plotItem, "legend", None)
+        if legend is not None:
+            legend.clear()
+        spectra = []
+        seen: set[int] = set()
+        for item in self._selected_spectrum_tree_items():
+            for ms in self._spectra_from_tree_item(item):
+                key = id(ms)
+                if key in seen:
+                    continue
+                seen.add(key)
+                spectra.append(ms)
+        if not spectra:
+            plot.setTitle("Selected spectra")
+            return
+        normalize = bool(self.spectrum_overlay_norm.isChecked())
+        plot.setLabel("left", "Normalized" if normalize else "Counts")
+        names = []
+        for i, ms in enumerate(spectra[:40]):
+            sp = ms.spectrum
+            energy = np.asarray(sp.energy, dtype=float)
+            counts = np.asarray(sp.counts, dtype=float)
+            if energy.size == 0 or counts.size != energy.size:
+                continue
+            y = _normalize_counts(counts) if normalize else counts
+            color = _OVERLAY_COLORS[i % len(_OVERLAY_COLORS)]
+            name = self._batch_display_name(ms)
+            plot.plot(energy, y, pen=pg.mkPen(color, width=1.5), name=name)
+            names.append(name)
+        n = len(names)
+        if n == 0:
+            plot.setTitle("Selected spectra")
+        elif n == 1:
+            plot.setTitle(names[0])
+        elif n <= 3:
+            plot.setTitle(" + ".join(names))
+        else:
+            plot.setTitle(f"Overlay ({n} spectra)")
+        plot.enableAutoRange(axis="xy")
 
     def _batch_display_name(self, ms: MapSpectrum, fov: Optional[MappingFOV] = None) -> str:
         site = fov or (
@@ -4621,6 +4790,7 @@ class MappingPanel(QWidget):
                 else self.current_fov
             )
             spec = ms.spectrum
+            self._stamp_analysis_metadata(ms, fov)
             if isinstance(spec.metadata, dict):
                 spec.metadata.setdefault("name", ms.name)
             pairs.append((self._batch_display_name(ms, fov), spec))
@@ -4802,7 +4972,7 @@ class MappingPanel(QWidget):
         fit_params = self._element_panel.get_fitting_params()
         exp_params = self._element_panel.get_experimental_params()
         background_method = str(fit_params.get("background_method", "snip")).lower()
-        peak_shape = str(fit_params.get("peak_shape", "gaussian")).lower()
+        peak_shape = normalize_peak_shape(fit_params.get("peak_shape", "tail_gaussian"))
 
         distances = line_scan.distances()
         rows = []

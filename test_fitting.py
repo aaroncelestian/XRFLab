@@ -75,7 +75,7 @@ print()
 
 # Test peak shapes
 print("5. Testing different peak shapes...")
-for shape in ['gaussian', 'voigt', 'pseudo_voigt']:
+for shape in ['gaussian', 'tail_gaussian', 'hypermet']:
     try:
         result = fitter.fit_spectrum(
             energy=spectrum.energy,

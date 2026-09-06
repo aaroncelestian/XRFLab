@@ -8,16 +8,27 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
     QPushButton, QLabel, QTextEdit, QFileDialog,
     QProgressBar, QMessageBox, QSplitter, QComboBox,
-    QFormLayout, QSizePolicy, QFrame,
+    QFormLayout, QSizePolicy, QFrame, QTableWidget,
+    QTableWidgetItem, QHeaderView, QCheckBox, QToolButton,
+    QAbstractItemView,
 )
 from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths
 from PySide6.QtGui import QFont
 from pathlib import Path
+import re
 import pyqtgraph as pg
 import numpy as np
 from datetime import datetime
 
 from core.fwhm_calibration import FWHMCalibration, load_fwhm_calibration
+from core.fwhm_standards import (
+    FWHMStandardFile,
+    example_standards_dir,
+    fwhm_lines_for_element,
+    format_line_summary,
+    scan_fwhm_folder,
+)
+from core.smart_peak_id import COMMON_XRF_SYMBOLS
 from calibrate_peak_shape import PeakShapeCalibrator
 
 
@@ -27,12 +38,22 @@ class FWHMCalibrationWorker(QThread):
     progress = Signal(str)
     error = Signal(str)
 
-    def __init__(self, data_dir, model_type='detector', remove_outliers=True, tube_kv=None):
+    def __init__(
+        self,
+        data_dir,
+        model_type='detector',
+        remove_outliers=True,
+        tube_kv=None,
+        file_peaks=None,
+        include_holder_al=True,
+    ):
         super().__init__()
         self.data_dir = data_dir
         self.model_type = model_type
         self.remove_outliers = remove_outliers
         self.tube_kv = tube_kv
+        self.file_peaks = file_peaks
+        self.include_holder_al = include_holder_al
 
     def run(self):
         try:
@@ -42,7 +63,10 @@ class FWHMCalibrationWorker(QThread):
             )
 
             self.progress.emit("Processing standard files...")
-            calibrator.process_all_files()
+            calibrator.process_all_files(
+                file_peaks=self.file_peaks,
+                include_holder_al=self.include_holder_al,
+            )
 
             if len(calibrator.measurements) < 3:
                 self.error.emit(
@@ -101,9 +125,12 @@ class FWHMCalibrationPanel(QWidget):
         self.measurements = None
         self.worker = None
         self.data_dir = None
+        self._scanned_files = []
+        self._updating_table = False
 
         self._init_ui()
         self._auto_load_calibration()
+        self._try_default_standards_dir()
 
     @staticmethod
     def get_default_calibration_path():
@@ -123,17 +150,17 @@ class FWHMCalibrationPanel(QWidget):
         splitter = QSplitter(Qt.Horizontal)
 
         controls = QWidget()
-        controls.setMinimumWidth(280)
-        controls.setMaximumWidth(360)
+        controls.setMinimumWidth(320)
+        controls.setMaximumWidth(420)
         col = QVBoxLayout(controls)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(8)
 
         col.addWidget(self._create_data_group())
-        col.addWidget(self._create_kv_group())
-        col.addWidget(self._create_model_group())
+        col.addWidget(self._create_files_group(), stretch=1)
         col.addWidget(self._create_controls_group())
-        col.addWidget(self._create_results_group(), stretch=1)
+        col.addWidget(self._create_advanced_group())
+        col.addWidget(self._create_results_group())
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -150,29 +177,72 @@ class FWHMCalibrationPanel(QWidget):
         layout.addWidget(splitter)
 
     def _create_data_group(self):
-        group = QGroupBox("Standards")
-        row = QHBoxLayout(group)
-        row.setContentsMargins(8, 10, 8, 8)
-        row.setSpacing(6)
+        group = QGroupBox("Pure-element foils")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
 
+        hint = QLabel(
+            "Point at a folder of foil spectra. Elements come from the "
+            "filename and the line database — no CSV needed."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #555;")
+        layout.addWidget(hint)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
         self.data_dir_label = QLabel("No folder selected")
         self.data_dir_label.setStyleSheet("color: #888;")
         self.data_dir_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.data_dir_label.setToolTip(
-            "Folder of pure-element spectra (Fe.txt, Cu.txt, Ti.txt, …)\n"
-            "used to calibrate detector FWHM vs energy."
+            "Folder of pure-element spectra (Fe.txt, Cu.txt, Ti.txt, …)"
         )
         row.addWidget(self.data_dir_label, 1)
 
+        example_btn = QPushButton("Examples")
+        example_btn.setFixedWidth(88)
+        example_btn.setToolTip("Use the shipped foil spectra in sample_data/data")
+        example_btn.clicked.connect(self._use_example_standards)
+        row.addWidget(example_btn)
+
         browse_btn = QPushButton("Browse…")
         browse_btn.setFixedWidth(88)
-        browse_btn.setToolTip(
-            "Select directory with pure element standards\n"
-            "(Fe, Cu, Ti, Zn, Mg, cubic zirconia, …)"
-        )
+        browse_btn.setToolTip("Select a folder of pure-element foil spectra")
         browse_btn.clicked.connect(self._browse_data_dir)
         row.addWidget(browse_btn)
+        layout.addLayout(row)
+        return group
 
+    def _create_files_group(self):
+        group = QGroupBox("Recognized files")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        self.files_summary = QLabel("Select a folder to see which foils will be used.")
+        self.files_summary.setWordWrap(True)
+        self.files_summary.setStyleSheet("color: #555;")
+        layout.addWidget(self.files_summary)
+
+        self.files_table = QTableWidget(0, 3)
+        self.files_table.setHorizontalHeaderLabels(["Use", "File", "Element"])
+        header = self.files_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.files_table.verticalHeader().setVisible(False)
+        self.files_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.files_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.files_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.files_table.setMaximumHeight(220)
+        layout.addWidget(self.files_table)
+
+        self.file_lines_label = QLabel("")
+        self.file_lines_label.setWordWrap(True)
+        self.file_lines_label.setStyleSheet("color: #444; font-size: 11px;")
+        layout.addWidget(self.file_lines_label)
+        self.files_table.itemSelectionChanged.connect(self._on_file_row_selected)
         return group
 
     def _create_kv_group(self):
@@ -220,6 +290,43 @@ class FWHMCalibrationPanel(QWidget):
 
         return group
 
+    def _create_advanced_group(self):
+        self.advanced_btn = QToolButton()
+        self.advanced_btn.setText("Advanced")
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.advanced_btn.setArrowType(Qt.RightArrow)
+        self.advanced_btn.setStyleSheet("QToolButton { border: none; color: #555; }")
+
+        self.advanced_widget = QWidget()
+        adv = QVBoxLayout(self.advanced_widget)
+        adv.setContentsMargins(0, 0, 0, 0)
+        adv.setSpacing(6)
+        adv.addWidget(self._create_kv_group())
+        adv.addWidget(self._create_model_group())
+        self.holder_al_check = QCheckBox("Also measure holder Al Kα on metal foils")
+        self.holder_al_check.setChecked(True)
+        self.holder_al_check.setToolTip(
+            "Many foil spectra show Al Kα from the sample holder. "
+            "Useful extra low-energy FWHM point."
+        )
+        self.holder_al_check.toggled.connect(self._on_holder_al_toggled)
+        adv.addWidget(self.holder_al_check)
+        self.advanced_widget.setVisible(False)
+
+        wrap = QWidget()
+        layout = QVBoxLayout(wrap)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.advanced_btn)
+        layout.addWidget(self.advanced_widget)
+        self.advanced_btn.toggled.connect(self._toggle_advanced)
+        return wrap
+
+    def _toggle_advanced(self, checked):
+        self.advanced_widget.setVisible(checked)
+        self.advanced_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
     def _create_controls_group(self):
         group = QGroupBox("Actions")
         layout = QVBoxLayout(group)
@@ -229,16 +336,19 @@ class FWHMCalibrationPanel(QWidget):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
 
-        self.calibrate_btn = QPushButton("Run")
+        self.calibrate_btn = QPushButton("Calibrate & Use")
         self.calibrate_btn.clicked.connect(self._run_calibration)
         self.calibrate_btn.setEnabled(False)
-        self.calibrate_btn.setToolTip("Fit FWHM vs energy from the standards folder")
+        self.calibrate_btn.setToolTip(
+            "Fit FWHM vs energy from the checked foils and apply it to Analysis"
+        )
         row1.addWidget(self.calibrate_btn)
 
-        self.apply_btn = QPushButton("Apply")
+        self.apply_btn = QPushButton("Re-apply")
         self.apply_btn.clicked.connect(self._apply_calibration)
         self.apply_btn.setEnabled(False)
-        self.apply_btn.setToolTip("Use this calibration for peak fitting / Standards")
+        self.apply_btn.setToolTip("Send the current calibration to Analysis again")
+        self.apply_btn.setVisible(False)
         row1.addWidget(self.apply_btn)
         layout.addLayout(row1)
 
@@ -340,8 +450,10 @@ class FWHMCalibrationPanel(QWidget):
             pen=pg.mkPen('k', width=1),
             brush=pg.mkBrush(0, 0, 139, 150),
             name='Measured',
+            hoverable=True,
         )
         self.fwhm_plot.addItem(self.measurement_scatter)
+        self._point_labels = []
 
         self.fitted_curve = self.fwhm_plot.plot(
             pen=pg.mkPen('#c0392b', width=2), name='Model'
@@ -370,24 +482,204 @@ class FWHMCalibrationPanel(QWidget):
         layout.addWidget(self.plot_widget)
         return widget
 
+    def _try_default_standards_dir(self):
+        example = example_standards_dir()
+        if example is not None:
+            self._set_data_dir(example, announce="Example foils")
+
+    def _use_example_standards(self):
+        example = example_standards_dir()
+        if example is None:
+            QMessageBox.warning(
+                self,
+                "No Example Data",
+                "Could not find sample_data/data next to the application.",
+            )
+            return
+        self._set_data_dir(example, announce="Example foils")
+
     def _browse_data_dir(self):
+        start = str(self.data_dir) if self.data_dir else str(Path.home())
         dir_path = QFileDialog.getExistingDirectory(
             self,
-            "Select Standards Directory",
-            str(Path.home()),
+            "Select Foil Spectra Folder",
+            start,
             QFileDialog.ShowDirsOnly,
         )
         if dir_path:
-            self.data_dir = Path(dir_path)
-            self.data_dir_label.setText(self.data_dir.name)
-            self.data_dir_label.setToolTip(str(self.data_dir))
-            self.data_dir_label.setStyleSheet("color: #222;")
-            self.calibrate_btn.setEnabled(True)
+            self._set_data_dir(Path(dir_path))
+
+    def _set_data_dir(self, path: Path, announce: str = None):
+        self.data_dir = Path(path)
+        label = announce or self.data_dir.name
+        self.data_dir_label.setText(label)
+        self.data_dir_label.setToolTip(str(self.data_dir))
+        self.data_dir_label.setStyleSheet("color: #222;")
+        self._rescan_folder()
+
+    def _on_holder_al_toggled(self, _checked=False):
+        if self.data_dir:
+            self._rescan_folder()
+
+    def _rescan_folder(self):
+        if not self.data_dir:
+            return
+        include_al = (
+            self.holder_al_check.isChecked()
+            if hasattr(self, "holder_al_check")
+            else True
+        )
+        previous = {item.filename: item for item in self._scanned_files}
+        self._scanned_files = scan_fwhm_folder(
+            self.data_dir, include_holder_al=include_al
+        )
+        for item in self._scanned_files:
+            old = previous.get(item.filename)
+            if old is None:
+                continue
+            item.element = old.element
+            item.included = bool(old.included and old.element)
+            item.lines = (
+                fwhm_lines_for_element(item.element, include_holder_al=include_al)
+                if item.element
+                else []
+            )
+            if item.element:
+                item.reason = f"Using {item.element} K-lines from the line database"
+        self._populate_files_table()
+        n_use = sum(1 for item in self._scanned_files if item.included and item.element)
+        n_skip = len(self._scanned_files) - n_use
+        if n_use:
+            extra = f" · {n_skip} skipped" if n_skip else ""
+            self.files_summary.setText(
+                f"{n_use} foil{'s' if n_use != 1 else ''} ready{extra}. "
+                "Uncheck mixed standards or assign an element to include a file."
+            )
+        elif self._scanned_files:
+            self.files_summary.setText(
+                "No pure-element foils recognized. Assign an element in the "
+                "table to include a file (mixed/certified spectra are skipped)."
+            )
+        else:
+            self.files_summary.setText("No spectrum files in this folder.")
+        self.calibrate_btn.setEnabled(n_use >= 1)
+
+    def _populate_files_table(self):
+        self._updating_table = True
+        table = self.files_table
+        table.setRowCount(0)
+        for item in self._scanned_files:
+            row = table.rowCount()
+            table.insertRow(row)
+
+            use_box = QCheckBox()
+            use_box.setChecked(bool(item.included and item.element))
+            use_box.toggled.connect(lambda checked, r=row: self._on_use_toggled(r, checked))
+            table.setCellWidget(row, 0, use_box)
+
+            name_item = QTableWidgetItem(item.filename)
+            name_item.setToolTip(item.reason)
+            if not item.included:
+                name_item.setForeground(Qt.gray)
+            table.setItem(row, 1, name_item)
+
+            combo = QComboBox()
+            combo.addItem("—", None)
+            for symbol in COMMON_XRF_SYMBOLS:
+                combo.addItem(symbol, symbol)
+            if item.element:
+                idx = combo.findData(item.element)
+                if idx < 0:
+                    combo.addItem(item.element, item.element)
+                    idx = combo.findData(item.element)
+                combo.setCurrentIndex(max(idx, 0))
+            combo.currentIndexChanged.connect(
+                lambda _i, r=row: self._on_element_changed(r)
+            )
+            table.setCellWidget(row, 2, combo)
+        self._updating_table = False
+        if table.rowCount():
+            table.selectRow(0)
+            self._on_file_row_selected()
+
+    def _row_standard(self, row: int) -> FWHMStandardFile:
+        return self._scanned_files[row]
+
+    def _on_use_toggled(self, row: int, checked: bool):
+        if self._updating_table or row >= len(self._scanned_files):
+            return
+        item = self._scanned_files[row]
+        item.included = bool(checked and item.element)
+        if checked and not item.element:
+            item.included = False
+            box = self.files_table.cellWidget(row, 0)
+            if isinstance(box, QCheckBox):
+                self._updating_table = True
+                box.setChecked(False)
+                self._updating_table = False
+        self._sync_calibrate_enabled()
+
+    def _on_element_changed(self, row: int):
+        if self._updating_table or row >= len(self._scanned_files):
+            return
+        combo = self.files_table.cellWidget(row, 2)
+        symbol = combo.currentData() if isinstance(combo, QComboBox) else None
+        item = self._scanned_files[row]
+        include_al = self.holder_al_check.isChecked()
+        item.element = symbol
+        item.lines = fwhm_lines_for_element(symbol, include_holder_al=include_al) if symbol else []
+        if symbol:
+            item.included = True
+            item.reason = f"Using {symbol} K-lines from the line database"
+        else:
+            item.included = False
+            item.reason = "Could not tell which element — assign one to include"
+        box = self.files_table.cellWidget(row, 0)
+        if isinstance(box, QCheckBox):
+            self._updating_table = True
+            box.setChecked(item.included)
+            self._updating_table = False
+        name_item = self.files_table.item(row, 1)
+        if name_item:
+            name_item.setToolTip(item.reason)
+            name_item.setForeground(Qt.black if item.included else Qt.gray)
+        if self.files_table.currentRow() == row:
+            self._on_file_row_selected()
+        self._sync_calibrate_enabled()
+
+    def _on_file_row_selected(self):
+        row = self.files_table.currentRow()
+        if row < 0 or row >= len(self._scanned_files):
+            self.file_lines_label.setText("")
+            return
+        item = self._scanned_files[row]
+        lines = format_line_summary(item.lines, limit=6)
+        self.file_lines_label.setText(f"{item.reason}. Lines: {lines}")
+
+    def _sync_calibrate_enabled(self):
+        n_use = sum(1 for item in self._scanned_files if item.included and item.element)
+        self.calibrate_btn.setEnabled(n_use >= 1 and self.data_dir is not None)
+
+    def _file_peaks_from_table(self):
+        peaks = {}
+        for item in self._scanned_files:
+            if item.included and item.element and item.lines:
+                peaks[item.filename] = (item.element, list(item.lines))
+        return peaks
 
     def _run_calibration(self):
         if not self.data_dir:
             QMessageBox.warning(
                 self, "No Data Directory", "Please select a data directory first."
+            )
+            return
+
+        file_peaks = self._file_peaks_from_table()
+        if len(file_peaks) < 1:
+            QMessageBox.warning(
+                self,
+                "No Foils Selected",
+                "Check at least one pure-element foil (and assign an element).",
             )
             return
 
@@ -405,6 +697,8 @@ class FWHMCalibrationPanel(QWidget):
             model_type=model_type,
             remove_outliers=True,
             tube_kv=self.tube_kv_combo.currentData(),
+            file_peaks=file_peaks,
+            include_holder_al=self.holder_al_check.isChecked(),
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_calibration_complete)
@@ -417,7 +711,7 @@ class FWHMCalibrationPanel(QWidget):
 
     def _on_error(self, message):
         self.progress_bar.setVisible(False)
-        self.calibrate_btn.setEnabled(True)
+        self._sync_calibrate_enabled()
         self.progress_output.append(f"ERROR: {message}")
         self.status_label.setText("Calibration failed")
         self.status_label.setStyleSheet("color: #b00020;")
@@ -425,7 +719,7 @@ class FWHMCalibrationPanel(QWidget):
 
     def _on_calibration_complete(self, fwhm_cal, measurements):
         self.progress_bar.setVisible(False)
-        self.calibrate_btn.setEnabled(True)
+        self._sync_calibrate_enabled()
         self.fwhm_calibration = fwhm_cal
         self.measurements = measurements
 
@@ -435,13 +729,11 @@ class FWHMCalibrationPanel(QWidget):
         self._display_results(fwhm_cal)
         self._update_plot(fwhm_cal, measurements)
         self._auto_save_calibration()
+        self.calibration_complete.emit(self.fwhm_calibration)
 
-        QMessageBox.information(
-            self,
-            "Calibration Complete",
-            f"Saved and ready to apply.\n\n"
-            f"R² = {fwhm_cal.r_squared:.4f}   "
-            f"RMSE = {fwhm_cal.rmse * 1000:.1f} eV",
+        quality = self._quality_note(fwhm_cal)
+        self.progress_output.append(
+            f"Applied to Analysis. {quality}"
         )
 
     def _clear_metrics(self):
@@ -492,6 +784,83 @@ class FWHMCalibrationPanel(QWidget):
             for e in (1.5, 3.0, 6.0, 10.0, 15.0)
         ]
         self.predictions_label.setText("FWHM (eV):  " + "   ".join(preds))
+        note = self._quality_note(fwhm_cal)
+        if note:
+            self.status_label.setText(f"In use · {note}")
+            if fwhm_cal.r_squared < 0.90:
+                self.status_label.setStyleSheet("color: #b36b00;")
+            else:
+                self.status_label.setStyleSheet("color: #1b7a3d;")
+
+    @staticmethod
+    def _quality_note(fwhm_cal) -> str:
+        r2 = fwhm_cal.r_squared
+        rmse = fwhm_cal.rmse * 1000
+        if r2 >= 0.95:
+            return f"R² {r2:.3f} · RMSE {rmse:.1f} eV"
+        if r2 >= 0.90:
+            return f"R² {r2:.3f} (ok) · RMSE {rmse:.1f} eV"
+        return f"R² {r2:.3f} — check outliers / mixed files"
+
+    @staticmethod
+    def _measurement_label(measurement) -> str:
+        """Compact plot label: 'Fe Kα' from line name, else the foil element."""
+        line = (getattr(measurement, "line", None) or "").strip()
+        if line:
+            parts = line.split()
+            series = re.sub(r"[12]$", "", parts[-1])
+            if len(parts) >= 2:
+                return f"{parts[0]} {series}"
+            return series
+        return (getattr(measurement, "element", None) or "?").strip()
+
+    def _clear_point_labels(self):
+        for item in getattr(self, "_point_labels", []):
+            try:
+                self.fwhm_plot.removeItem(item)
+            except Exception:
+                pass
+        self._point_labels = []
+
+    def _add_point_labels(self, measurements, energies, fwhms_ev):
+        """Place element labels, one per nearby cluster of the same line."""
+        self._clear_point_labels()
+        if measurements is None or len(energies) == 0:
+            return
+
+        labels = [self._measurement_label(m) for m in measurements]
+        # Cluster identical labels that sit on top of each other (e.g. holder Al Kα)
+        used = [False] * len(labels)
+        placed = []
+        for i, label in enumerate(labels):
+            if used[i]:
+                continue
+            members = [i]
+            used[i] = True
+            for j in range(i + 1, len(labels)):
+                if used[j] or labels[j] != label:
+                    continue
+                if abs(float(energies[j]) - float(energies[i])) < 0.12:
+                    members.append(j)
+                    used[j] = True
+            x = float(np.mean(energies[members]))
+            y = float(np.mean(fwhms_ev[members]))
+            placed.append((x, y, label))
+
+        placed.sort(key=lambda row: row[0])
+        font = QFont("Arial", 8)
+        for i, (x, y, label) in enumerate(placed):
+            above = i % 2 == 0
+            text = pg.TextItem(
+                label,
+                color=(20, 20, 20),
+                anchor=(0.5, 1.35) if above else (0.5, -0.35),
+            )
+            text.setFont(font)
+            text.setPos(x, y)
+            text.setZValue(10)
+            self.fwhm_plot.addItem(text)
+            self._point_labels.append(text)
 
     def _update_plot(self, fwhm_cal, measurements):
         if not measurements:
@@ -499,6 +868,11 @@ class FWHMCalibrationPanel(QWidget):
 
         energies = np.array([m.energy for m in measurements])
         fwhms_ev = np.array([m.fwhm * 1000 for m in measurements])
+        labels = [self._measurement_label(m) for m in measurements]
+        tips = [
+            f"{lab}\n{e:.3f} keV, {f:.0f} eV"
+            for lab, e, f in zip(labels, energies, fwhms_ev)
+        ]
 
         self.measurement_scatter.setData(
             x=energies,
@@ -507,6 +881,7 @@ class FWHMCalibrationPanel(QWidget):
             symbolSize=10,
             symbolBrush=pg.mkBrush(0, 0, 139, 150),
             symbolPen=pg.mkPen('k', width=1),
+            data=tips,
         )
 
         e_min, e_max = energies.min(), energies.max()
@@ -524,14 +899,17 @@ class FWHMCalibrationPanel(QWidget):
             symbolSize=10,
             symbolBrush=pg.mkBrush(0, 0, 139, 150),
             symbolPen=pg.mkPen('k', width=1),
+            data=tips,
         )
 
+        self._add_point_labels(measurements, energies, fwhms_ev)
         self.fwhm_plot.autoRange()
         self.residual_plot.autoRange()
 
     def _plot_fitted_curve_only(self, fwhm_cal):
         self.measurement_scatter.clear()
         self.residual_scatter.clear()
+        self._clear_point_labels()
 
         e_min, e_max = fwhm_cal.energy_range
         e_model = np.linspace(e_min, e_max, 200)
@@ -577,11 +955,8 @@ class FWHMCalibrationPanel(QWidget):
 
         self._auto_save_calibration()
         self.calibration_complete.emit(self.fwhm_calibration)
-        QMessageBox.information(
-            self,
-            "Calibration Applied",
-            "FWHM calibration applied for peak fitting and Standards.",
-        )
+        self.status_label.setText("In use")
+        self.status_label.setStyleSheet("color: #1b7a3d;")
 
     def _save_calibration(self):
         if self.fwhm_calibration is None:
@@ -625,11 +1000,6 @@ class FWHMCalibrationPanel(QWidget):
             self._auto_save_calibration()
             self.calibration_complete.emit(self.fwhm_calibration)
             self.progress_output.append(f"Loaded {Path(file_path).name}")
-            QMessageBox.information(
-                self,
-                "Calibration Loaded",
-                "Loaded, applied, and saved as the default for next startup.",
-            )
         except Exception as e:
             QMessageBox.critical(
                 self, "Load Error", f"Failed to load calibration:\n{e}"

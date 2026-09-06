@@ -4,9 +4,62 @@ Peak fitting for XRF spectra
 
 import numpy as np
 from scipy import signal, optimize
-from scipy.special import wofz
+from scipy.special import wofz, erfc, erfcx
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any
+
+
+_PEAK_SHAPE_ALIASES = {
+    'gaussian': 'gaussian',
+    'tail_gaussian': 'tail_gaussian',
+    'tail-gaussian': 'tail_gaussian',
+    'hypermet': 'hypermet',
+    'voigt': 'voigt',
+    'pseudo_voigt': 'pseudo_voigt',
+    'pseudo-voigt': 'pseudo_voigt',
+    'lorentzian': 'lorentzian',
+}
+
+DEFAULT_PEAK_SHAPE = 'tail_gaussian'
+
+# Display names for the Fitting combo (Gaussian stays the simple option)
+PEAK_SHAPE_UI_CHOICES = (
+    ('Gaussian', 'gaussian'),
+    ('Tail-Gaussian', 'tail_gaussian'),
+    ('Hypermet', 'hypermet'),
+)
+PEAK_SHAPE_UI_DEFAULT = 'Tail-Gaussian'
+_LEGACY_PEAK_SHAPE_UI = {
+    'Voigt': 'Tail-Gaussian',
+    'Pseudo-Voigt': 'Tail-Gaussian',
+    'voigt': 'Tail-Gaussian',
+    'pseudo_voigt': 'Tail-Gaussian',
+    'pseudo-voigt': 'Tail-Gaussian',
+}
+
+
+def normalize_peak_shape(name, default=DEFAULT_PEAK_SHAPE) -> str:
+    """Map UI labels and aliases to the internal peak-shape key."""
+    if name is None:
+        return default
+    key = str(name).strip().lower().replace(' ', '_')
+    if not key:
+        return default
+    return _PEAK_SHAPE_ALIASES.get(key, key)
+
+
+def peak_shape_ui_label(name) -> str:
+    """UI combo label for a stored shape; legacy Voigt names map to Tail-Gaussian."""
+    if name is None:
+        return PEAK_SHAPE_UI_DEFAULT
+    raw = str(name).strip()
+    if raw in _LEGACY_PEAK_SHAPE_UI:
+        return _LEGACY_PEAK_SHAPE_UI[raw]
+    key = normalize_peak_shape(raw)
+    for label, internal in PEAK_SHAPE_UI_CHOICES:
+        if internal == key:
+            return label
+    return PEAK_SHAPE_UI_DEFAULT
 
 
 def _json_safe(value: Any) -> Any:
@@ -96,6 +149,12 @@ class PeakFitter:
     FWHM_0 = 0.050  # keV at 0 keV (noise contribution)
     EPSILON = 0.0015  # Fano factor * w (eV per e-h pair)
     VOIGT_GAMMA_RATIO = 0.15  # gamma/sigma ratio for Voigt peaks
+    # Full Hypermet defaults (Phillips & Marlow)
+    HYPERMET_TAIL_AMP = 0.12
+    HYPERMET_TAIL_BETA_SIGMA = 3.0  # tail_beta = this × σ
+    HYPERMET_STEP_AMP = 0.012
+    TAIL_GAUSSIAN_FRAC = 0.15
+    TAIL_GAUSSIAN_SIGMA_MULT = 3.0
     USE_CALIBRATED_SHAPES = False  # If True, fix peak shapes during fitting
     # Max allowed center shift during LS (keV). Weak peaks otherwise wander
     # within the old ±0.2 keV window onto neighbors / noise.
@@ -210,43 +269,182 @@ class PeakFitter:
         return amplitude * (eta * lorentzian + (1 - eta) * gaussian)
     
     @staticmethod
-    def hypermet(x, amplitude, center, sigma, tail_amplitude, tail_slope):
+    def _hypermet_tail_kernel(arg, r):
         """
-        Hypermet function for XRF peaks with low-energy tail
-        Combines Gaussian with exponential tail for incomplete charge collection
-        
+        Numerically stable Hypermet exponential-tail kernel I(arg; r).
+
+        I(x) = ½ exp((x-μ)/β + σ²/(2β²)) erfc((x-μ)/(σ√2) + σ/(β√2))
+        with arg = (x-μ)/σ and r = σ/β.  ∫ I(x) dx = β.
+        Uses erfcx on the high-energy side and exp·erfc on the low-energy side.
+        """
+        arg = np.asarray(arg, dtype=float)
+        r = float(r)
+        z = (arg + r) / np.sqrt(2.0)
+        kernel = np.empty_like(arg, dtype=float)
+        pos = z >= 0.0
+        neg = ~pos
+        if np.any(pos):
+            kernel[pos] = 0.5 * np.exp(-0.5 * arg[pos] ** 2) * erfcx(z[pos])
+        if np.any(neg):
+            kernel[neg] = 0.5 * np.exp(arg[neg] * r + 0.5 * r * r) * erfc(z[neg])
+        return kernel
+
+    @staticmethod
+    def _hypermet_params_from_shape(shape_params, sigma):
+        """Resolve Hypermet extras; convert legacy tail_slope (keV⁻¹) to β."""
+        sp = shape_params or {}
+        tail_amp = float(sp.get('tail_amplitude', PeakFitter.HYPERMET_TAIL_AMP))
+        if sp.get('tail_beta') is not None:
+            tail_beta = float(sp['tail_beta'])
+        else:
+            slope = sp.get('tail_slope')
+            if slope is not None and float(slope) > 1e-12:
+                tail_beta = 1.0 / float(slope)
+            else:
+                tail_beta = PeakFitter.HYPERMET_TAIL_BETA_SIGMA * float(sigma)
+        step_amp = float(sp.get('step_amplitude', 0.0))
+        return tail_amp, max(tail_beta, 1e-12), max(step_amp, 0.0)
+
+    @staticmethod
+    def hypermet(x, amplitude, center, sigma, tail_amplitude,
+                 tail_beta, step_amplitude=0.0):
+        """
+        Full Hypermet (Phillips & Marlow, 1976): Gaussian + exponential
+        incomplete-charge-collection tail + low-energy step/shelf.
+
+        The tail is the continuous erfc form (Gaussian ⊗ exponential), not a
+        truncated exponential. Peak.area is Gaussian + tail; the step is a
+        shelf and is not included in the peak area.
+
         Args:
-            tail_amplitude: Relative amplitude of tail (0-1)
-            tail_slope: Decay slope of tail (keV^-1)
+            tail_amplitude: Relative tail strength (typically 0–0.3)
+            tail_beta: Exponential decay length in keV (typically 1–5×σ)
+            step_amplitude: Shelf height relative to Gaussian height
         """
-        # Main Gaussian peak
-        gaussian = PeakFitter.gaussian(x, amplitude, center, sigma)
-        
-        # Low-energy exponential tail
-        tail = np.zeros_like(x)
-        mask = x < center
-        if np.any(mask):
-            tail[mask] = amplitude * tail_amplitude * np.exp(tail_slope * (x[mask] - center))
-        
-        return gaussian + tail
-    
+        x = np.asarray(x, dtype=float)
+        sigma = max(float(sigma), 1e-12)
+        tail_beta = max(float(tail_beta), 1e-12)
+        arg = (x - float(center)) / sigma
+        r = sigma / tail_beta
+        gaussian = amplitude * np.exp(-0.5 * arg ** 2)
+        tail = amplitude * tail_amplitude * PeakFitter._hypermet_tail_kernel(arg, r)
+        step = 0.5 * amplitude * step_amplitude * erfc(arg / np.sqrt(2.0))
+        return gaussian + tail + step
+
     @staticmethod
     def tail_gaussian(x, amplitude, center, sigma, tail_fraction, tail_sigma):
         """
-        Gaussian with tail component (simplified hypermet)
-        More stable for fitting than full hypermet
-        
+        Gaussian with a wider, slightly low-energy-shifted tail Gaussian.
+
+        More stable than Hypermet for routine EDXRF fitting.
+
         Args:
-            tail_fraction: Fraction of intensity in tail (0-1)
-            tail_sigma: Width of tail relative to main peak (typically 2-5x sigma)
+            tail_fraction: Fraction of height in the tail component (0-1)
+            tail_sigma: Width of the tail Gaussian (typically 2-5× σ)
         """
-        # Main Gaussian
-        main_peak = (1 - tail_fraction) * PeakFitter.gaussian(x, amplitude, center, sigma)
-        
-        # Tail component (wider Gaussian on low-energy side)
-        tail_peak = tail_fraction * PeakFitter.gaussian(x, amplitude, center - 0.5 * sigma, tail_sigma)
-        
+        main_peak = (1 - tail_fraction) * PeakFitter.gaussian(
+            x, amplitude, center, sigma
+        )
+        tail_peak = tail_fraction * PeakFitter.gaussian(
+            x, amplitude, center - 0.5 * sigma, tail_sigma
+        )
         return main_peak + tail_peak
+
+    @staticmethod
+    def default_shape_params(shape, sigma):
+        """Locked-width extras for amplitude-only fits (tube priors, doublets)."""
+        shape = normalize_peak_shape(shape)
+        sigma = float(sigma)
+        if shape == 'tail_gaussian':
+            return {
+                'sigma': sigma,
+                'tail_fraction': PeakFitter.TAIL_GAUSSIAN_FRAC,
+                'tail_sigma': sigma * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT,
+            }
+        if shape == 'hypermet':
+            return {
+                'sigma': sigma,
+                'tail_amplitude': PeakFitter.HYPERMET_TAIL_AMP,
+                'tail_beta': sigma * PeakFitter.HYPERMET_TAIL_BETA_SIGMA,
+                'step_amplitude': PeakFitter.HYPERMET_STEP_AMP,
+            }
+        if shape == 'voigt':
+            return {
+                'sigma': sigma,
+                'gamma': sigma * PeakFitter.VOIGT_GAMMA_RATIO,
+            }
+        if shape == 'pseudo_voigt':
+            return {'sigma': sigma, 'eta': 0.3}
+        return {'sigma': sigma}
+
+    @staticmethod
+    def compute_peak_area(amplitude, sigma, shape, shape_params=None):
+        """Analytical peak area. Hypermet step/shelf is excluded (background-like)."""
+        shape = normalize_peak_shape(shape)
+        sp = shape_params or {}
+        amp = float(amplitude)
+        sig = float(sigma)
+        gauss_area = amp * sig * np.sqrt(2.0 * np.pi)
+        if shape == 'tail_gaussian':
+            frac = float(sp.get('tail_fraction', PeakFitter.TAIL_GAUSSIAN_FRAC))
+            tsig = float(sp.get(
+                'tail_sigma', sig * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT
+            ))
+            return amp * np.sqrt(2.0 * np.pi) * ((1.0 - frac) * sig + frac * tsig)
+        if shape == 'hypermet':
+            tail_amp, tail_beta, _step = PeakFitter._hypermet_params_from_shape(
+                sp, sig
+            )
+            return gauss_area + amp * tail_amp * tail_beta
+        return gauss_area
+
+    @staticmethod
+    def evaluate_peak(peak, x):
+        """Evaluate a stored Peak model on energy grid `x` (including legacy params)."""
+        x = np.asarray(x, dtype=float)
+        sp = peak.shape_params or {}
+        sigma = float(sp.get(
+            'sigma',
+            (peak.fwhm / 2.355) if peak.fwhm else 0.05,
+        ))
+        shape = normalize_peak_shape(peak.shape, default='gaussian')
+        amp = peak.amplitude
+        cen = peak.energy
+        if shape == 'voigt':
+            gamma = float(sp.get('gamma', sigma * PeakFitter.VOIGT_GAMMA_RATIO))
+            return PeakFitter.voigt(x, amp, cen, sigma, gamma)
+        if shape == 'pseudo_voigt':
+            eta = float(sp.get('eta', 0.3))
+            return PeakFitter.pseudo_voigt(x, amp, cen, sigma, eta)
+        if shape == 'hypermet':
+            tail_amp, tail_beta, step_amp = PeakFitter._hypermet_params_from_shape(
+                sp, sigma
+            )
+            return PeakFitter.hypermet(
+                x, amp, cen, sigma, tail_amp, tail_beta, step_amp
+            )
+        if shape == 'tail_gaussian':
+            return PeakFitter.tail_gaussian(
+                x, amp, cen, sigma,
+                float(sp.get('tail_fraction', PeakFitter.TAIL_GAUSSIAN_FRAC)),
+                float(sp.get(
+                    'tail_sigma', sigma * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT
+                )),
+            )
+        return PeakFitter.gaussian(x, amp, cen, sigma)
+
+    @staticmethod
+    def model_with_defaults(x, amplitude, center, sigma, shape):
+        """Locked-width profile using default extras for `shape`."""
+        peak = Peak(
+            energy=float(center),
+            amplitude=float(amplitude),
+            fwhm=2.355 * float(sigma),
+            area=0.0,
+            shape=normalize_peak_shape(shape),
+            shape_params=PeakFitter.default_shape_params(shape, sigma),
+        )
+        return PeakFitter.evaluate_peak(peak, x)
     
     @staticmethod
     def find_peaks(energy, counts, prominence=None, distance=None, height=None,
@@ -333,7 +531,7 @@ class PeakFitter:
         ))
 
     @staticmethod
-    def fit_single_peak(energy, counts, initial_center, shape='gaussian', 
+    def fit_single_peak(energy, counts, initial_center, shape='tail_gaussian', 
                        bounds=None, known_line=False, fix_center=False,
                        center_tolerance=None, fixed_fwhm=None):
         """
@@ -343,7 +541,7 @@ class PeakFitter:
             energy: Energy array
             counts: Counts array
             initial_center: Initial guess for peak center
-            shape: 'gaussian', 'lorentzian', 'voigt', or 'pseudo_voigt'
+            shape: 'gaussian', 'tail_gaussian', 'hypermet' (also 'voigt', 'pseudo_voigt')
             bounds: Parameter bounds (optional override)
             known_line: If True, use tighter center bounds (tabulated line)
             fix_center: If True, hold center at initial_center (amp/width only)
@@ -355,6 +553,8 @@ class PeakFitter:
         """
         if float(initial_center) < PeakFitter.MIN_PEAK_ENERGY_KEV:
             return None
+
+        shape = normalize_peak_shape(shape)
 
         # Define fitting window around peak
         # Use appropriate window for peak width (±3 FWHM is standard)
@@ -602,15 +802,22 @@ class PeakFitter:
                 shape_params = {'sigma': sigma, 'eta': eta}
             
             elif shape == 'hypermet':
+                tail_amp0 = PeakFitter.HYPERMET_TAIL_AMP
+                tail_beta0 = sigma_guess * PeakFitter.HYPERMET_TAIL_BETA_SIGMA
+                step_amp0 = PeakFitter.HYPERMET_STEP_AMP
+                beta_lo = max(sigma_guess * 0.5, 1e-4)
+                beta_hi = sigma_guess * 15.0
+
                 if lock_width:
                     sigma_fixed = sigma_guess
-                    tail_amp_fixed = 0.1
-                    tail_slope_fixed = 2.0
+                    tail_amp_fixed = tail_amp0
+                    tail_beta_fixed = tail_beta0
+                    step_amp_fixed = step_amp0
                     if fix_center:
                         def hypermet_amp_only(x, amplitude):
                             return PeakFitter.hypermet(
                                 x, amplitude, center_guess, sigma_fixed,
-                                tail_amp_fixed, tail_slope_fixed
+                                tail_amp_fixed, tail_beta_fixed, step_amp_fixed,
                             )
                         popt, _ = optimize.curve_fit(
                             hypermet_amp_only, x_fit, y_fit,
@@ -624,7 +831,7 @@ class PeakFitter:
                         def hypermet_fixed_shape(x, amplitude, center):
                             return PeakFitter.hypermet(
                                 x, amplitude, center, sigma_fixed,
-                                tail_amp_fixed, tail_slope_fixed
+                                tail_amp_fixed, tail_beta_fixed, step_amp_fixed,
                             )
                         p0 = [amplitude_guess, center_guess]
                         if bounds is None:
@@ -636,44 +843,62 @@ class PeakFitter:
                         amplitude, center = popt
                     sigma = sigma_fixed
                     tail_amp = tail_amp_fixed
-                    tail_slope = tail_slope_fixed
+                    tail_beta = tail_beta_fixed
+                    step_amp = step_amp_fixed
                 elif fix_center:
-                    def hypermet_fixed_center(x, amplitude, sigma, tail_amp, tail_slope):
+                    def hypermet_fixed_center(
+                        x, amplitude, sigma, tail_amp, tail_beta, step_amp
+                    ):
                         return PeakFitter.hypermet(
-                            x, amplitude, center_guess, sigma, tail_amp, tail_slope
+                            x, amplitude, center_guess, sigma,
+                            tail_amp, tail_beta, step_amp,
                         )
-                    p0 = [amplitude_guess, sigma_guess, 0.1, 2.0]
+                    p0 = [
+                        amplitude_guess, sigma_guess,
+                        tail_amp0, tail_beta0, step_amp0,
+                    ]
                     if bounds is None:
                         bounds = (
-                            [0, sigma_guess * 0.3, 0, 0.5],
-                            [np.inf, sigma_guess * 3.0, 0.5, 10],
+                            [0, sigma_guess * 0.3, 0, beta_lo, 0],
+                            [np.inf, sigma_guess * 3.0, 0.5, beta_hi, 0.1],
                         )
                     popt, _ = optimize.curve_fit(
                         hypermet_fixed_center, x_fit, y_fit, p0=p0,
-                        bounds=bounds, maxfev=5000,
+                        bounds=bounds, maxfev=8000,
                     )
-                    amplitude, sigma, tail_amp, tail_slope = popt
+                    amplitude, sigma, tail_amp, tail_beta, step_amp = popt
                     center = center_guess
                 else:
-                    p0 = [amplitude_guess, center_guess, sigma_guess, 0.1, 2.0]
+                    p0 = [
+                        amplitude_guess, center_guess, sigma_guess,
+                        tail_amp0, tail_beta0, step_amp0,
+                    ]
                     if bounds is None:
-                        bounds = ([0, c_lo, sigma_guess * 0.3, 0, 0.5],
-                                 [np.inf, c_hi, sigma_guess * 3.0, 0.5, 10])
-                    
+                        bounds = (
+                            [0, c_lo, sigma_guess * 0.3, 0, beta_lo, 0],
+                            [np.inf, c_hi, sigma_guess * 3.0, 0.5, beta_hi, 0.1],
+                        )
                     popt, _ = optimize.curve_fit(
-                        PeakFitter.hypermet, x_fit, y_fit, p0=p0, bounds=bounds,
-                        maxfev=5000
+                        PeakFitter.hypermet, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=8000,
                     )
-                    amplitude, center, sigma, tail_amp, tail_slope = popt
+                    amplitude, center, sigma, tail_amp, tail_beta, step_amp = popt
                 fwhm = 2.355 * sigma
-                area = amplitude * sigma * np.sqrt(2 * np.pi) * (1 + tail_amp)
-                shape_params = {'sigma': sigma, 'tail_amplitude': tail_amp, 'tail_slope': tail_slope}
+                shape_params = {
+                    'sigma': sigma,
+                    'tail_amplitude': tail_amp,
+                    'tail_beta': tail_beta,
+                    'step_amplitude': step_amp,
+                }
+                area = PeakFitter.compute_peak_area(
+                    amplitude, sigma, 'hypermet', shape_params
+                )
             
             elif shape == 'tail_gaussian':
                 if lock_width:
                     sigma_fixed = sigma_guess
-                    tail_frac_fixed = 0.15
-                    tail_sigma_fixed = sigma_guess * 3
+                    tail_frac_fixed = PeakFitter.TAIL_GAUSSIAN_FRAC
+                    tail_sigma_fixed = sigma_guess * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT
                     if fix_center:
                         def tg_amp_only(x, amplitude):
                             return PeakFitter.tail_gaussian(
@@ -710,7 +935,8 @@ class PeakFitter:
                         return PeakFitter.tail_gaussian(
                             x, amplitude, center_guess, sigma, tail_frac, tail_sigma
                         )
-                    p0 = [amplitude_guess, sigma_guess, 0.15, sigma_guess * 3]
+                    p0 = [amplitude_guess, sigma_guess, PeakFitter.TAIL_GAUSSIAN_FRAC,
+                          sigma_guess * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT]
                     if bounds is None:
                         bounds = (
                             [0, sigma_guess * 0.3, 0, sigma_guess],
@@ -723,7 +949,9 @@ class PeakFitter:
                     amplitude, sigma, tail_frac, tail_sigma = popt
                     center = center_guess
                 else:
-                    p0 = [amplitude_guess, center_guess, sigma_guess, 0.15, sigma_guess * 3]
+                    p0 = [amplitude_guess, center_guess, sigma_guess,
+                          PeakFitter.TAIL_GAUSSIAN_FRAC,
+                          sigma_guess * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT]
                     if bounds is None:
                         bounds = ([0, c_lo, sigma_guess * 0.3, 0, sigma_guess],
                                  [np.inf, c_hi, sigma_guess * 3.0, 0.5, sigma_guess * 10])
@@ -734,8 +962,14 @@ class PeakFitter:
                     )
                     amplitude, center, sigma, tail_frac, tail_sigma = popt
                 fwhm = 2.355 * sigma
-                area = amplitude * sigma * np.sqrt(2 * np.pi)
-                shape_params = {'sigma': sigma, 'tail_fraction': tail_frac, 'tail_sigma': tail_sigma}
+                shape_params = {
+                    'sigma': sigma,
+                    'tail_fraction': tail_frac,
+                    'tail_sigma': tail_sigma,
+                }
+                area = PeakFitter.compute_peak_area(
+                    amplitude, sigma, 'tail_gaussian', shape_params
+                )
             
             else:
                 raise ValueError(f"Unknown peak shape: {shape}")
@@ -758,7 +992,7 @@ class PeakFitter:
             return None
     
     @staticmethod
-    def fit_multiple_peaks(energy, counts, peak_positions, shape='gaussian'):
+    def fit_multiple_peaks(energy, counts, peak_positions, shape='tail_gaussian'):
         """
         Fit multiple peaks simultaneously
         
@@ -785,31 +1019,12 @@ class PeakFitter:
     @staticmethod
     def calculate_residuals(energy, counts, fitted_peaks, background, shape='gaussian'):
         """
-        Calculate residuals between data and fit
-        
-        Args:
-            energy: Energy array
-            counts: Original counts
-            fitted_peaks: List of fitted Peak objects
-            background: Background array
-            shape: Peak shape used
-            
-        Returns:
-            Residuals array
+        Calculate residuals between data and fit using each peak's stored shape.
         """
-        # Reconstruct fitted spectrum
         fitted_spectrum = np.copy(background)
-        
         for peak in fitted_peaks:
-            sigma = peak.fwhm / 2.355  # Convert FWHM to sigma
-            
-            if shape == 'gaussian':
-                fitted_spectrum += PeakFitter.gaussian(
-                    energy, peak.amplitude, peak.energy, sigma
-                )
-        
-        residuals = counts - fitted_spectrum
-        return residuals
+            fitted_spectrum += PeakFitter.evaluate_peak(peak, energy)
+        return counts - fitted_spectrum
     
     @staticmethod
     def calculate_fit_statistics(counts, fitted_counts, n_params):

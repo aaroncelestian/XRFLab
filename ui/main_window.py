@@ -307,6 +307,7 @@ class MainWindow(QMainWindow):
         self.mapping_panel.set_fitter(self.fitter)
         self.mapping_panel.set_element_panel(self.element_panel)
         self.mapping_panel.spectrum_send_requested.connect(self.on_mapping_spectrum_sent)
+        self.mapping_panel.spectra_compare_requested.connect(self.on_mapping_spectra_compare)
         self.mapping_panel.spectra_batch_requested.connect(self.on_mapping_spectra_to_batch)
         self.mapping_panel.project_loaded.connect(self.on_mapping_project_loaded)
         self.mapping_panel.status_message.connect(
@@ -333,7 +334,16 @@ class MainWindow(QMainWindow):
         """Nest FWHM, Tube Profiles, and Standards under Calibration."""
         calibration_widget = QWidget()
         layout = QVBoxLayout(calibration_widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self.calibration_status = QLabel()
+        self.calibration_status.setWordWrap(True)
+        self.calibration_status.setStyleSheet(
+            "QLabel { background: #f7f7f7; border: 1px solid #ddd; "
+            "border-radius: 4px; padding: 8px 10px; }"
+        )
+        layout.addWidget(self.calibration_status)
         
         self.calibration_tabs = QTabWidget()
         
@@ -355,7 +365,50 @@ class MainWindow(QMainWindow):
         self.calibration_tabs.addTab(self.standards_panel, "Standards")
         
         layout.addWidget(self.calibration_tabs)
+        self._refresh_calibration_status()
         return calibration_widget
+
+    def _refresh_calibration_status(self):
+        """Checklist at the top of Calibration: FWHM required, rest optional."""
+        if not hasattr(self, "calibration_status"):
+            return
+
+        fwhm = getattr(self.fwhm_calibration_panel, "fwhm_calibration", None)
+        if fwhm is not None:
+            fwhm_txt = (
+                f"<b>FWHM</b> in use · R² {fwhm.r_squared:.3f} · "
+                f"{fwhm.n_peaks} peaks"
+            )
+            fwhm_color = "#1b7a3d"
+        else:
+            fwhm_txt = "<b>FWHM</b> not set — Calibrate &amp; Use on the FWHM tab"
+            fwhm_color = "#b36b00"
+
+        library = None
+        if hasattr(self, "tube_profile_panel"):
+            library = self.tube_profile_panel.get_library()
+        n_meas = 0
+        if library is not None:
+            n_meas = sum(
+                1 for p in library.profiles.values()
+                if getattr(p, "source", None) == "measured"
+            )
+        if n_meas:
+            tube_txt = f"<b>Tube</b> {n_meas} measured mode(s)"
+        else:
+            tube_txt = "<b>Tube</b> defaults (optional blanks)"
+
+        std = getattr(self.standards_panel, "calibration_result", None) if hasattr(self, "standards_panel") else None
+        if std is not None and getattr(std, "success", False):
+            std_txt = "<b>Standards</b> intensity calibration stored"
+        else:
+            std_txt = "<b>Standards</b> optional — not required for Semi-Quant"
+
+        self.calibration_status.setText(
+            f"<span style='color:{fwhm_color}'>{fwhm_txt}</span>"
+            f"&nbsp;&nbsp;·&nbsp;&nbsp;{tube_txt}"
+            f"&nbsp;&nbsp;·&nbsp;&nbsp;{std_txt}"
+        )
     
     def show_fwhm_calibration(self):
         """Open Calibration → FWHM from the Tools menu"""
@@ -971,6 +1024,21 @@ class MainWindow(QMainWindow):
             5000,
         )
 
+    def on_mapping_spectra_compare(self, payloads):
+        """Overlay several Proj Data spectra in Analysis."""
+        if not payloads:
+            return
+        spec, peaks, _name = payloads[0]
+        self.on_mapping_spectrum_sent(spec, peaks)
+        self.spectrum_widget.clear_overlays()
+        for spec_i, _peaks, name_i in payloads[1:]:
+            self.spectrum_widget.add_overlay(spec_i, name=name_i)
+        n = len(payloads)
+        self.status_bar.showMessage(
+            f"Comparing {n} spectra in Analysis",
+            6000,
+        )
+
     def on_mapping_spectra_to_batch(self, pairs, *, replace=False, switch_tab=True):
         """Queue Mapping/IPJ spectra in Batch Analysis."""
         added = self.batch_analysis_panel.add_spectra(pairs, replace=replace)
@@ -1127,7 +1195,7 @@ class MainWindow(QMainWindow):
             # Get fitting parameters
             fit_params = self.element_panel.get_fitting_params()
             background_method = fit_params['background_method'].lower()
-            peak_shape = fit_params['peak_shape'].lower()
+            peak_shape = fit_params['peak_shape']
             
             # Get experimental parameters
             exp_params = self.element_panel.get_experimental_params()
@@ -1833,6 +1901,8 @@ class MainWindow(QMainWindow):
                 5000
             )
 
+        self._refresh_calibration_status()
+
     def on_tube_profiles_changed(self, library):
         """Apply per-kV tube profile library to Analysis fitting."""
         self.session.instrument.tube_profile_library = library
@@ -1846,6 +1916,7 @@ class MainWindow(QMainWindow):
             f"({library.tube_element})",
             5000
         )
+        self._refresh_calibration_status()
     
     def on_calibration_applied(self, calibration_result):
         """Handle standards calibration being applied"""
@@ -1858,6 +1929,7 @@ class MainWindow(QMainWindow):
         
         # Switch back to analysis tab
         self.tab_widget.setCurrentIndex(0)
+        self._refresh_calibration_status()
     
     def closeEvent(self, event):
         """Handle window close event"""

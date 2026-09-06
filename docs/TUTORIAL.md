@@ -176,7 +176,7 @@ Peaks are marked on the spectrum, listed for editing, and matched to common XRF 
 ### Step D — Fit
 
 1. Open **Fitting**.
-2. Typical starting point: peak shape **Voigt**; post-fit Smart ID on for overlap review.
+2. Typical starting point: peak shape **Tail-Gaussian**; post-fit Smart ID on for overlap review.
 3. Click **Fit Spectrum** (`Ctrl+F`).
 
 Watch the main plot and residuals. Tube-overlap flags (if any) appear under Results.

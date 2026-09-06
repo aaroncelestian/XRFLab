@@ -208,7 +208,7 @@ class BatchProcessingConfig:
 
     # Fitting parameters (aligned with SpectrumFitter.fit_spectrum)
     background_method: str = "snip"
-    peak_shape: str = "voigt"
+    peak_shape: str = "tail_gaussian"
     include_escape_peaks: bool = True
     include_pileup: bool = False
     tube_element: str = "Rh"

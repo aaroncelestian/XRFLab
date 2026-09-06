@@ -29,6 +29,12 @@ _DEFAULT_SITE_RE = re.compile(
     r"^(Site of Interest|Site)\s*\d*$",
     flags=re.IGNORECASE,
 )
+_GENERIC_SPECTRUM_RE = re.compile(
+    r"^(?:Spectrum|Point|Spot|Pos(?:ition)?|SPE)\s*\d+$"
+    r"|^Sum Spectrum$"
+    r"|^\d+$",
+    flags=re.IGNORECASE,
+)
 
 
 def sanitize_name_token(value: str) -> str:
@@ -49,6 +55,26 @@ def is_default_sample_name(name: str) -> bool:
 def is_default_site_name(name: str) -> bool:
     """True for vendor placeholders like 'Site 1' / 'Site of Interest 2'."""
     return bool(_DEFAULT_SITE_RE.match((name or "").strip()))
+
+
+def is_generic_spectrum_name(name: str) -> bool:
+    """True for vendor placeholders like 'Spectrum 1' or 'Sum Spectrum'."""
+    return bool(_GENERIC_SPECTRUM_RE.match((name or "").strip()))
+
+
+def analysis_sample_label(spectrum_name: str, sample_name: str = "") -> str:
+    """Name to show in Analysis → Sample Information for a sent spectrum.
+
+    Prefer a user-renamed spectrum, then a user-renamed sample, then the
+    spectrum label so Analysis is not stuck on vendor 'Sample 1'.
+    """
+    spec = (spectrum_name or "").strip()
+    sample = (sample_name or "").strip()
+    if spec and not is_generic_spectrum_name(spec):
+        return spec
+    if sample and not is_default_sample_name(sample):
+        return sample
+    return spec or sample or ""
 
 
 def composite_label(

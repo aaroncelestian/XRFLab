@@ -95,9 +95,35 @@ class PeakShapeCalibrator:
             ]
         }
     
+    def _resolve_file_peaks(self, file_peaks=None, include_holder_al: bool = True):
+        """
+        Map spectrum filename → (element, [(line, energy), ...]).
+
+        Prefer an explicit UI assignment list; otherwise scan the folder and
+        guess elements from filenames + the line database.
+        """
+        if file_peaks:
+            return file_peaks
+
+        from core.fwhm_standards import scan_fwhm_folder, assignments_to_file_peaks
+
+        discovered = assignments_to_file_peaks(
+            scan_fwhm_folder(self.data_dir, include_holder_al=include_holder_al)
+        )
+        if discovered:
+            return discovered
+
+        # Fallback for the original hardcoded foil set
+        return {
+            f"{name}.txt": (name, list(lines))
+            for name, lines in self.expected_peaks.items()
+        }
+
     def load_and_process_file(self, filename: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Load spectrum and subtract background"""
-        filepath = self.data_dir / filename
+        filepath = Path(filename)
+        if not filepath.is_file():
+            filepath = self.data_dir / filename
         
         # Load spectrum
         energy, counts = load_spectrum(str(filepath))
@@ -193,17 +219,33 @@ class PeakShapeCalibrator:
         except Exception as e:
             raise ValueError(f"Fit failed for {line} at {peak_energy:.3f} keV: {e}")
     
-    def process_all_files(self):
-        """Process all standard files and measure peak widths"""
+    def process_all_files(self, file_peaks=None, include_holder_al: bool = True):
+        """Process standard files and measure peak widths.
+
+        Args:
+            file_peaks: Optional {filename: (element, [(line, energy), ...])}.
+                When omitted, the folder is scanned and elements are guessed
+                from filenames using the X-ray line database.
+            include_holder_al: Also try Al Kα on non-Al foils (sample holder).
+        """
         print("Processing XRF standards for peak shape calibration...")
         print("=" * 70)
-        
-        for filename, expected in self.expected_peaks.items():
-            print(f"\n{filename}:")
+
+        file_peaks = self._resolve_file_peaks(
+            file_peaks, include_holder_al=include_holder_al
+        )
+
+        for filename, spec in file_peaks.items():
+            if isinstance(spec, tuple) and len(spec) == 2:
+                element, expected = spec
+            else:
+                element, expected = filename, spec
+
+            print(f"\n{filename} ({element}):")
             
             # Load data
             try:
-                energy, counts_raw, counts_bg_sub = self.load_and_process_file(f"{filename}.txt")
+                energy, counts_raw, counts_bg_sub = self.load_and_process_file(filename)
             except Exception as e:
                 print(f"  ❌ Failed to load: {e}")
                 continue
@@ -215,7 +257,7 @@ class PeakShapeCalibrator:
                     min_counts = 150 if peak_energy > 10 else 80
                     
                     measurement = self.measure_peak_width(
-                        energy, counts_bg_sub, peak_energy, filename, line_name,
+                        energy, counts_bg_sub, peak_energy, element, line_name,
                         min_counts=min_counts
                     )
                     
@@ -314,14 +356,39 @@ class PeakShapeCalibrator:
             raise ValueError("Need at least 3 peak measurements for calibration")
         
         # Extract energies and FWHMs
-        energies = np.array([m.energy for m in self.measurements])
-        fwhms = np.array([m.fwhm for m in self.measurements])
+        energies = np.array([m.energy for m in self.measurements], dtype=float)
+        fwhms = np.array([m.fwhm for m in self.measurements], dtype=float)
         
         # Remove outliers if requested (use detector model for outlier detection)
         if remove_outliers and len(energies) > 5:
             print("\nChecking for outliers...")
             energies, fwhms = self._remove_outliers(energies, fwhms)
-        
+
+        from core.fwhm_standards import group_fwhm_replicates
+
+        replicate_stats = group_fwhm_replicates(self.measurements)
+        use_means = (
+            len(replicate_stats) >= 3
+            and any(s.n > 1 for s in replicate_stats)
+        )
+        if use_means:
+            energies = np.array([s.energy_mean for s in replicate_stats], dtype=float)
+            fwhms = np.array([s.fwhm_mean for s in replicate_stats], dtype=float)
+            # Weight by replicate SEM; n=1 uses a 2 eV floor so they still count
+            sigma = []
+            for stat in replicate_stats:
+                if stat.n >= 2 and stat.fwhm_sem > 0:
+                    sigma.append(max(stat.fwhm_sem, 0.001))
+                else:
+                    sigma.append(0.002)
+            sigma = np.array(sigma, dtype=float)
+            n_rep = sum(1 for s in replicate_stats if s.n > 1)
+            print(
+                f"\nFitting {len(replicate_stats)} line means "
+                f"({n_rep} with replicates; weighted by SEM)"
+            )
+        else:
+            sigma = None 
         # Select model and fit
         if model == 'detector':
             # Standard detector model: FWHM(E) = sqrt(FWHM_0^2 + 2.355^2 * epsilon * E)
@@ -368,8 +435,12 @@ class PeakShapeCalibrator:
         
         # Fit
         try:
+            fit_kw = dict(p0=p0, bounds=bounds)
+            if sigma is not None:
+                fit_kw["sigma"] = sigma
+                fit_kw["absolute_sigma"] = True
             popt, pcov = optimize.curve_fit(
-                fit_func, energies, fwhms, p0=p0, bounds=bounds
+                fit_func, energies, fwhms, **fit_kw
             )
             
             # Calculate fit quality

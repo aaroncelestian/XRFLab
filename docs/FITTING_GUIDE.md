@@ -5,7 +5,7 @@
 XRFLab now includes a comprehensive spectrum fitting engine that performs:
 - **Background modeling** (SNIP, polynomial, linear, adaptive)
 - **Peak detection** (automatic and element-based)
-- **Peak fitting** (Gaussian, Voigt, Pseudo-Voigt)
+- **Peak fitting** (Tail-Gaussian, Gaussian, Hypermet)
 - **Quantification** (preliminary fundamental parameters)
 
 ## Features
@@ -37,21 +37,19 @@ XRFLab now includes a comprehensive spectrum fitting engine that performs:
 
 #### Peak Shapes
 
-**Gaussian** (Default)
-- Fast and simple
-- Good approximation for most XRF peaks
-- Formula: `A * exp(-(x-μ)²/(2σ²))`
+**Tail-Gaussian** (Default)
+- Main Gaussian plus a wider, slightly low-energy-shifted Gaussian
+- Captures incomplete-charge-collection tails on lab EDXRF spectra
+- Stable for routine fitting
 
-**Voigt Profile**
-- More accurate for X-ray peaks
-- Convolution of Gaussian and Lorentzian
-- Accounts for natural line width
-- Slower to compute
+**Gaussian**
+- Detector core only; fewest free parameters
+- Use for FWHM calibration, weak peaks, or a simple baseline
 
-**Pseudo-Voigt**
-- Linear combination of Gaussian and Lorentzian
-- Faster approximation of Voigt
-- Good balance of speed and accuracy
+**Hypermet** (Phillips & Marlow)
+- Gaussian ⊗ exponential tail (continuous erfc form) plus a low-energy step/shelf
+- Physically complete ICC model; more free parameters than Tail-Gaussian
+- Peak area is Gaussian + tail; the step is treated as a shelf, not peak counts
 
 #### Peak Detection
 
@@ -255,7 +253,7 @@ distance=20  # More separation (fewer peaks)
 
 **`core/peak_fitting.py`**
 - PeakFitter class
-- Peak shapes (Gaussian, Voigt, Pseudo-Voigt)
+- Peak shapes (Gaussian, Tail-Gaussian, Hypermet)
 - Peak detection and fitting
 - Fit statistics calculation
 

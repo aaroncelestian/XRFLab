@@ -20,7 +20,7 @@ Desktop application for X-ray fluorescence (XRF) spectrum analysis: interactive 
 ### Implemented
 - Modern **PySide6** GUI with PyQtGraph spectrum + residuals display
 - Interactive **periodic table** element selection (118 elements)
-- **Spectrum fitting** with SNIP/polynomial backgrounds and Gaussian/Voigt (and related) peak shapes
+- **Spectrum fitting** with SNIP/polynomial backgrounds and Tail-Gaussian / Gaussian / Hypermet peak shapes
 - Tube lines, Compton scatter, and tube-profile soft constraints
 - **FWHM calibration**, tube profiles, and standards calibration tabs
 - **Semi-quant**: area-normalized relative intensities (not FP weight %)

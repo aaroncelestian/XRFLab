@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 
 from core.background import BackgroundModeler
-from core.peak_fitting import PeakFitter, Peak
+from core.peak_fitting import PeakFitter, Peak, normalize_peak_shape
 from core.xray_data import (
     get_element_lines,
     get_tube_lines,
@@ -469,7 +469,7 @@ class SpectrumFitter:
         return positions
 
     def fit_spectrum(self, energy, counts, elements=None, 
-                    background_method='snip', peak_shape='gaussian',
+                    background_method='snip', peak_shape='tail_gaussian',
                     auto_find_peaks=True, tube_element='Rh', 
                     excitation_kv=50.0, include_tube_lines=True,
                     peak_positions=None, **kwargs):
@@ -481,7 +481,7 @@ class SpectrumFitter:
             counts: Counts array
             elements: List of element dicts with 'symbol' and 'z' keys
             background_method: 'snip', 'polynomial', 'linear', 'adaptive', 'none'
-            peak_shape: 'gaussian', 'voigt', 'pseudo_voigt'
+            peak_shape: 'tail_gaussian' (default), 'gaussian', or 'hypermet'
             auto_find_peaks: If True, automatically find peaks
             peak_positions: Optional pre-built peak seeds (skips rebuild when provided)
             **kwargs: Additional parameters for background/peak fitting
@@ -489,6 +489,7 @@ class SpectrumFitter:
         Returns:
             FitResult object
         """
+        peak_shape = normalize_peak_shape(peak_shape)
         # Ensure class-level PeakFitter helpers use this instance's detector
         self.peak_fitter.activate()
 
@@ -815,44 +816,7 @@ class SpectrumFitter:
         fitted_spectrum = np.copy(background)
         
         for peak in fitted_peaks:
-            # Use the correct peak shape for reconstruction
-            if peak.shape == 'gaussian':
-                sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                fitted_spectrum += self.peak_fitter.gaussian(
-                    energy, peak.amplitude, peak.energy, sigma
-                )
-            elif peak.shape == 'voigt':
-                sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                gamma = peak.shape_params.get('gamma', 0.05)
-                fitted_spectrum += self.peak_fitter.voigt(
-                    energy, peak.amplitude, peak.energy, sigma, gamma
-                )
-            elif peak.shape == 'pseudo_voigt':
-                sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                eta = peak.shape_params.get('eta', 0.5)
-                fitted_spectrum += self.peak_fitter.pseudo_voigt(
-                    energy, peak.amplitude, peak.energy, sigma, eta
-                )
-            elif peak.shape == 'hypermet':
-                sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                tail_amp = peak.shape_params.get('tail_amplitude', 0.1)
-                tail_slope = peak.shape_params.get('tail_slope', 2.0)
-                fitted_spectrum += self.peak_fitter.hypermet(
-                    energy, peak.amplitude, peak.energy, sigma, tail_amp, tail_slope
-                )
-            elif peak.shape == 'tail_gaussian':
-                sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-                tail_frac = peak.shape_params.get('tail_fraction', 0.15)
-                tail_sigma = peak.shape_params.get('tail_sigma', sigma * 3)
-                fitted_spectrum += self.peak_fitter.tail_gaussian(
-                    energy, peak.amplitude, peak.energy, sigma, tail_frac, tail_sigma
-                )
-            else:
-                # Default to Gaussian if shape not recognized
-                sigma = peak.fwhm / 2.355
-                fitted_spectrum += self.peak_fitter.gaussian(
-                    energy, peak.amplitude, peak.energy, sigma
-                )
+            fitted_spectrum += self.peak_fitter.evaluate_peak(peak, energy)
         
         # Step 6: Calculate residuals
         residuals = counts - fitted_spectrum

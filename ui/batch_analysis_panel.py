@@ -27,6 +27,7 @@ from core.batch_processing import (
 )
 from core.composition import VALUE_WT, numbered_replicate_names, strip_replicate_suffix
 from core.matrix_model import MatrixAssumptions
+from core.peak_fitting import normalize_peak_shape
 from ui.element_panel import ElementPanel
 from ui.composition_panel import CompositionPanel
 from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts, enable_box_zoom
@@ -369,7 +370,7 @@ class BatchAnalysisPanel(QWidget):
             self.config.tube_current = current
             self.config.live_time = live_time
             self.config.background_method = background.lower()
-            self.config.peak_shape = peak_shape.lower()
+            self.config.peak_shape = normalize_peak_shape(peak_shape)
             self.config.include_escape_peaks = escape_peaks
             self.config.include_tube_lines = tube_on
             self.config.tube_element = (

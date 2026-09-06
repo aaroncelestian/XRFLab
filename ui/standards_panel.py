@@ -10,16 +10,16 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
                                QPushButton, QLabel, QLineEdit, QTextEdit,
                                QFileDialog, QProgressBar, QMessageBox, QSplitter,
                                QCheckBox, QDoubleSpinBox, QListWidget, QListWidgetItem,
-                               QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget)
+                               QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
+                               QTabWidget, QDialog)
 from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths
 from pathlib import Path
 import pyqtgraph as pg
 import numpy as np
-import json
-import csv
 from typing import Dict, List
 
 from core.calibration import InstrumentCalibrator, CalibrationResult
+from core.reference_composition import find_composition_csv, load_composition_csv
 from ui.concentration_entry_dialog import ConcentrationEntryDialog
 from utils.io_handler import IOHandler
 
@@ -187,7 +187,8 @@ class StandardsPanel(QWidget):
         # Status label
         self.fwhm_status_label = QLabel(
             "<b>⚠️ No FWHM calibration loaded</b><br>"
-            "Please run FWHM Calibration first (FWHM Calibration tab)"
+            "Calibrate detector FWHM first (Calibration → FWHM). "
+            "Intensity calibration is optional — Analysis Semi-Quant works without it."
         )
         self.fwhm_status_label.setWordWrap(True)
         self.fwhm_status_label.setStyleSheet("color: #cc6600;")
@@ -195,9 +196,8 @@ class StandardsPanel(QWidget):
         
         # Info text
         info = QLabel(
-            "<small>FWHM parameters (FWHM₀, ε) are fixed during intensity calibration. "
-            "This ensures detector resolution is accurately modeled while optimizing "
-            "intensity scaling factors.</small>"
+            "<small>Optional intensity / FP path. Semi-Quant on Analysis does not "
+            "need this. FWHM₀ and ε stay fixed from the FWHM tab.</small>"
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -212,8 +212,9 @@ class StandardsPanel(QWidget):
         layout.setSpacing(3)
         
         info = QLabel(
-            "Add a standard once (certified concentrations), then load one or "
-            "more spot spectra to check variance. Multi-select files when prompted."
+            "Add a certified standard: spectra first, then confirm the "
+            "composition table. A nearby CSV (including same filename) is "
+            "only used to pre-fill that table."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -537,47 +538,46 @@ class StandardsPanel(QWidget):
         return entries, errors
     
     def _add_standard(self):
-        """Add a new standard: name → one or more spot spectra → concentrations"""
+        """Add a new standard: spectra → name → confirm composition table."""
         from PySide6.QtWidgets import QInputDialog
-        
+
+        paths = self._pick_spectrum_files(
+            "Select spectrum file(s) for this standard "
+            "(multi-select replicate spots)"
+        )
+        if not paths:
+            return
+
+        suggested = Path(paths[0]).stem
         standard_name, ok = QInputDialog.getText(
             self,
-            "Add Standard",
-            "Name for this standard\n(e.g. NIST 2586):",
-            text="My Standard"
+            "Standard name",
+            "Name for this standard:",
+            text=suggested,
         )
-        
         if not ok or not standard_name.strip():
             return
-        
         standard_name = standard_name.strip()
-        
+
         if standard_name in self.standards_data:
             reply = QMessageBox.question(
                 self,
                 "Standard Exists",
                 f"'{standard_name}' is already in the list.\n\n"
-                "Add more spot spectra to it?\n"
-                "(Concentrations stay the same.)",
-                QMessageBox.Yes | QMessageBox.No
+                "Add these files as more spot spectra?\n"
+                "(Composition stays the same.)",
+                QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self._add_spectra_to_standard(standard_name)
+                self._add_spectra_to_standard(standard_name, paths=paths)
             return
-        
-        paths = self._pick_spectrum_files(
-            f"Select Spot Spectrum File(s) for {standard_name}\n"
-            "(select multiple files for replicate spots)"
-        )
-        if not paths:
-            return
-        
+
         entries, errors = self._load_spectra_from_paths(paths)
         if errors:
             QMessageBox.warning(
                 self,
                 "Some Files Failed",
-                "Could not load:\n" + "\n".join(errors)
+                "Could not load:\n" + "\n".join(errors),
             )
         if not entries:
             QMessageBox.critical(
@@ -585,33 +585,23 @@ class StandardsPanel(QWidget):
                 "Error Loading Spectra",
                 "No spectrum files could be loaded.\n\n"
                 "Select measured XRF spectra (energy/counts), "
-                "not the concentration CSV."
+                "not the concentration CSV.",
             )
             return
-        
-        concentrations = self._load_or_enter_concentrations(standard_name)
+
+        concentrations = self._confirm_composition(standard_name, paths)
         if not concentrations:
             return
-        
+
         self.standards_data[standard_name] = {
             'concentrations': concentrations,
             'spectra': entries,
             'loaded': True,
         }
-        
+
         self._upsert_standard_row(standard_name)
         self._select_standard_row(standard_name)
         self._check_ready_for_calibration()
-        
-        QMessageBox.information(
-            self,
-            "Standard Added",
-            f"Added '{standard_name}'.\n\n"
-            f"Spot spectra: {len(entries)}\n"
-            f"Elements: {len(concentrations)}\n"
-            f"Total concentration: {sum(concentrations.values()):.2f} wt%\n\n"
-            "Use Add Spectra… to load more spots on this standard."
-        )
     
     def _add_spectra_to_selected(self):
         """Add more spot spectra to the currently selected standard"""
@@ -625,14 +615,15 @@ class StandardsPanel(QWidget):
             return
         self._add_spectra_to_standard(name)
     
-    def _add_spectra_to_standard(self, standard_name):
+    def _add_spectra_to_standard(self, standard_name, paths=None):
         """Append spot spectra to an existing standard"""
         if standard_name not in self.standards_data:
             return
         
-        paths = self._pick_spectrum_files(
-            f"Add Spot Spectra to {standard_name}"
-        )
+        if not paths:
+            paths = self._pick_spectrum_files(
+                f"Add Spot Spectra to {standard_name}"
+            )
         if not paths:
             return
         
@@ -668,12 +659,7 @@ class StandardsPanel(QWidget):
         self._check_ready_for_calibration()
         
         n = len(self.standards_data[standard_name]['spectra'])
-        QMessageBox.information(
-            self,
-            "Spectra Added",
-            f"Added {len(entries)} spot(s) to '{standard_name}'.\n"
-            f"Total spots: {n}"
-        )
+        self.spots_list.setToolTip(f"{n} spot(s) on {standard_name}")
     
     def _upsert_standard_row(self, standard_name):
         """Insert or update a row for this standard in the table"""
@@ -874,143 +860,35 @@ class StandardsPanel(QWidget):
             return mean
         return data['spectra'][0]['spectrum']
     
-    def _load_or_enter_concentrations(self, standard_name):
-        """Load concentrations from CSV or enter manually"""
-        # Ask user if they have a CSV file
-        reply = QMessageBox.question(
-            self,
-            "Concentration Data",
-            f"Do you have a CSV file with element concentrations for {standard_name}?\n\n"
-            "CSV format should have columns: Element, Concentration\n"
-            "Example:\n"
-            "  Si, 32.5\n"
-            "  Al, 10.2\n"
-            "  Fe, 5.8",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-        )
-        
-        if reply == QMessageBox.Cancel:
-            return None
-        elif reply == QMessageBox.Yes:
-            return self._load_concentrations_from_csv()
-        else:
-            return self._enter_concentrations_manually(standard_name)
-    
-    def _load_concentrations_from_csv(self):
-        """Load concentrations from CSV file"""
-        csv_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Concentration CSV File",
-            "",
-            "CSV Files (*.csv);;All Files (*)"
-        )
-        
-        if not csv_path:
-            return None
-        
-        try:
-            concentrations = {}
-            with open(csv_path, 'r') as f:
-                reader = csv.reader(f)
-                
-                # Read first row to detect format
-                first_row = next(reader, None)
-                if not first_row:
-                    return None
-                
-                # Detect column indices
-                element_col = None
-                conc_col = None
-                
-                # Check if first row is header
-                header = [col.lower().strip() for col in first_row]
-                
-                # Look for element/symbol column
-                for i, col in enumerate(header):
-                    if 'symbol' in col or col == 'element':
-                        element_col = i
-                        break
-                
-                # Look for concentration column
-                for i, col in enumerate(header):
-                    if 'concentration' in col or 'conc' in col:
-                        conc_col = i
-                        break
-                
-                # If we found headers, use them
-                if element_col is not None and conc_col is not None:
-                    # Process data rows
-                    for row in reader:
-                        if len(row) > max(element_col, conc_col):
-                            element = row[element_col].strip()
-                            try:
-                                conc_str = row[conc_col].strip()
-                                if conc_str:
-                                    conc = float(conc_str)
-                                    # Convert mg/kg to wt% if needed (mg/kg / 10000 = wt%)
-                                    if conc > 100:  # Likely mg/kg
-                                        conc = conc / 10000.0
-                                    if conc > 0:
-                                        concentrations[element] = conc
-                            except (ValueError, IndexError):
-                                continue
-                else:
-                    # No header found, assume simple format: Element, Concentration
-                    # Try to parse first row as data
-                    try:
-                        element = first_row[0].strip()
-                        conc = float(first_row[1])
-                        if conc > 100:  # Likely mg/kg
-                            conc = conc / 10000.0
-                        if conc > 0:
-                            concentrations[element] = conc
-                    except (ValueError, IndexError):
-                        pass  # First row was header, skip it
-                    
-                    # Process remaining rows
-                    for row in reader:
-                        if len(row) >= 2:
-                            element = row[0].strip()
-                            try:
-                                conc = float(row[1])
-                                if conc > 100:  # Likely mg/kg
-                                    conc = conc / 10000.0
-                                if conc > 0:
-                                    concentrations[element] = conc
-                            except ValueError:
-                                continue
-            
-            if not concentrations:
-                QMessageBox.warning(
-                    self,
-                    "No Data",
-                    "No valid concentration data found in CSV file.\n\n"
-                    "Expected format:\n"
-                    "- With headers: Symbol, Concentration (or similar)\n"
-                    "- Without headers: Element, Concentration\n"
-                    "- Concentrations in wt% or mg/kg"
+    def _confirm_composition(self, standard_name, spectrum_paths):
+        """Show an editable composition table, pre-filled from a nearby CSV if found."""
+        found = find_composition_csv(spectrum_paths, standard_name=standard_name)
+        initial = {}
+        source = ""
+        if found:
+            try:
+                initial = load_composition_csv(found)
+                source = (
+                    f"Pre-filled from {found.name} "
+                    f"({len(initial)} elements). Same-name matching is a hint only."
                 )
-                return None
-            
-            return concentrations
-            
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Error Loading CSV",
-                f"Failed to load CSV file:\n{str(e)}"
-            )
-            return None
-    
-    def _enter_concentrations_manually(self, standard_name):
-        """Enter concentrations manually via dialog"""
-        from PySide6.QtWidgets import QDialog
-        dialog = ConcentrationEntryDialog(standard_name, self)
-        
+            except Exception:
+                initial = {}
+                source = f"Could not parse {found.name}; enter values or load another CSV."
+
+        dialog = ConcentrationEntryDialog(
+            standard_name,
+            self,
+            concentrations=initial or None,
+            source_label=source,
+        )
         if dialog.exec() == QDialog.Accepted:
             return dialog.get_concentrations()
-        
         return None
+
+    def _load_or_enter_concentrations(self, standard_name):
+        """Backward-compatible alias used by older call sites."""
+        return self._confirm_composition(standard_name, [])
     
     def _on_bg_method_changed(self, index):
         """Handle background method selection change"""

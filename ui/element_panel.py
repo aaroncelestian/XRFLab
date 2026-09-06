@@ -12,6 +12,11 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from ui.periodic_table_widget import PeriodicTableWidget
 from core.xray_data import get_element_lines, get_element_info
+from core.peak_fitting import (
+    PEAK_SHAPE_UI_CHOICES,
+    PEAK_SHAPE_UI_DEFAULT,
+    peak_shape_ui_label,
+)
 
 
 class ElementPanel(QWidget):
@@ -576,14 +581,14 @@ class ElementPanel(QWidget):
         shape_layout = QHBoxLayout()
         shape_layout.addWidget(QLabel("Peak Shape:"))
         self.peak_shape_combo = QComboBox()
-        self.peak_shape_combo.addItems([
-            "Gaussian",
-            "Voigt",
-            "Pseudo-Voigt",
-            "Hypermet",
-            "Tail-Gaussian"
-        ])
-        self.peak_shape_combo.setCurrentText("Voigt")
+        self.peak_shape_combo.addItems([label for label, _ in PEAK_SHAPE_UI_CHOICES])
+        self.peak_shape_combo.setCurrentText(PEAK_SHAPE_UI_DEFAULT)
+        self.peak_shape_combo.setToolTip(
+            "Gaussian: detector core only (simple / FWHM calibration).\n"
+            "Tail-Gaussian: default — low-energy tail, stable for EDXRF.\n"
+            "Hypermet: Gaussian + exponential ICC tail + step/shelf "
+            "(Phillips–Marlow)."
+        )
         shape_layout.addWidget(self.peak_shape_combo)
         layout.addLayout(shape_layout)
 
@@ -1029,6 +1034,21 @@ class ElementPanel(QWidget):
         # Incident angle
         if "incident_angle" in metadata:
             self.angle_spin.setValue(float(metadata["incident_angle"]))
+
+        # Sample Information: prefer an explicit sample_name (mapping send),
+        # then the spectrum's own name so Proj Data labels survive the hop.
+        sample_name = (
+            metadata.get("sample_name")
+            or metadata.get("sample")
+            or metadata.get("name")
+        )
+        if sample_name:
+            self.sample_name_edit.setText(str(sample_name))
+        sample_type = metadata.get("sample_type")
+        if sample_type:
+            idx = self.sample_type_combo.findText(str(sample_type))
+            if idx >= 0:
+                self.sample_type_combo.setCurrentIndex(idx)
     
     def update_fwhm_status(self, fwhm_calibration=None):
         """
@@ -1126,13 +1146,7 @@ class ElementPanel(QWidget):
     def get_fitting_params(self):
         """Return dictionary of fitting parameters"""
         # Convert UI peak shape names to internal format
-        peak_shape_map = {
-            'Gaussian': 'gaussian',
-            'Voigt': 'voigt',
-            'Pseudo-Voigt': 'pseudo_voigt',
-            'Hypermet': 'hypermet',
-            'Tail-Gaussian': 'tail_gaussian'
-        }
+        peak_shape_map = {label: key for label, key in PEAK_SHAPE_UI_CHOICES}
         peak_shape = self.peak_shape_combo.currentText()
         
         min_height = self.min_height_spin.value()
@@ -1233,7 +1247,10 @@ class ElementPanel(QWidget):
         if state.get("background"):
             self.background_combo.setCurrentText(str(state["background"]))
         if state.get("peak_shape"):
-            self.peak_shape_combo.setCurrentText(str(state["peak_shape"]))
+            label = peak_shape_ui_label(state["peak_shape"])
+            idx = self.peak_shape_combo.findText(label)
+            if idx >= 0:
+                self.peak_shape_combo.setCurrentIndex(idx)
         self.escape_peaks_check.setChecked(bool(state.get("escape_peaks", True)))
         self.pileup_check.setChecked(bool(state.get("pileup", False)))
         self.tube_lines_check.setChecked(bool(state.get("tube_lines", True)))

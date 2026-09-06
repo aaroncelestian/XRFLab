@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — Peak profiles (2026-09-06)
+
+- Fitting default is **Tail-Gaussian**; Gaussian remains the simple option
+- **Hypermet** is the full Phillips–Marlow form (Gaussian + continuous exponential ICC tail + low-energy step/shelf)
+- Voigt and Pseudo-Voigt removed from the UI (still reconstructed from saved peaks)
+
 ## Version 1.3.1 - Composition UI layout (2026-08-24)
 
 - **Analysis:** Composition tab (matrix model, FP wt%, formulas) after Results; Results keeps semi-quant only

@@ -9,6 +9,8 @@ from core.mapping.merge import (
     composite_label,
     is_default_sample_name,
     is_default_site_name,
+    is_generic_spectrum_name,
+    analysis_sample_label,
     merge_ipj_line_scans,
     merge_line_scan_projects,
     sanitize_name_token,
@@ -72,6 +74,21 @@ def test_sanitize_and_defaults():
     assert is_default_site_name("Site 1")
     assert is_default_site_name("Site of Interest 2")
     assert not is_default_site_name("Vein east")
+    assert is_generic_spectrum_name("Spectrum 1")
+    assert is_generic_spectrum_name("Spectrum 12")
+    assert is_generic_spectrum_name("Sum Spectrum")
+    assert is_generic_spectrum_name("Point 3")
+    assert not is_generic_spectrum_name("nickelene_1")
+    assert not is_generic_spectrum_name("Barstow tufa")
+
+
+def test_analysis_sample_label_prefers_renamed_spectrum():
+    assert analysis_sample_label("nickelene_1", "Sample 1") == "nickelene_1"
+    assert analysis_sample_label("Spectrum 3", "Barstow tufa") == "Barstow tufa"
+    assert analysis_sample_label("Spectrum 3", "Sample 1") == "Spectrum 3"
+    assert analysis_sample_label("Sum Spectrum", "Sample 1") == "Sum Spectrum"
+    assert analysis_sample_label("", "Sample 1") == "Sample 1"
+    assert analysis_sample_label("", "") == ""
 
 
 def test_composite_label_four_parts():

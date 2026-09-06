@@ -218,17 +218,16 @@ class AdvancedCalibrator:
             fwhm = np.sqrt(fwhm_0**2 + 2.35 * epsilon * line_energy)
             sigma = fwhm / 2.355
             
-            # Add peak with tail (Hypermet-like)
-            # Main Gaussian
-            gaussian = intensity * np.exp(-(energy - line_energy)**2 / (2 * sigma**2))
-            
-            # Low-energy tail
-            tail = np.zeros_like(energy)
-            mask = energy < line_energy
-            if np.any(mask):
-                tail[mask] = intensity * tail_amp * np.exp(tail_slope * (energy[mask] - line_energy) / sigma)
-            
-            calculated += gaussian + tail
+            # Add peak with full Hypermet (Gaussian + erfc tail + optional shelf)
+            calculated += self.peak_fitter.hypermet(
+                energy,
+                intensity,
+                line_energy,
+                sigma,
+                tail_amp,
+                1.0 / max(float(tail_slope), 1e-6),
+                0.0,
+            )
         
         # Normalize for comparison
         if np.max(calculated) > 0:

@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from scipy import optimize
 
-from core.peak_fitting import PeakFitter, Peak
+from core.peak_fitting import PeakFitter, Peak, normalize_peak_shape
 
 
 # Soft prior: residual weight on (A - A_prior) / A_prior
@@ -184,13 +184,11 @@ def fit_peak_with_amplitude_prior(
     w = float(prior_weight)
 
     # Prefer locked width + fixed center for tube secondary lines
+    shape = normalize_peak_shape(shape)
+
     def residual(params):
         amp = params[0]
-        if shape == 'voigt':
-            gamma = sigma * PeakFitter.VOIGT_GAMMA_RATIO
-            model = PeakFitter.voigt(x, amp, center, sigma, gamma)
-        else:
-            model = PeakFitter.gaussian(x, amp, center, sigma)
+        model = PeakFitter.model_with_defaults(x, amp, center, sigma, shape)
         data_resid = (model - y) / sigma_data
         prior_resid = np.array([w * (amp - prior) / max(prior, 1.0)])
         return np.concatenate([data_resid, prior_resid])
@@ -212,22 +210,21 @@ def fit_peak_with_amplitude_prior(
         )
 
     fwhm = 2.355 * sigma
-    area = amp * sigma * np.sqrt(2 * np.pi)
-    shape_params = {'sigma': sigma}
+    sp = PeakFitter.default_shape_params(shape, sigma)
     if shape == 'voigt':
-        gamma = sigma * PeakFitter.VOIGT_GAMMA_RATIO
-        shape_params['gamma'] = gamma
+        gamma = sp['gamma']
         fwhm_g = fwhm
         fwhm_l = 2.0 * gamma
         fwhm = 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
+    area = PeakFitter.compute_peak_area(amp, sigma, shape, sp)
 
     return Peak(
         energy=center,
         amplitude=amp,
         fwhm=fwhm,
         area=area,
-        shape='voigt' if shape == 'voigt' else 'gaussian',
-        shape_params=shape_params,
+        shape=shape,
+        shape_params=sp,
         fixed_fwhm=float(fixed_fwhm) if fixed_fwhm is not None else None,
     )
 
@@ -271,18 +268,12 @@ def fit_overlap_doublet(
     if tube_amplitude_prior is not None and tube_amplitude_prior > 0:
         a_t0 = float(tube_amplitude_prior)
 
-    use_voigt = (shape == 'voigt')
-    gamma = sigma * PeakFitter.VOIGT_GAMMA_RATIO
+    shape = normalize_peak_shape(shape)
 
     def model(a_t, a_s):
-        if use_voigt:
-            return (
-                PeakFitter.voigt(x, a_t, e_t, sigma, gamma)
-                + PeakFitter.voigt(x, a_s, e_s, sigma, gamma)
-            )
         return (
-            PeakFitter.gaussian(x, a_t, e_t, sigma)
-            + PeakFitter.gaussian(x, a_s, e_s, sigma)
+            PeakFitter.model_with_defaults(x, a_t, e_t, sigma, shape)
+            + PeakFitter.model_with_defaults(x, a_s, e_s, sigma, shape)
         )
 
     def residual(params):
@@ -307,20 +298,23 @@ def fit_overlap_doublet(
         print(f"Doublet fit failed near {mid:.3f} keV: {e}")
         return None, None
 
-    area_t = a_t * sigma * np.sqrt(2 * np.pi)
-    area_s = a_s * sigma * np.sqrt(2 * np.pi)
-    shape_name = 'voigt' if use_voigt else 'gaussian'
-    sp = {'sigma': sigma}
-    if use_voigt:
-        sp['gamma'] = gamma
+    sp = PeakFitter.default_shape_params(shape, sigma)
+    fwhm_out = fwhm
+    if shape == 'voigt':
+        gamma = sp['gamma']
+        fwhm_g = fwhm
+        fwhm_l = 2.0 * gamma
+        fwhm_out = 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
+    area_t = PeakFitter.compute_peak_area(a_t, sigma, shape, sp)
+    area_s = PeakFitter.compute_peak_area(a_s, sigma, shape, sp)
 
     tube_peak = Peak(
-        energy=e_t, amplitude=a_t, fwhm=fwhm, area=area_t,
-        shape=shape_name, shape_params=dict(sp),
+        energy=e_t, amplitude=a_t, fwhm=fwhm_out, area=area_t,
+        shape=shape, shape_params=dict(sp),
     )
     sample_peak = Peak(
-        energy=e_s, amplitude=a_s, fwhm=fwhm, area=area_s,
-        shape=shape_name, shape_params=dict(sp),
+        energy=e_s, amplitude=a_s, fwhm=fwhm_out, area=area_s,
+        shape=shape, shape_params=dict(sp),
     )
     return tube_peak, sample_peak
 
@@ -329,27 +323,7 @@ def subtract_peak_from_residual(peak_fitter, energy, residual, peak: Peak):
     """Subtract a fitted peak model from the residual spectrum (in-place copy)."""
     energy = np.asarray(energy, dtype=float)
     out = np.asarray(residual, dtype=float).copy()
-    sigma = peak.shape_params.get('sigma', peak.fwhm / 2.355)
-    if peak.shape == 'voigt':
-        gamma = peak.shape_params.get('gamma', sigma * PeakFitter.VOIGT_GAMMA_RATIO)
-        out -= peak_fitter.voigt(energy, peak.amplitude, peak.energy, sigma, gamma)
-    elif peak.shape == 'pseudo_voigt':
-        eta = peak.shape_params.get('eta', 0.5)
-        out -= peak_fitter.pseudo_voigt(energy, peak.amplitude, peak.energy, sigma, eta)
-    elif peak.shape == 'hypermet':
-        out -= peak_fitter.hypermet(
-            energy, peak.amplitude, peak.energy, sigma,
-            peak.shape_params.get('tail_amplitude', 0.1),
-            peak.shape_params.get('tail_slope', 2.0),
-        )
-    elif peak.shape == 'tail_gaussian':
-        out -= peak_fitter.tail_gaussian(
-            energy, peak.amplitude, peak.energy, sigma,
-            peak.shape_params.get('tail_fraction', 0.15),
-            peak.shape_params.get('tail_sigma', sigma * 3),
-        )
-    else:
-        out -= peak_fitter.gaussian(energy, peak.amplitude, peak.energy, sigma)
+    out -= PeakFitter.evaluate_peak(peak, energy)
     return out
 
 

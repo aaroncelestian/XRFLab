@@ -309,6 +309,9 @@ def _shape_flags(peak: Peak) -> List[str]:
     tail_amp = params.get('tail_amplitude', params.get('tail_fraction'))
     if tail_amp is not None and float(tail_amp) >= 0.20:
         flags.append(f"strong low-energy tail ({float(tail_amp):.2f})")
+    step_amp = params.get('step_amplitude')
+    if step_amp is not None and float(step_amp) >= 0.04:
+        flags.append(f"strong Hypermet shelf (step={float(step_amp):.3f})")
     return flags
 
 
