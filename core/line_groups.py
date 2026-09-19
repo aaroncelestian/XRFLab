@@ -374,6 +374,7 @@ def fit_grouped(
     refine_energy: bool = True,
     refine_shape: bool = True,
     max_outer_evals: int = 250,
+    ratio_priors=None,
 ) -> GroupedFitResult:
     """
     Linear least squares for every component amplitude, wrapped in a small
@@ -389,6 +390,8 @@ def fit_grouped(
         profile: TubeProfile for soft tube-ratio priors (optional)
         refine_energy: fit a global zero/gain correction
         refine_shape: fit the global shape extras (else use defaults)
+        ratio_priors: optional (key_a, key_b, rho, rel_sigma) rows that
+            softly enforce A_a = ρ A_b (certified-concentration split)
     """
     shape = normalize_peak_shape(shape)
     x = np.asarray(energy, dtype=float)
@@ -402,11 +405,27 @@ def fit_grouped(
         A, meta = _build_design(x, groups, singles, shape, offset, gain, gshape)
         if A.shape[1] == 0:
             return A, meta, np.zeros(0), float('inf')
-        amps = _solve(A * w[:, None], y * w)
+        A_w = A * w[:, None]
+        b_w = y * w
+        extra_a = []
+        extra_b = []
+        if ratio_priors:
+            from core.overlap_deconvolution import ratio_prior_rows
+            labels = [m.label for m in meta]
+            P, pb, _ = ratio_prior_rows(labels, ratio_priors, A.shape[1])
+            if P.shape[0]:
+                extra_a.append(P)
+                extra_b.append(pb)
+        if extra_a:
+            A_w = np.vstack([A_w, *extra_a])
+            b_w = np.concatenate([b_w, *extra_b])
+        amps = _solve(A_w, b_w)
         if profile is not None:
             P, pb, _ = _tube_prior_rows(meta, amps, profile, A.shape[1])
             if P.shape[0]:
-                amps = _solve(np.vstack([A * w[:, None], P]), np.concatenate([y * w, pb]))
+                stacked_a = [A * w[:, None], *extra_a, P]
+                stacked_b = [y * w, *extra_b, pb]
+                amps = _solve(np.vstack(stacked_a), np.concatenate(stacked_b))
         resid = (A @ amps - y) * w
         return A, meta, amps, float(np.sum(resid ** 2))
 
@@ -473,6 +492,12 @@ def fit_grouped(
             pass
 
     notes: List[str] = []
+    if ratio_priors and A.shape[1]:
+        from core.overlap_deconvolution import ratio_prior_rows
+        _, _, prior_notes = ratio_prior_rows(
+            [m.label for m in meta], ratio_priors, A.shape[1]
+        )
+        notes.extend(prior_notes)
     if profile is not None and A.shape[1]:
         _, _, prior_notes = _tube_prior_rows(meta, amps, profile, A.shape[1])
         notes.extend(prior_notes)

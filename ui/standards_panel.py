@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QFileDialog, QProgressBar, QMessageBox, QSplitter, QCheckBox,
     QDoubleSpinBox, QListWidget, QListWidgetItem, QComboBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QTabWidget, QDialog, QStackedWidget,
-    QInputDialog, QAbstractItemView,
+    QInputDialog, QAbstractItemView, QListView, QTreeView,
 )
 
 from core.calibration import CalibrationResult
@@ -39,7 +39,9 @@ from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
 from core.peak_fitting import PEAK_SHAPE_UI_CHOICES, PEAK_SHAPE_UI_DEFAULT
 from ui.nav_rail import IndexedStack
-from core.reference_composition import find_composition_csv, load_composition_csv
+from core.reference_composition import (
+    discover_standards_from_folders, find_composition_csv, load_composition_csv,
+)
 from core.standards_calibration import (
     StandardsCalibration, StandardRecord, ElementCurve,
     MODEL_LINEAR, MODEL_THROUGH_ORIGIN, MODEL_QUADRATIC,
@@ -56,8 +58,8 @@ MODEL_LABELS = [
     ("Quadratic (C = a + b·I + c·I²)", MODEL_QUADRATIC),
 ]
 LINE_LABELS = [
-    ("Principal series (all K lines, else L)", LINE_SERIES),
-    ("Principal line (Kα, else Lα)", LINE_AUTO),
+    ("Principal series (K if well excited, else L)", LINE_SERIES),
+    ("Principal line (Kα if well excited, else Lα)", LINE_AUTO),
     ("All fitted lines of element", LINE_ALL),
 ]
 NORMALISE_LABELS = [
@@ -246,9 +248,10 @@ class StandardsPanel(QWidget):
         gl.setSpacing(3)
 
         info = QLabel(
-            "Add each certified standard with all of its replicate spot spectra. "
-            "Untick <b>Use</b> to leave a standard out of every curve. The set "
-            "(names, spectrum paths, compositions) is saved automatically."
+            "Add standards by file, or import one or more folders at once. "
+            "A parent folder (for example <code>STANDARDS</code>) imports every "
+            "child that has spectra and a concentration CSV. Untick <b>Use</b> "
+            "to leave a standard out of every curve. The set is saved automatically."
         )
         info.setWordWrap(True)
         gl.addWidget(info)
@@ -278,6 +281,13 @@ class StandardsPanel(QWidget):
         b = QPushButton("Add Standard")
         b.setToolTip("Pick spectrum file(s) → name → confirm certified wt% table")
         b.clicked.connect(self._add_standard)
+        row1.addWidget(b)
+        b = QPushButton("Import Folders…")
+        b.setToolTip(
+            "Select several standard folders (Shift/⌘-click), or one parent "
+            "folder, to import every matching standard without a per-folder dialog"
+        )
+        b.clicked.connect(self._add_folders)
         row1.addWidget(b)
         b = QPushButton("Add Spectra…")
         b.setToolTip("Add more replicate spot spectra to the selected standard")
@@ -362,10 +372,11 @@ class StandardsPanel(QWidget):
             self.line_combo.addItem(label, key)
         self.line_combo.setToolTip(
             "Which fitted lines are summed to the element intensity.\n"
-            "Principal series (default): Kα+Kβ… — with grouped fitting this is the\n"
-            "sub-shell amplitude; with released ratios it is robust to an overlap\n"
-            "on one line.\n"
-            "Principal line: Kα1+Kα2 only.  All: every line, mixing K and L."
+            "Principal series (default): Kα+Kβ… when tube kV ≥ 1.5× the K-edge;\n"
+            "otherwise L (Ba and REE at 50 kV). Grouped fitting uses the sub-shell\n"
+            "amplitude; overlapping groups are split with the certified wt% ratio\n"
+            "and unmixed on unknowns via I = S·C learned from the standards.\n"
+            "Principal line: Kα (or Lα) only.  All: every line, mixing K and L."
         )
         r.addWidget(self.line_combo, stretch=1)
         r.addWidget(QLabel("Normalize:"))
@@ -591,6 +602,52 @@ class StandardsPanel(QWidget):
         paths, _ = QFileDialog.getOpenFileNames(self, title, "", self._spectrum_file_filter())
         return paths or []
 
+    def _default_standards_dir(self) -> str:
+        shipped = Path(__file__).resolve().parents[1] / "sample_data" / "STANDARDS"
+        return str(shipped if shipped.is_dir() else Path.home())
+
+    def _pick_folders(self, title) -> List[str]:
+        dialog = QFileDialog(self, title)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ReadOnly, True)
+        dialog.setDirectory(self._default_standards_dir())
+        for view in dialog.findChildren(QListView) + dialog.findChildren(QTreeView):
+            view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return self._selected_directories(dialog)
+
+    @staticmethod
+    def _selected_directories(dialog: QFileDialog) -> List[str]:
+        found: List[str] = []
+        for path in dialog.selectedFiles():
+            folder = Path(path)
+            if folder.is_dir():
+                found.append(str(folder.resolve()))
+        directory = Path(dialog.directory().absolutePath())
+        for view in dialog.findChildren(QListView) + dialog.findChildren(QTreeView):
+            model = view.selectionModel()
+            if model is None:
+                continue
+            for index in model.selectedIndexes():
+                if index.column() != 0:
+                    continue
+                name = index.data()
+                if not name:
+                    continue
+                candidate = directory / str(name)
+                if candidate.is_dir():
+                    found.append(str(candidate.resolve()))
+        seen = set()
+        unique = []
+        for path in found:
+            if path not in seen:
+                seen.add(path)
+                unique.append(path)
+        return unique
+
     def _load_spectra_from_paths(self, paths):
         entries, errors = [], []
         for path in paths:
@@ -652,6 +709,65 @@ class StandardsPanel(QWidget):
         self.spectra[name] = entries
         self._after_standards_changed(select=name)
 
+    def _add_folders(self):
+        folders = self._pick_folders(
+            "Select standard folder(s) — Shift/⌘-click several, or pick a parent folder"
+        )
+        if not folders:
+            return
+        added, updated, skipped, errors = self._import_standard_folders(folders)
+        self._after_standards_changed(select=(added or updated or [None])[0])
+        lines = []
+        if added:
+            lines.append(f"Imported {len(added)} standard(s): {', '.join(added)}.")
+        if updated:
+            lines.append(f"Added more spots to {len(updated)} existing standard(s): {', '.join(updated)}.")
+        if skipped:
+            reasons = "\n".join(f"• {path.name}: {reason}" for path, reason in skipped)
+            lines.append("Skipped:\n" + reasons)
+        if errors:
+            lines.append("Could not load:\n" + "\n".join(errors))
+        if not added and not updated:
+            QMessageBox.warning(
+                self, "Nothing Imported",
+                "\n\n".join(lines) or "No folders contained spectra plus a concentration CSV.",
+            )
+            return
+        self._log(" ".join(part.replace("\n", " ") for part in lines))
+        if skipped or errors:
+            QMessageBox.information(self, "Folders Imported", "\n\n".join(lines))
+
+    def _import_standard_folders(self, folders):
+        discovered, skipped = discover_standards_from_folders(folders)
+        added: List[str] = []
+        updated: List[str] = []
+        errors: List[str] = []
+        for item in discovered:
+            paths = [str(p) for p in item.spectrum_paths]
+            entries, load_errors = self._load_spectra_from_paths(paths)
+            errors.extend(load_errors)
+            if not entries:
+                skipped.append((item.folder, "spectra could not be loaded"))
+                continue
+            name = item.name
+            if name in self.calibration.standards:
+                n_new = self._add_spectra_to_standard(
+                    name, paths=[e["path"] for e in entries], refresh=False, quiet=True,
+                )
+                if n_new:
+                    updated.append(name)
+                continue
+            record = StandardRecord(
+                name=name,
+                concentrations=dict(item.concentrations),
+                spectrum_paths=[e["path"] for e in entries],
+                enabled=True,
+            )
+            self.calibration.add_standard(record)
+            self.spectra[name] = entries
+            added.append(name)
+        return added, updated, skipped, errors
+
     def _add_spectra_to_selected(self):
         name = self._selected_standard_name()
         if not name:
@@ -659,26 +775,29 @@ class StandardsPanel(QWidget):
             return
         self._add_spectra_to_standard(name)
 
-    def _add_spectra_to_standard(self, name, paths=None):
+    def _add_spectra_to_standard(self, name, paths=None, *, refresh=True, quiet=False):
         record = self.calibration.standards.get(name)
         if record is None:
-            return
+            return 0
         if not paths:
             paths = self._pick_spectrum_files(f"Add spot spectra to {name}")
         if not paths:
-            return
+            return 0
         new_paths = [p for p in paths if p not in record.spectrum_paths]
         if not new_paths:
-            QMessageBox.information(self, "Already Loaded", "All selected files are already in this standard.")
-            return
+            if not quiet:
+                QMessageBox.information(self, "Already Loaded", "All selected files are already in this standard.")
+            return 0
         entries, errors = self._load_spectra_from_paths(new_paths)
-        if errors:
+        if errors and not quiet:
             QMessageBox.warning(self, "Some Files Failed", "Could not load:\n" + "\n".join(errors))
         if not entries:
-            return
+            return 0
         record.spectrum_paths.extend(e["path"] for e in entries)
         self.spectra.setdefault(name, []).extend(entries)
-        self._after_standards_changed(select=name)
+        if refresh:
+            self._after_standards_changed(select=name)
+        return len(entries)
 
     def _edit_composition(self):
         name = self._selected_standard_name()
@@ -739,6 +858,10 @@ class StandardsPanel(QWidget):
         self._refresh_standards_table()
         if select:
             self._select_standard_row(select)
+        # Always rebuild the spots list/plot. Selecting an already-selected
+        # row does not fire itemSelectionChanged, so adding replicate files
+        # to the current standard would otherwise leave the list stale.
+        self._sync_selected_standard_details(select)
         self._refresh_elements_list()
         self._check_ready()
         self._auto_save_standards_set()
@@ -748,6 +871,7 @@ class StandardsPanel(QWidget):
     # ---- standards table --------------------------------------------------- #
     def _refresh_standards_table(self):
         self._updating = True
+        self.standards_table.blockSignals(True)
         try:
             names = list(self.calibration.standards.keys())
             self.standards_table.setRowCount(len(names))
@@ -770,6 +894,7 @@ class StandardsPanel(QWidget):
                 el.setTextAlignment(Qt.AlignCenter)
                 self.standards_table.setItem(row, 3, el)
         finally:
+            self.standards_table.blockSignals(False)
             self._updating = False
 
     def _find_standard_row(self, name):
@@ -792,10 +917,19 @@ class StandardsPanel(QWidget):
         return item.text() if item else None
 
     def _on_standard_selection_changed(self):
-        name = self._selected_standard_name()
+        if self._updating:
+            return
+        self._sync_selected_standard_details()
+
+    def _sync_selected_standard_details(self, name=None):
+        """Refresh the spots list and plot for `name` or the selected row."""
+        if name is None:
+            name = self._selected_standard_name()
         self._refresh_spots_list(name)
         if name:
             self._plot_standard_spots(name)
+        else:
+            self._clear_spot_plot()
 
     def _on_standard_item_changed(self, item):
         if self._updating or item.column() != 0:
@@ -1034,6 +1168,7 @@ class StandardsPanel(QWidget):
         finally:
             self._updating = False
         self._refresh_standards_table()
+        self._sync_selected_standard_details()
         self._refresh_elements_list()
         fitted_elements = set(calibration.fit_settings.get("elements") or [])
         if fitted_elements:

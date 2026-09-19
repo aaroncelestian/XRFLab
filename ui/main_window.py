@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
-    QPushButton, QLabel, QApplication, QScrollArea
+    QPushButton, QLabel, QApplication, QScrollArea, QDialog
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
@@ -151,6 +151,12 @@ class MainWindow(QMainWindow):
             "Export fundamental-parameters wt% from Analysis → Composition"
         )
         self.export_fp_action.triggered.connect(self.export_fp_results)
+
+        self.export_report_action = QAction("Export &Report...", self)
+        self.export_report_action.setStatusTip(
+            "Export a detailed HTML report of calibrations, fit, and compositions"
+        )
+        self.export_report_action.triggered.connect(self.export_report)
         
         self.exit_action = QAction("E&xit", self)
         self.exit_action.setShortcut(QKeySequence.Quit)
@@ -260,6 +266,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.export_results_action)
         file_menu.addAction(self.export_fp_action)
+        file_menu.addAction(self.export_report_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         
@@ -1212,6 +1219,40 @@ class MainWindow(QMainWindow):
             title="Export Results",
             default_name="semi_quant.csv",
         )
+
+    def export_report(self):
+        """Export a self-contained HTML analysis report."""
+        from webbrowser import open as open_browser
+
+        from core.report import write_report
+        from ui.report_dialog import ReportDialog, context_from_main_window
+
+        context = context_from_main_window(self)
+        composition_state = {}
+        batch = getattr(self, "batch_analysis_panel", None)
+        comp = getattr(batch, "composition_panel", None) if batch is not None else None
+        if comp is not None and hasattr(comp, "capture_state"):
+            composition_state = comp.capture_state()
+        dialog = ReportDialog(self, context=context, composition_state=composition_state)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        path = dialog.save_path()
+        if not path:
+            return
+        if not path.lower().endswith(".html"):
+            path = path + ".html"
+        try:
+            write_report(path, context, dialog.options())
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Report",
+                f"Failed to write the report:\n{exc}",
+            )
+            return
+        self.status_bar.showMessage(f"Wrote report: {path}", 8000)
+        if dialog.open_after():
+            open_browser(Path(path).resolve().as_uri())
 
     def export_fp_results(self):
         """Export FP wt% from the Composition tab."""

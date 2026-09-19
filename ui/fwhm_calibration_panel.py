@@ -193,7 +193,7 @@ class FWHMCalibrationPanel(QWidget):
 
         example_btn = QPushButton("Examples")
         example_btn.setFixedWidth(88)
-        example_btn.setToolTip("Load the shipped foil spectra in sample_data/data")
+        example_btn.setToolTip("Load the shipped foil spectra in sample_data/STANDARDS/foils")
         example_btn.clicked.connect(self._use_example_standards)
         row.addWidget(example_btn)
 

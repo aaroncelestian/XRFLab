@@ -79,8 +79,9 @@ def is_likely_mixed_standard(stem: str) -> bool:
     if text in ("stds standard",) or text.startswith("stds "):
         return True
     mixed_tokens = (
-        "nist", "srm", "lksd", "pacs", "steel", "stainless", "brass",
-        "mineral", "soil", "sediment", "certified",
+        "nist", "srm", "lksd", "pacs", "stsd", "till", "oreas", "mbh",
+        "steel", "stainless", "brass", "mineral", "soil", "sediment",
+        "certified",
     )
     return any(token in text.split() or token in text for token in mixed_tokens)
 
@@ -175,8 +176,14 @@ class FWHMStandardFile:
 def example_standards_dir() -> Optional[Path]:
     """Shipped foil folder next to this repo, if present."""
     root = Path(__file__).resolve().parents[1]
-    candidate = root / "sample_data" / "data"
-    return candidate if candidate.is_dir() else None
+    for candidate in (
+        root / "sample_data" / "STANDARDS" / "foils",
+        root / "sample_data" / "STANDARDS",
+        root / "sample_data" / "data",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _skip_subdir(name: str) -> bool:

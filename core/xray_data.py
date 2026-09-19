@@ -461,6 +461,28 @@ def get_tube_compton_lines(
     return results
 
 
+def edge_energy_kev(z: int, series: str = "K"):
+    """Absorption-edge energy (keV) for a series, or None if unknown."""
+    if not z:
+        return None
+    series = (series or "K")[:1].upper()
+    if XRAYLIB_AVAILABLE:
+        shell = {"K": xrl.K_SHELL, "L": xrl.L3_SHELL, "M": xrl.M5_SHELL}.get(series)
+        if shell is None:
+            return None
+        try:
+            energy = float(xrl.EdgeEnergy(int(z), shell))
+            return energy if energy > 0 else None
+        except Exception:
+            return None
+    # Moseley's law fallback (keV); good enough for overvoltage checks
+    if series == "K":
+        return 0.0136 * (int(z) - 1) ** 2
+    if series == "L":
+        return 0.0136 * (int(z) - 7.4) ** 2 / 4.0
+    return None
+
+
 # Approximate K-edge energies (keV) for common tube anodes — for user messages
 TUBE_K_EDGE_KEV = {
     'Cr': 5.99,

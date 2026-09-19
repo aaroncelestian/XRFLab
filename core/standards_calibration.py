@@ -44,6 +44,11 @@ LINE_DEFAULT = LINE_SERIES
 
 # Minimum Z we try to calibrate (lighter elements are not measurable in air)
 MIN_Z = 11
+# Tube kV / K-edge below this → K fluorescence is too weak; use L (or M).
+# At 50 kV this keeps Fe–Sn on K and moves Ba / REE onto L.
+K_OVERVOLTAGE_MIN = 1.5
+# R² below this is reported as a weak-correlation warning (still fitted).
+WEAK_R_SQUARED = 0.5
 
 
 # --------------------------------------------------------------------------- #
@@ -376,24 +381,55 @@ def line_group_of(line_name: Optional[str]) -> str:
     return s[:2] if len(s) >= 2 else s
 
 
-def choose_line_group(groups_present: Iterable[str], mode: str = LINE_AUTO) -> str:
+def k_series_preferred(element: str, excitation_kv: float) -> bool:
+    """True when the tube overvoltage is high enough for a useful K series."""
+    from core.advanced_peak_fitting import get_element_z
+    from core.xray_data import edge_energy_kev
+
+    z = get_element_z(element)
+    edge = edge_energy_kev(z, "K") if z else None
+    if edge is None:
+        return True
+    return float(excitation_kv) >= float(edge) * K_OVERVOLTAGE_MIN
+
+
+def choose_line_group(
+    groups_present: Iterable[str],
+    mode: str = LINE_AUTO,
+    *,
+    element: Optional[str] = None,
+    excitation_kv: Optional[float] = None,
+) -> str:
     """
     Pick the line group key for an element from the families fitted.
 
     mode LINE_AUTO   → 'Kα', else 'Lα', else 'Mα' (single family)
     mode LINE_SERIES → 'K', else 'L', else 'M' (whole series summed)
     Falls back to LINE_ALL when nothing matches.
+
+    When `element` and `excitation_kv` are given, K is skipped unless the
+    tube overvoltage is at least K_OVERVOLTAGE_MIN (Ba / REE at 50 kV → L).
     """
     present = {g for g in groups_present if g and g != "Compton"}
+    skip_k = bool(
+        element and excitation_kv is not None
+        and not k_series_preferred(element, excitation_kv)
+    )
     if mode == LINE_SERIES:
         series = {g[0] for g in present if g[0] in "KLM"}
-        for s in ("K", "L", "M"):
+        order = ("L", "M") if skip_k else ("K", "L", "M")
+        for s in order:
             if s in series:
                 return s
+        if skip_k and "K" in series:
+            return "K"
         return LINE_ALL
-    for g in ("Kα", "Lα", "Mα"):
+    families = ("Lα", "Mα") if skip_k else ("Kα", "Lα", "Mα")
+    for g in families:
         if g in present:
             return g
+    if skip_k and "Kα" in present:
+        return "Kα"
     return LINE_ALL
 
 
@@ -592,6 +628,7 @@ class StandardsCalibration:
     fit_settings: Dict[str, Any] = field(default_factory=dict)
     calibration_date: Optional[str] = None
     fwhm_calibration: Optional[Dict[str, Any]] = None
+    overlap_models: List[Any] = field(default_factory=list)
     message: str = ""
 
     type: str = CALIBRATION_TYPE
@@ -702,6 +739,7 @@ class StandardsCalibration:
                 include_tube_lines=fit_kwargs.get("include_tube_lines", True),
                 include_compton=fit_kwargs.get("include_compton", True),
                 grouped_lines=bool(fit_kwargs.get("grouped_lines", True)),
+                reference_composition=dict(self.standards[name].concentrations),
             )
             fit_results[(name, path)] = result
 
@@ -719,7 +757,9 @@ class StandardsCalibration:
                 for pk in res.peaks:
                     if pk.element == sym and not getattr(pk, "is_tube_line", False):
                         present.add(line_group_of(pk.line))
-            line_groups[sym] = choose_line_group(present, line_selection)
+            line_groups[sym] = choose_line_group(
+                present, line_selection, element=sym, excitation_kv=excitation,
+            )
         self.line_groups = line_groups
 
         new_intensities: Dict[str, Dict[str, Dict[str, SpotIntensity]]] = {}
@@ -835,18 +875,82 @@ class StandardsCalibration:
                     curve.r_squared = res["r_squared"]
                     curve.rmse = res["rmse"]
                     curve.residual_variance = res["residual_variance"]
-                    curve.fitted = True
                     for p in points:
                         p.predicted = curve.evaluate(p.intensity)
                         p.residual = p.predicted - p.concentration
                     if curve.slope <= 0:
-                        curve.message = "Negative or zero slope — check standards"
-                    elif res["dof"] <= 0:
-                        curve.message = "Exact fit — no redundancy; add standards"
+                        curve.fitted = False
+                        curve.message = (
+                            "Negative or zero slope — intensity does not "
+                            "increase with concentration"
+                        )
+                    elif curve.r_squared < 0:
+                        curve.fitted = False
+                        curve.message = (
+                            f"No correlation (R² = {curve.r_squared:.2f}) — "
+                            "wrong line or below detection"
+                        )
+                    else:
+                        curve.fitted = True
+                        if res["dof"] <= 0:
+                            curve.message = "Exact fit — no redundancy; add standards"
+                        elif curve.r_squared < WEAK_R_SQUARED:
+                            curve.message = (
+                                f"Weak correlation (R² = {curve.r_squared:.2f}) "
+                                "— treat as semi-quantitative"
+                            )
                 except Exception as exc:  # pragma: no cover - defensive
                     curve.message = str(exc)
             new_curves[sym] = curve
         self.curves = new_curves
+        self._learn_overlap_models()
+
+    def _learn_overlap_models(self) -> None:
+        """Build I = S C mixing matrices for unresolved line-group clusters."""
+        from core.overlap_deconvolution import clusters_for_line_groups, learn_mixing_models
+        from core.peak_fitting import PeakFitter
+
+        if not self.line_groups or not self.intensities:
+            self.overlap_models = []
+            return
+        clusters, _pairs, energies = clusters_for_line_groups(
+            self.line_groups, PeakFitter.calculate_fwhm,
+        )
+        if not clusters:
+            self.overlap_models = []
+            return
+        concs = {
+            name: dict(rec.concentrations)
+            for name, rec in self.standards.items()
+            if rec.enabled
+        }
+        ints: Dict[str, Dict[str, float]] = {}
+        for name, per_path in self.intensities.items():
+            rec = self.standards.get(name)
+            if rec is None or not rec.enabled:
+                continue
+            acc: Dict[str, List[float]] = {}
+            for path, spots in per_path.items():
+                if rec.spectrum_paths and path not in rec.spectrum_paths:
+                    continue
+                for el, spot in spots.items():
+                    acc.setdefault(el, []).append(float(spot.cps))
+            if acc:
+                ints[name] = {el: float(np.mean(vals)) for el, vals in acc.items()}
+        self.overlap_models = learn_mixing_models(
+            clusters, concentrations=concs, intensities=ints, energies=energies,
+            enabled=concs.keys(),
+        )
+        by_el = {el: m for m in self.overlap_models if m.usable for el in m.elements}
+        for el, curve in self.curves.items():
+            model = by_el.get(el)
+            if model is None:
+                continue
+            note = model.message
+            if curve.message:
+                curve.message = f"{curve.message}; {note}"
+            else:
+                curve.message = note
 
     # ---- quantification of unknowns -------------------------------------- #
     def quantify(
@@ -880,11 +984,10 @@ class StandardsCalibration:
             background = np.asarray(fit_result.background, dtype=float)
             energy_arr = np.asarray(energy, dtype=float)
 
-        out: Dict[str, Dict[str, Any]] = {}
-        for sym, curve in self.curves.items():
-            if not (curve.fitted and curve.enabled):
-                continue
-            group = self.line_groups.get(sym, curve.line_group)
+        def _spot_cps(sym: str):
+            group = self.line_groups.get(sym) or (
+                self.curves[sym].line_group if sym in self.curves else LINE_ALL
+            )
             area = 0.0
             var = 0.0
             lines: List[str] = []
@@ -901,9 +1004,59 @@ class StandardsCalibration:
                     var += max(a, 0.0)
                 lines.append(str(pk.line))
             if not lines:
+                return None
+            return area / t, math.sqrt(var) / t, lines, group
+
+        out: Dict[str, Dict[str, Any]] = {}
+        overlap_done = set()
+        for model in self.overlap_models or []:
+            if not getattr(model, "usable", False):
                 continue
-            cps = area / t
-            cps_err = math.sqrt(var) / t
+            cps_map = {}
+            lines_map = {}
+            group_map = {}
+            ok = True
+            for el in model.elements:
+                spot = _spot_cps(el)
+                if spot is None:
+                    ok = False
+                    break
+                cps_map[el], _err, lines_map[el], group_map[el] = spot
+            if not ok:
+                continue
+            preds = model.predict(cps_map)
+            for el, (conc, err) in preds.items():
+                overlap_done.add(el)
+                group = group_map.get(el, self.line_groups.get(el, LINE_ALL))
+                lines = lines_map.get(el) or []
+                if group == LINE_ALL:
+                    label = ", ".join(lines)
+                elif len(group) == 1:
+                    fams = sorted({line_group_of(l) for l in lines})
+                    label = f"{group} ({'+'.join(fams)})"
+                else:
+                    label = group
+                out[el] = {
+                    "concentration": conc,
+                    "error": err,
+                    "lines": lines,
+                    "line": label,
+                    "method": "standards_overlap",
+                    "intensity_cps": cps_map[el],
+                    "intensity_cps_err": 0.0,
+                    "in_range": True,
+                    "overlap": "+".join(model.elements),
+                }
+
+        for sym, curve in self.curves.items():
+            if sym in overlap_done:
+                continue
+            if not (curve.fitted and curve.enabled):
+                continue
+            spot = _spot_cps(sym)
+            if spot is None:
+                continue
+            cps, cps_err, lines, group = spot
             conc, err = curve.predict(cps, cps_err)
             if group == LINE_ALL:
                 label = ", ".join(lines)
@@ -1001,6 +1154,10 @@ class StandardsCalibration:
             "line_groups": dict(self.line_groups),
             "excluded_points": {k: list(v) for k, v in self.excluded_points.items()},
             "fwhm_calibration": self.fwhm_calibration,
+            "overlap_models": [
+                m.to_dict() if hasattr(m, "to_dict") else m
+                for m in (self.overlap_models or [])
+            ],
             "standards": {k: v.to_dict() for k, v in self.standards.items()},
             "curves": {k: v.to_dict() for k, v in self.curves.items()},
             "intensities": {
@@ -1028,6 +1185,11 @@ class StandardsCalibration:
             fwhm_calibration=data.get("fwhm_calibration"),
             message=str(data.get("message", "") or ""),
         )
+        from core.overlap_deconvolution import OverlapMixingModel
+        cal.overlap_models = [
+            OverlapMixingModel.from_dict(m) for m in (data.get("overlap_models") or [])
+            if isinstance(m, dict)
+        ]
         return cal
 
     def save(self, filepath: str) -> None:

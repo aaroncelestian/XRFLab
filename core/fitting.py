@@ -644,6 +644,7 @@ class SpectrumFitter:
                 tube_element=tube_element,
                 refine_energy=bool(kwargs.get('refine_energy', True)),
                 ratio_matrix=kwargs.get('ratio_matrix'),
+                reference_composition=kwargs.get('reference_composition'),
             )
 
         # Step 4 (released ratios): sequential per-line fits with
@@ -968,6 +969,7 @@ class SpectrumFitter:
         tube_element=None,
         refine_energy=True,
         ratio_matrix=None,
+        reference_composition=None,
     ) -> FitResult:
         """
         Grouped fit: each element sub-shell is one free amplitude with a
@@ -977,7 +979,9 @@ class SpectrumFitter:
         `ratio_matrix` ({element: weight_fraction}) lets the fixed ratios
         include matrix absorption at each line energy (FP-corrected). Without
         it only detector efficiency modulates the tabulated emission ratios.
-        """
+        `reference_composition` (element → certified wt%) adds a soft
+        amplitude-ratio prior on overlapping groups of different elements.
+    """
         from core.line_groups import build_line_groups, fit_grouped, make_ratio_corrector
 
         corrector = None
@@ -1006,9 +1010,20 @@ class SpectrumFitter:
             )
             print(f"  {g.key}: [{pattern}]")
 
+        ratio_priors = None
+        if reference_composition:
+            from core.overlap_deconvolution import (
+                composition_ratio_priors, find_overlap_pairs,
+            )
+            from core.peak_fitting import PeakFitter
+            pairs = find_overlap_pairs(groups, PeakFitter.calculate_fwhm)
+            ratio_priors = composition_ratio_priors(
+                pairs, reference_composition, excitation_kv=float(excitation_kv),
+            ) or None
         result = fit_grouped(
             energy, counts_bg_subtracted, counts, groups, singles,
             shape=peak_shape, profile=profile, refine_energy=refine_energy,
+            ratio_priors=ratio_priors,
         )
         for note in result.notes:
             print(f"  • {note}")

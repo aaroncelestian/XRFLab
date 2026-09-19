@@ -1,0 +1,9 @@
+Element,Symbol,Concentration_mg_kg,Uncertainty_mg_kg,Value_Type,Notes
+Arsenic,As,40,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"
+Chromium,Cr,31,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"
+Copper,Cu,44,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"
+Iron,Fe,28000,,Certified,"Source: sample_data/Different elements, certified value.pdf; converted from 2.8 wt% to mg/kg (x10,000)"
+Nickel,Ni,16,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"
+Lead,Pb,82,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"
+Sulfur,S,15700,,Certified,"Source: sample_data/Different elements, certified value.pdf; converted from 1.57 wt% to mg/kg (x10,000)"
+Zinc,Zn,331,,Certified,"Source: sample_data/Different elements, certified value.pdf; mg/kg"

@@ -1,0 +1,30 @@
+Element,Symbol,Concentration_mg_kg,Uncertainty_mg_kg,Value_Type,Notes
+Aluminum,Al,1600,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Barium,Ba,6700,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Calcium,Ca,359400,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Cerium,Ce,1400,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Dysprosium,Dy,2.6,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Europium,Eu,4.2,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Holmium,Ho,0.38,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Iron,Fe,2000,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Lanthanum,La,1000,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Lead,Pb,149,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Lutetium,Lu,0.077,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Magnesium,Mg,17000,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Manganese,Mn,280,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Neodymium,Nd,340,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Niobium,Nb,2.5,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Phosphorus,P,410,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Potassium,K,290,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Praseodymium,Pr,130,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Rubidium,Rb,1.5,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Samarium,Sm,24,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Scandium,Sc,0.85,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Silicon,Si,8880,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Strontium,Sr,1900,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Sulfur,S,2000,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Thorium,Th,9.8,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Titanium,Ti,120,,Certified,"Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; major value converted from wt% to mg/kg (x10,000)"
+Uranium,U,1.8,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Ytterbium,Yb,0.5,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)
+Yttrium,Y,10,,Certified,Source: MBH-REE-LO-22-P Certificate of Analysis (ARM MI / LGC); assigned consensus value; trace value as printed (mg/kg)

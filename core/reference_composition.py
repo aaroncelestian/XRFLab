@@ -2,13 +2,14 @@
 Load certified concentrations for intensity (standards) calibration.
 
 A CSV with the same filename as the spectrum is one discovery hint, not the
-UI. The user always confirms an editable table; we just try to pre-fill it.
+UI. Folder import uses it directly; Add Standard still lets the user confirm.
 """
 
 from __future__ import annotations
 
 import csv
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -118,6 +119,11 @@ def _digit_keys(*parts: str) -> List[str]:
     return keys
 
 
+def _base_stem(stem: str) -> str:
+    """Strip a trailing replicate index: OREAS_460b_01 → OREAS_460b."""
+    return re.sub(r"[\s_\-]+\d+$", "", (stem or "").strip())
+
+
 def _score_candidate(path: Path, stems: Sequence[str], name: str, digits: Sequence[str]) -> int:
     """Higher is a better match. 0 means skip."""
     filename = path.name.lower()
@@ -126,13 +132,16 @@ def _score_candidate(path: Path, stems: Sequence[str], name: str, digits: Sequen
     stem_l = path.stem.lower()
     score = 0
     for stem in stems:
-        s = stem.lower()
-        if stem_l == s:
-            score = max(score, 100)
-        elif stem_l == f"{s}_elements" or stem_l == f"{s.replace(' ', '_')}_elements":
-            score = max(score, 90)
-        elif s.replace(" ", "") in stem_l.replace(" ", "").replace("_", ""):
-            score = max(score, 40)
+        candidates = {stem.lower(), _base_stem(stem).lower()}
+        for s in candidates:
+            if not s:
+                continue
+            if stem_l == s:
+                score = max(score, 100)
+            elif stem_l == f"{s}_elements" or stem_l == f"{s.replace(' ', '_')}_elements":
+                score = max(score, 90)
+            elif s.replace(" ", "") in stem_l.replace(" ", "").replace("_", ""):
+                score = max(score, 40)
     name_l = (name or "").lower()
     if name_l and name_l.replace(" ", "") in stem_l.replace(" ", "").replace("_", ""):
         score = max(score, 50)
@@ -154,8 +163,8 @@ def find_composition_csv(
     Find a likely composition CSV near the spectra.
 
     Search order (highest score wins):
-    - same stem as a spectrum (NIST 2586.csv)
-    - {stem}_elements.csv
+    - same stem as a spectrum (NIST_SRM_2586.csv)
+    - {stem}_elements.csv or {base}_elements.csv after stripping _01
     - *2586*elements*.csv when the name/file contains those digits
     """
     paths = [Path(p) for p in spectrum_paths if p]
@@ -187,3 +196,109 @@ def find_composition_csv(
         if sibling.is_file() and sibling.name.lower() not in _SKIP_CSV_NAMES:
             return sibling
     return best if best_score >= 40 else None
+
+
+SPECTRUM_SUFFIXES = {".txt", ".dat", ".mca", ".msa", ".emsa"}
+
+
+@dataclass
+class DiscoveredStandard:
+    """One CRM folder found by `discover_standards_from_folders`."""
+
+    name: str
+    folder: Path
+    spectrum_paths: List[Path]
+    csv_path: Optional[Path] = None
+    concentrations: Dict[str, float] = field(default_factory=dict)
+
+
+def list_spectrum_files(folder: str | Path) -> List[Path]:
+    """Spectrum files sitting directly in *folder* (not subfolders)."""
+    path = Path(folder)
+    if not path.is_dir():
+        return []
+    files = [
+        child for child in path.iterdir()
+        if child.is_file() and child.suffix.lower() in SPECTRUM_SUFFIXES
+    ]
+    return sorted(files, key=lambda p: p.name.lower())
+
+
+def _standard_from_folder(folder: Path) -> Optional[DiscoveredStandard]:
+    spectra = list_spectrum_files(folder)
+    if not spectra:
+        return None
+    csv_path = find_composition_csv(spectra, standard_name=folder.name)
+    concentrations: Dict[str, float] = {}
+    if csv_path is not None:
+        try:
+            concentrations = load_composition_csv(csv_path)
+        except Exception:
+            concentrations = {}
+    if not concentrations:
+        return None
+    return DiscoveredStandard(
+        name=folder.name,
+        folder=folder,
+        spectrum_paths=spectra,
+        csv_path=csv_path,
+        concentrations=concentrations,
+    )
+
+
+def discover_standards_from_folders(
+    folders: Sequence[str | Path],
+) -> Tuple[List[DiscoveredStandard], List[Tuple[Path, str]]]:
+    """
+    Expand selected folders into importable standards.
+
+    A folder that contains spectra plus a readable composition CSV is one
+    standard. A folder with no spectra is treated as a parent: each child
+    that qualifies is imported (so choosing STANDARDS imports every CRM
+    subfolder). Duplicates from selecting both a parent and a child are
+    collapsed. Folders of spectra with no concentration table are skipped.
+    """
+    seen: set = set()
+    imported: List[DiscoveredStandard] = []
+    skipped: List[Tuple[Path, str]] = []
+
+    def _add(item: DiscoveredStandard) -> None:
+        key = item.folder.resolve()
+        if key in seen:
+            return
+        seen.add(key)
+        imported.append(item)
+
+    for raw in folders:
+        folder = Path(raw)
+        if not folder.is_dir():
+            skipped.append((folder, "not a folder"))
+            continue
+        own = _standard_from_folder(folder)
+        if own is not None:
+            _add(own)
+            continue
+        if list_spectrum_files(folder):
+            skipped.append((folder, "no readable concentration table"))
+            continue
+        children = sorted(
+            (child for child in folder.iterdir() if child.is_dir() and not child.name.startswith(".")),
+            key=lambda p: p.name.lower(),
+        )
+        if not children:
+            skipped.append((folder, "no spectrum files"))
+            continue
+        found_child = False
+        for child in children:
+            item = _standard_from_folder(child)
+            if item is None:
+                if list_spectrum_files(child):
+                    skipped.append((child, "no readable concentration table"))
+                continue
+            _add(item)
+            found_child = True
+        if not found_child and folder.resolve() not in {p.resolve() for p, _r in skipped}:
+            skipped.append((folder, "no standard folders with a concentration table"))
+
+    imported.sort(key=lambda item: item.name.lower())
+    return imported, skipped

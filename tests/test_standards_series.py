@@ -14,7 +14,9 @@ from core.standards_calibration import (
     LINE_AUTO,
     LINE_DEFAULT,
     LINE_SERIES,
+    MODEL_LINEAR,
     MODEL_THROUGH_ORIGIN,
+    SpotIntensity,
     StandardRecord,
     StandardsCalibration,
     choose_line_group,
@@ -31,6 +33,14 @@ def test_series_is_default_and_choose_line_group_modes():
     assert choose_line_group({"Lα", "Lβ", "Lγ"}, LINE_SERIES) == "L"
     assert choose_line_group({"Lβ"}, LINE_AUTO) == LINE_ALL  # no α family
     assert choose_line_group({"Compton"}, LINE_SERIES) == LINE_ALL
+    # 50 kV barely exceeds the La / Ba K-edge — use L, not noise at ~33 keV
+    assert choose_line_group(present, LINE_SERIES, element="La", excitation_kv=50.0) == "L"
+    assert choose_line_group(present, LINE_SERIES, element="Ba", excitation_kv=50.0) == "L"
+    assert choose_line_group(present, LINE_AUTO, element="La", excitation_kv=50.0) == "Lα"
+    # Fe K-edge ~7.1 keV is well excited at 50 kV
+    assert choose_line_group(present, LINE_SERIES, element="Fe", excitation_kv=50.0) == "K"
+    # Only K fitted → still return K even when overvoltage is low
+    assert choose_line_group({"Kα", "Kβ"}, LINE_SERIES, element="La", excitation_kv=50.0) == "K"
 
 
 def test_line_matches_group_series_family_all():
@@ -142,3 +152,62 @@ def test_series_calibration_roundtrip_with_grouped_fit():
     back = StandardsCalibration.from_dict(cal.to_dict())
     assert back.line_groups["Fe"] == "K"
     assert back.curves["Fe"].line_group == "K"
+
+
+def _spot(name, path, cps, area=None, err=1.0):
+    area = cps * 30.0 if area is None else area
+    return SpotIntensity(
+        spectrum=name, path=path, live_time=30.0,
+        area=area, area_err=err, cps=cps, cps_err=err / 30.0, lines=["Kα1"],
+    )
+
+
+def _cal_with_points(element, pairs):
+    """pairs: (standard, wt%, cps)."""
+    cal = StandardsCalibration()
+    for std, wt, cps in pairs:
+        path = f"{std}.txt"
+        cal.add_standard(StandardRecord(name=std, concentrations={element: wt},
+                                        spectrum_paths=[path]))
+        cal.intensities.setdefault(std, {})[path] = {
+            element: _spot(f"{std}.txt", path, cps),
+        }
+    cal.line_groups[element] = "K"
+    return cal
+
+
+def test_negative_slope_is_not_a_fitted_curve():
+    cal = _cal_with_points("Mg", [
+        ("s1", 0.4, 0.06), ("s2", 0.6, 0.05), ("s3", 0.8, 0.03), ("s4", 1.0, 0.02),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=False)
+    curve = cal.curves["Mg"]
+    assert curve.slope < 0
+    assert curve.fitted is False
+    assert "Negative" in curve.message
+    assert cal.fitted_curves() == []
+
+
+def test_negative_r_squared_is_not_a_fitted_curve():
+    # Real OREAS La-K intensities: spots agree, but cps does not track wt%.
+    # Weighted WLS then yields R² < 0 (worse than the mean).
+    cal = StandardsCalibration()
+    for std, wt, cps, sem in (
+        ("oreas 466", 0.02, 0.3539, 0.876),
+        ("oreas 460b", 0.12, 0.2978, 0.888),
+        ("oreas 462", 0.37, 0.1871, 0.389),
+        ("oreas 464", 1.06, 0.3655, 0.410),
+    ):
+        path = f"{std}.txt"
+        cal.add_standard(StandardRecord(
+            name=std, concentrations={"La": wt}, spectrum_paths=[path],
+        ))
+        cal.intensities.setdefault(std, {})[path] = {
+            "La": _spot(f"{std}.txt", path, cps, err=sem * 30.0),
+        }
+    cal.line_groups["La"] = "K"
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    curve = cal.curves["La"]
+    assert curve.r_squared < 0
+    assert curve.fitted is False
+    assert "No correlation" in curve.message
