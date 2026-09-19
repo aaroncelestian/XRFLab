@@ -16,6 +16,7 @@ import numpy as np
 
 from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
+from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG
 from core.calibration import CalibrationResult
 from core.matrix_model import MatrixAssumptions
 from core.spectrum import Spectrum
@@ -215,7 +216,7 @@ class BatchProcessingConfig:
     include_tube_lines: bool = True
     include_compton: bool = True
     sample_contains_tube_element: bool = False
-    scatter_angle_deg: float = 90.0
+    scatter_angle_deg: float = DEFAULT_SCATTER_ANGLE_DEG
     compton_fwhm_kev: float = 0.500
     auto_find_peaks: bool = True
     excitation_kv: float = 50.0

@@ -57,6 +57,10 @@ XRFLab now includes a comprehensive spectrum fitting engine that performs:
 - Tail-Gaussian: tail fraction and tail width stay free; Hypermet: tail amplitude, β and step stay free; Voigt: γ stays free.
 - Without a calibration all width parameters are free in the least-squares fit.
 
+**Compton scatter geometry**
+- The anode Compton humps are seeded at E' = E₀ / (1 + (E₀/511)(1 − cos θ)). θ is the tube→sample→detector angle; for Rh Kα it moves the hump from 19.45 keV (90°) to 18.8 keV (150°) — more than a full hump width.
+- Default θ is 155° (near-backscatter, typical of benchtop / micro-XRF). Fit the true instrument value with **Fit θ** on the Fitting tab or by measuring a blank on the Tube Profiles tab; a measured profile overrides the Fitting-tab θ and Compton FWHM.
+
 #### Peak Detection
 
 **Element-Based**

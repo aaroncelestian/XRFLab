@@ -43,7 +43,7 @@ Detector **FWHM** is one energy-dependent curve. **Tube shape** is per voltage.
 ### Steps
 
 1. Open **Calibration → Tube Profiles**.
-2. Set **Tube anode** (typically **Rh**), **Tube voltage** (**15**, **30**, or **50** kV), scatter angle (often **90°**), and Compton FWHM if needed (default **250 eV**).
+2. Set **Tube anode** (typically **Rh**) and **Tube voltage** (**15**, **30**, or **50** kV). Leave **Fit scatter angle and Compton width from the blank's Compton hump** checked — the tube→sample→detector angle θ and the Compton FWHM are then measured from the hump position/width instead of typed in. Benchtop and micro-XRF instruments are usually near-backscatter (θ ≈ 150–170°, default 155°); at 90° the Rh Compton Kα seed would land ~700 eV too high and miss the hump entirely.
 3. Click **Load Blank Spectrum…** and choose your blank (`.txt`, `.csv`, `.mca`, `.msa`, `.emsa`).  
    If the file metadata includes excitation energy, the voltage may snap to the nearest mode.
 4. Click **Measure Profile**. Ratios are stored for that kV and the library is auto-saved.
@@ -55,6 +55,7 @@ Optional: **Save Library…** / **Load Library…** for backups or sharing betwe
 ### Tips
 
 - There is **no blank** in the shipped `sample_data/` folder. Use a real instrument blank, or skip this part and rely on built-in default ratios (fine for learning the UI; weaker for real tube overlaps).
+- Without a measured profile you can still fit θ for a single spectrum: on **Analysis → Fitting**, next to the **θ** spin box, click **Fit θ**. It locates the Compton Kα hump in the loaded spectrum and sets θ and the Compton FWHM. Use a low-Z sample or blank where the hump is strong.
 - Below ~20.5 kV, Rh **K** lines are typically off; 15 kV profiles are often L-line dominated. 30 and 50 kV usually include K lines + Compton.
 - Library location (auto): under the app data calibrations folder (`tube_profiles.json`).
 

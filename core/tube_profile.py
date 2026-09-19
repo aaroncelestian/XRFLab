@@ -16,6 +16,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG, estimate_scatter_angle
+
 
 # Instrument modes the user can run
 DEFAULT_TUBE_KVS = (15.0, 30.0, 50.0)
@@ -33,8 +35,11 @@ class TubeProfile:
     # Relative areas/intensities keyed by line name (Kα1, Lα1, Compton Kα, ...)
     line_ratios: Dict[str, float]
     compton_scale: float = 0.5  # Compton Kα / elastic Kα (or vs reference)
-    scatter_angle_deg: float = 90.0
+    scatter_angle_deg: float = DEFAULT_SCATTER_ANGLE_DEG
     compton_fwhm_kev: float = 0.250
+    # True when scatter_angle_deg / compton_fwhm_kev were fitted from the
+    # blank's Compton hump rather than typed in
+    compton_fitted: bool = False
     # Absolute reference peak area from the blank (optional, for scaling)
     reference_line: str = 'Kα1'
     reference_area: float = 0.0
@@ -67,8 +72,11 @@ class TubeProfile:
             tube_kv=float(data['tube_kv']),
             line_ratios={str(k): float(v) for k, v in (data.get('line_ratios') or {}).items()},
             compton_scale=float(data.get('compton_scale', 0.5)),
-            scatter_angle_deg=float(data.get('scatter_angle_deg', 90.0)),
+            scatter_angle_deg=float(
+                data.get('scatter_angle_deg', DEFAULT_SCATTER_ANGLE_DEG)
+            ),
             compton_fwhm_kev=float(data.get('compton_fwhm_kev', 0.250)),
+            compton_fitted=bool(data.get('compton_fitted', False)),
             reference_line=str(data.get('reference_line', 'Kα1')),
             reference_area=float(data.get('reference_area', 0.0)),
             source=str(data.get('source', 'default')),
@@ -353,24 +361,42 @@ def measure_tube_profile_from_spectrum(
     counts,
     tube_element: str = 'Rh',
     tube_kv: float = 50.0,
-    scatter_angle_deg: float = 90.0,
+    scatter_angle_deg: float = DEFAULT_SCATTER_ANGLE_DEG,
     compton_fwhm_kev: float = 0.250,
     background_method: str = 'snip',
     peak_shape: str = 'gaussian',
     spectrum_path: Optional[str] = None,
+    fit_compton_geometry: bool = True,
 ) -> TubeProfile:
     """
     Fit tube + Compton lines on a blank / scatter spectrum and build ratios.
 
     Relative intensities are peak areas normalized to the reference line
     (Kα1 if present, else Lα1).
+
+    When `fit_compton_geometry` is True the Compton Kα hump is located first
+    and the scattering angle and Compton width are taken from it, replacing
+    the supplied `scatter_angle_deg` / `compton_fwhm_kev`. The instrument
+    geometry is then measured rather than guessed.
     """
     from core.fitting import SpectrumFitter
 
+    energy = np.asarray(energy, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+
+    compton_fit = None
+    if fit_compton_geometry:
+        compton_fit = estimate_scatter_angle(
+            energy, counts, tube_element=tube_element, excitation_kv=tube_kv
+        )
+        if compton_fit is not None:
+            scatter_angle_deg = float(compton_fit['angle_deg'])
+            compton_fwhm_kev = float(compton_fit['fwhm_kev'])
+
     fitter = SpectrumFitter()
     result = fitter.fit_spectrum(
-        energy=np.asarray(energy, dtype=float),
-        counts=np.asarray(counts, dtype=float),
+        energy=energy,
+        counts=counts,
         elements=[],
         background_method=background_method,
         peak_shape=peak_shape,
@@ -415,6 +441,16 @@ def measure_tube_profile_from_spectrum(
         if k_area > 0:
             compton_scale = float(areas['Compton Kα']) / float(k_area)
 
+    notes = f'Measured from blank; {len(ratios)} tube/Compton lines'
+    if compton_fit is not None:
+        notes += (
+            f"; Compton Kα hump at {compton_fit['centroid_kev']:.3f} keV "
+            f"→ θ={scatter_angle_deg:.0f}°, FWHM={compton_fwhm_kev*1000:.0f} eV "
+            f"(SNR {compton_fit['snr']:.0f})"
+        )
+    elif fit_compton_geometry:
+        notes += '; Compton hump not found — θ / FWHM kept from settings'
+
     return TubeProfile(
         tube_element=tube_element,
         tube_kv=float(tube_kv),
@@ -422,12 +458,13 @@ def measure_tube_profile_from_spectrum(
         compton_scale=compton_scale,
         scatter_angle_deg=float(scatter_angle_deg),
         compton_fwhm_kev=float(compton_fwhm_kev),
+        compton_fitted=compton_fit is not None,
         reference_line=ref,
         reference_area=ref_area,
         source='measured',
         spectrum_path=spectrum_path,
         measured_date=datetime.now().isoformat(),
-        notes=f'Measured from blank; {len(ratios)} tube/Compton lines',
+        notes=notes,
     )
 
 

@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG
+
 FORMAT_ID = "XRFLAB_PROJECT"
 FORMAT_VERSION = 1
 FILE_FILTER = "XRFLab Project (*.xrfp);;All Files (*)"
@@ -512,7 +514,9 @@ def _batch_config_dict(config) -> dict:
         "sample_contains_tube_element": bool(
             getattr(config, "sample_contains_tube_element", False)
         ),
-        "scatter_angle_deg": float(getattr(config, "scatter_angle_deg", 90.0)),
+        "scatter_angle_deg": float(
+            getattr(config, "scatter_angle_deg", DEFAULT_SCATTER_ANGLE_DEG)
+        ),
         "compton_fwhm_kev": float(getattr(config, "compton_fwhm_kev", 0.5)),
         "matrix": (
             config.matrix_assumptions.to_dict()
@@ -552,7 +556,9 @@ def _batch_config_from_dict(data: dict):
         sample_contains_tube_element=bool(
             data.get("sample_contains_tube_element", False)
         ),
-        scatter_angle_deg=float(data.get("scatter_angle_deg", 90.0)),
+        scatter_angle_deg=float(
+            data.get("scatter_angle_deg", DEFAULT_SCATTER_ANGLE_DEG)
+        ),
         compton_fwhm_kev=float(data.get("compton_fwhm_kev", 0.5)),
         matrix_assumptions=(
             MatrixAssumptions.from_dict(matrix) if matrix else None

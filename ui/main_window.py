@@ -28,6 +28,7 @@ from utils.updater import check_for_updates
 from utils.desktop_shortcut import install_desktop_shortcut
 from utils.paths import icon_path, resource_path
 from core.fitting import SpectrumFitter
+from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG
 from core.fp_quantification import quantify_from_peaks
 from core.matrix_model import empirical_formula
 from core.session import AnalysisSession
@@ -502,6 +503,9 @@ class MainWindow(QMainWindow):
         self.element_panel.identify_on_plot_toggled.connect(self.on_identify_on_plot_toggled)
         self.element_panel.identify_add_element.connect(self.on_identify_add_element)
         self.element_panel.tube_guides_changed.connect(self.refresh_tube_guides)
+        self.element_panel.scatter_angle_fit_requested.connect(
+            self.fit_scatter_angle_from_spectrum
+        )
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
         self.results_panel.fp_quantify_requested.connect(self.quantify_fp)
@@ -1254,7 +1258,9 @@ class MainWindow(QMainWindow):
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
                 include_compton=fit_params.get('include_compton', True),
-                scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
+                scatter_angle_deg=fit_params.get(
+                    'scatter_angle_deg', DEFAULT_SCATTER_ANGLE_DEG
+                ),
                 compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.500),
                 sample_contains_tube_element=fit_params.get(
                     'sample_contains_tube_element', False
@@ -1465,7 +1471,9 @@ class MainWindow(QMainWindow):
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
                 include_compton=fit_params.get('include_compton', True),
-                scatter_angle_deg=fit_params.get('scatter_angle_deg', 90.0),
+                scatter_angle_deg=fit_params.get(
+                    'scatter_angle_deg', DEFAULT_SCATTER_ANGLE_DEG
+                ),
                 compton_fwhm_kev=fit_params.get('compton_fwhm_kev', 0.500),
                 sample_contains_tube_element=fit_params.get(
                     'sample_contains_tube_element', False
@@ -1875,6 +1883,50 @@ class MainWindow(QMainWindow):
         self._displayed_element_lines = symbol
         self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
 
+    def fit_scatter_angle_from_spectrum(self):
+        """Fit the tube→sample→detector angle from the Compton Kα hump."""
+        from core.xray_data import estimate_scatter_angle
+
+        spectrum = self.current_spectrum
+        if spectrum is None:
+            QMessageBox.warning(
+                self, "No Spectrum",
+                "Load a spectrum first — ideally a blank or low-Z sample where "
+                "the Compton hump is strong.",
+            )
+            return
+
+        fit = self.element_panel.get_fitting_params()
+        tube = fit.get('tube_element') or 'Rh'
+        kv = float(fit.get('excitation_kv') or fit.get('excitation_energy') or 50.0)
+        result = estimate_scatter_angle(
+            spectrum.energy, spectrum.counts,
+            tube_element=tube, excitation_kv=kv,
+        )
+        if result is None:
+            QMessageBox.information(
+                self, "Compton Hump Not Found",
+                f"Could not locate a credible {tube} Compton Kα hump.\n\n"
+                f"Check that the tube kV ({kv:g} keV) is above the {tube} K edge, "
+                f"that the spectrum reaches ~19 keV, and that the sample is a "
+                f"blank / low-Z scatterer. Heavy-matrix samples and fluorescence "
+                f"lines near 18–20 keV (Mo Kβ, Zn pile-up) can hide the hump.",
+            )
+            return
+
+        angle = result['angle_deg']
+        fwhm_kev = result['fwhm_kev']
+        self.element_panel.set_compton_geometry(
+            scatter_angle_deg=angle, compton_fwhm_kev=fwhm_kev
+        )
+        self.status_bar.showMessage(
+            f"Scatter angle fitted from {tube} Compton Kα at "
+            f"{result['centroid_kev']:.3f} keV: θ = {angle:.0f}°, "
+            f"Compton FWHM = {fwhm_kev*1000:.0f} eV (SNR {result['snr']:.0f})",
+            10000,
+        )
+        self.refresh_tube_guides()
+
     def refresh_tube_guides(self):
         """Update faint tube-line bands on the Analysis spectrum plot."""
         try:
@@ -1913,7 +1965,9 @@ class MainWindow(QMainWindow):
             tube_element=fit.get("tube_element", "Rh"),
             excitation_kv=float(fit.get("excitation_kv", 20.0)),
             include_compton=include_compton,
-            scatter_angle_deg=float(fit.get("scatter_angle_deg", 90.0)),
+            scatter_angle_deg=float(
+                fit.get("scatter_angle_deg", DEFAULT_SCATTER_ANGLE_DEG)
+            ),
             compton_fwhm_kev=float(fit.get("compton_fwhm_kev", 0.500)),
             energy_min=e_min,
             energy_max=e_max,

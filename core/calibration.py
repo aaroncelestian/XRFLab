@@ -657,7 +657,8 @@ class InstrumentCalibrator:
         # For Rh Kα (20.2 keV) at 90°: E_compton ≈ 18.8 keV
         if rh_scatter_scale > 0 and experimental_params:
             rh_ka_energy = 20.216  # keV
-            scatter_angle = 90.0  # degrees (typical geometry)
+            from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG
+            scatter_angle = DEFAULT_SCATTER_ANGLE_DEG  # near-backscatter benchtop geometry
             cos_theta = np.cos(np.radians(scatter_angle))
             
             # Compton formula

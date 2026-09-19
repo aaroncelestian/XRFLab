@@ -12,7 +12,13 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from ui.periodic_table_widget import PeriodicTableWidget
 from ui.tube_profile_panel import SHOW_TUBE_PROFILE_CALIBRATION
-from core.xray_data import get_element_lines, get_element_info
+from core.xray_data import (
+    get_element_lines,
+    get_element_info,
+    DEFAULT_SCATTER_ANGLE_DEG,
+    SCATTER_ANGLE_MIN_DEG,
+    SCATTER_ANGLE_MAX_DEG,
+)
 from core.spectrum import metadata_text, _as_float
 from core.peak_fitting import (
     PEAK_SHAPE_UI_CHOICES,
@@ -35,6 +41,7 @@ class ElementPanel(QWidget):
     identify_on_plot_toggled = Signal(bool)  # Click-spectrum identify mode
     identify_add_element = Signal(str)  # Add candidate element from identify list
     tube_guides_changed = Signal()  # Tube overlay settings (anode / kV / Compton)
+    scatter_angle_fit_requested = Signal()  # Fit θ from the loaded spectrum's Compton hump
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -458,12 +465,29 @@ class ElementPanel(QWidget):
         compton_row.addWidget(self.compton_check)
         compton_row.addWidget(QLabel("θ:"))
         self.scatter_angle_spin = QDoubleSpinBox()
-        self.scatter_angle_spin.setRange(30.0, 150.0)
+        self.scatter_angle_spin.setRange(SCATTER_ANGLE_MIN_DEG, SCATTER_ANGLE_MAX_DEG)
         self.scatter_angle_spin.setDecimals(0)
         self.scatter_angle_spin.setSingleStep(5.0)
-        self.scatter_angle_spin.setValue(90.0)
+        self.scatter_angle_spin.setValue(DEFAULT_SCATTER_ANGLE_DEG)
         self.scatter_angle_spin.setSuffix("°")
+        self.scatter_angle_spin.setToolTip(
+            "Tube→sample→detector scattering angle. Sets where the Compton\n"
+            "humps sit: Rh Kα → 19.4 keV at 90°, 18.8 keV at 150°.\n"
+            "Benchtop / micro-XRF is usually near-backscatter (150–170°).\n"
+            "Measure a blank on the Tube Profile tab to fit it — a measured\n"
+            "profile overrides this value."
+        )
         compton_row.addWidget(self.scatter_angle_spin)
+        self.fit_scatter_angle_button = QPushButton("Fit θ")
+        self.fit_scatter_angle_button.setToolTip(
+            "Locate the anode Compton Kα hump in the loaded spectrum and set θ\n"
+            "(and the Compton FWHM) from its position and width.\n"
+            "Works best on a blank / low-Z sample where the hump is strong."
+        )
+        self.fit_scatter_angle_button.clicked.connect(
+            self.scatter_angle_fit_requested.emit
+        )
+        compton_row.addWidget(self.fit_scatter_angle_button)
         compton_row.addWidget(QLabel("FWHM:"))
         self.compton_fwhm_spin = QDoubleSpinBox()
         self.compton_fwhm_spin.setRange(100.0, 1500.0)
@@ -645,8 +669,8 @@ class ElementPanel(QWidget):
             self.compton_check.setChecked(True)
             layout.addWidget(self.compton_check)
             self.scatter_angle_spin = QDoubleSpinBox()
-            self.scatter_angle_spin.setRange(30.0, 150.0)
-            self.scatter_angle_spin.setValue(90.0)
+            self.scatter_angle_spin.setRange(SCATTER_ANGLE_MIN_DEG, SCATTER_ANGLE_MAX_DEG)
+            self.scatter_angle_spin.setValue(DEFAULT_SCATTER_ANGLE_DEG)
             self.compton_fwhm_spin = QDoubleSpinBox()
             self.compton_fwhm_spin.setRange(100.0, 1500.0)
             self.compton_fwhm_spin.setValue(500.0)
@@ -780,10 +804,20 @@ class ElementPanel(QWidget):
             label = f"{energy:.3f} keV  (unknown)"
         return label
 
+    def set_compton_geometry(self, scatter_angle_deg=None, compton_fwhm_kev=None):
+        """Set θ / Compton FWHM (e.g. from a fitted Compton hump)."""
+        if scatter_angle_deg is not None:
+            self.scatter_angle_spin.setValue(float(scatter_angle_deg))
+        if compton_fwhm_kev is not None:
+            self.compton_fwhm_spin.setValue(float(compton_fwhm_kev) * 1000.0)
+
     def _on_tube_lines_toggled(self, checked):
         self.compton_check.setEnabled(checked)
-        self.scatter_angle_spin.setEnabled(checked and self.compton_check.isChecked())
-        self.compton_fwhm_spin.setEnabled(checked and self.compton_check.isChecked())
+        compton_on = checked and self.compton_check.isChecked()
+        self.scatter_angle_spin.setEnabled(compton_on)
+        self.compton_fwhm_spin.setEnabled(compton_on)
+        if hasattr(self, 'fit_scatter_angle_button'):
+            self.fit_scatter_angle_button.setEnabled(compton_on)
         if hasattr(self, 'sample_contains_anode_check'):
             self.sample_contains_anode_check.setEnabled(True)
         if not hasattr(self, '_compton_angle_linked'):

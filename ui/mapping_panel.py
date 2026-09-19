@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 from core.batch_processing import sanitize_sample_name
 from core.composition import numbered_replicate_names, strip_replicate_suffix
 from core.peak_fitting import normalize_peak_shape
+from core.xray_data import DEFAULT_SCATTER_ANGLE_DEG
 
 from core.mapping.camera import (
     StageCamera,
@@ -5135,7 +5136,9 @@ class MappingPanel(QWidget):
                     excitation_kv=fit_params.get("excitation_kv", 50.0),
                     include_tube_lines=fit_params.get("include_tube_lines", True),
                     include_compton=fit_params.get("include_compton", True),
-                    scatter_angle_deg=fit_params.get("scatter_angle_deg", 90.0),
+                    scatter_angle_deg=fit_params.get(
+                        "scatter_angle_deg", DEFAULT_SCATTER_ANGLE_DEG
+                    ),
                     compton_fwhm_kev=fit_params.get("compton_fwhm_kev", 0.500),
                     sample_contains_tube_element=fit_params.get(
                         "sample_contains_tube_element", False

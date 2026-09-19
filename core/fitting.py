@@ -13,6 +13,7 @@ from core.xray_data import (
     get_tube_lines,
     get_tube_compton_lines,
     compton_seed_diagnostics,
+    DEFAULT_SCATTER_ANGLE_DEG,
 )
 from core.smart_peak_id import (
     MAJOR_LINE_NAMES,
@@ -173,7 +174,8 @@ class SpectrumFitter:
     def build_peak_positions(self, energy, counts_bg_subtracted=None, elements=None,
                              auto_find_peaks=True, tube_element='Rh',
                              excitation_kv=50.0, include_tube_lines=True,
-                             include_compton=True, scatter_angle_deg=90.0,
+                             include_compton=True,
+                             scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
                              compton_fwhm_kev=0.500,
                              sample_contains_tube_element=False, **kwargs):
         """
@@ -499,7 +501,7 @@ class SpectrumFitter:
         energy,
         tube_element='Rh',
         excitation_kv=50.0,
-        scatter_angle_deg=90.0,
+        scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
         compton_fwhm_kev=0.500,
     ):
         """Add missing Compton tube seeds to an existing peak list."""
@@ -606,7 +608,9 @@ class SpectrumFitter:
                     energy,
                     tube_element=tube_element,
                     excitation_kv=excitation_kv,
-                    scatter_angle_deg=kwargs.get('scatter_angle_deg', 90.0),
+                    scatter_angle_deg=kwargs.get(
+                        'scatter_angle_deg', DEFAULT_SCATTER_ANGLE_DEG
+                    ),
                     compton_fwhm_kev=kwargs.get('compton_fwhm_kev', 0.500),
                 )
         else:

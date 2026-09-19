@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QComboBox, QDoubleSpinBox, QFileDialog, QTextEdit, QMessageBox,
-    QFormLayout,
+    QFormLayout, QCheckBox,
 )
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtCore import QStandardPaths
@@ -16,6 +16,9 @@ from PySide6.QtCore import QStandardPaths
 from core.tube_profile import (
     TubeProfileLibrary, DEFAULT_TUBE_KVS, measure_tube_profile_from_spectrum,
     default_tube_profile,
+)
+from core.xray_data import (
+    DEFAULT_SCATTER_ANGLE_DEG, SCATTER_ANGLE_MIN_DEG, SCATTER_ANGLE_MAX_DEG,
 )
 from utils.io_handler import IOHandler
 
@@ -78,15 +81,30 @@ class TubeProfilePanel(QWidget):
         )
         form.addRow("Tube voltage:", self.kv_combo)
 
+        self.fit_geometry_check = QCheckBox(
+            "Fit scatter angle and Compton width from the blank's Compton hump"
+        )
+        self.fit_geometry_check.setChecked(True)
+        self.fit_geometry_check.setToolTip(
+            "Locate the anode Compton Kα hump and derive θ from its position\n"
+            "and the Compton FWHM from its width. When off, the values below\n"
+            "are used as-is."
+        )
+        form.addRow(self.fit_geometry_check)
+
         self.angle_spin = QDoubleSpinBox()
-        self.angle_spin.setRange(30, 150)
-        self.angle_spin.setValue(90)
+        self.angle_spin.setRange(SCATTER_ANGLE_MIN_DEG, SCATTER_ANGLE_MAX_DEG)
+        self.angle_spin.setValue(DEFAULT_SCATTER_ANGLE_DEG)
         self.angle_spin.setSuffix("°")
+        self.angle_spin.setToolTip(
+            "Tube→sample→detector scattering angle. Benchtop / micro-XRF\n"
+            "is usually near-backscatter (150–170°)."
+        )
         form.addRow("Scatter angle:", self.angle_spin)
 
         self.compton_fwhm_spin = QDoubleSpinBox()
-        self.compton_fwhm_spin.setRange(100, 800)
-        self.compton_fwhm_spin.setValue(250)
+        self.compton_fwhm_spin.setRange(100, 1500)
+        self.compton_fwhm_spin.setValue(500)
         self.compton_fwhm_spin.setSuffix(" eV")
         form.addRow("Compton FWHM:", self.compton_fwhm_spin)
 
@@ -192,7 +210,12 @@ class TubeProfilePanel(QWidget):
                 scatter_angle_deg=self.angle_spin.value(),
                 compton_fwhm_kev=self.compton_fwhm_spin.value() / 1000.0,
                 spectrum_path=self._blank_path,
+                fit_compton_geometry=self.fit_geometry_check.isChecked(),
             )
+            if profile.compton_fitted:
+                # Reflect the instrument-derived geometry in the controls
+                self.angle_spin.setValue(profile.scatter_angle_deg)
+                self.compton_fwhm_spin.setValue(profile.compton_fwhm_kev * 1000.0)
             self.library.tube_element = tube
             self.library.set_profile(profile)
             self._auto_save()
@@ -205,12 +228,24 @@ class TubeProfilePanel(QWidget):
                     profile.line_ratios.items(), key=lambda kv: -kv[1]
                 )
             )
+            if profile.compton_fitted:
+                geom = (
+                    f"Compton geometry fitted: θ = {profile.scatter_angle_deg:.0f}°, "
+                    f"FWHM = {profile.compton_fwhm_kev*1000:.0f} eV\n"
+                )
+            elif self.fit_geometry_check.isChecked():
+                geom = (
+                    "Compton hump not found — θ / FWHM kept from the settings above\n"
+                )
+            else:
+                geom = ""
             QMessageBox.information(
                 self,
                 "Profile Measured",
                 f"{tube} @ {kv:g} kV ({profile.source})\n"
                 f"Reference: {profile.reference_line}\n"
-                f"Compton scale: {profile.compton_scale:.3f}\n\n"
+                f"Compton scale: {profile.compton_scale:.3f}\n"
+                f"{geom}\n"
                 f"Relative intensities:\n{lines}",
             )
         except Exception as e:
@@ -228,9 +263,12 @@ class TubeProfilePanel(QWidget):
                 lines.append(f"{kv:g} kV:  — not measured (defaults will be used)")
                 continue
             n = len(p.line_ratios)
+            geom = f"θ={p.scatter_angle_deg:.0f}°"
+            if p.compton_fitted:
+                geom += " (fitted)"
             lines.append(
                 f"{kv:g} kV:  {p.source}  ref={p.reference_line}  "
-                f"{n} lines  Compton={p.compton_scale:.2f}"
+                f"{n} lines  Compton={p.compton_scale:.2f}  {geom}"
             )
             top = sorted(p.line_ratios.items(), key=lambda x: -x[1])[:6]
             for name, val in top:

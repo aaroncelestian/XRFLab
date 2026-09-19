@@ -246,7 +246,18 @@ def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
     return filtered_lines
 
 
-def compton_energy(incident_energy_kev, scatter_angle_deg=90.0):
+# Effective tube→sample→detector scattering angle. Benchtop / micro-XRF
+# instruments with the detector beside the guide tube are near-backscatter
+# (150–170°); 90° puts the Rh Compton Kα hump ~700 eV too high. Measure a
+# blank on the Tube Profile tab to fit the instrument value.
+DEFAULT_SCATTER_ANGLE_DEG = 155.0
+SCATTER_ANGLE_MIN_DEG = 30.0
+SCATTER_ANGLE_MAX_DEG = 180.0
+
+ELECTRON_REST_KEV = 511.0
+
+
+def compton_energy(incident_energy_kev, scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG):
     """
     Compton-scattered photon energy (keV).
 
@@ -254,13 +265,157 @@ def compton_energy(incident_energy_kev, scatter_angle_deg=90.0):
     """
     e0 = float(incident_energy_kev)
     cos_theta = math.cos(math.radians(float(scatter_angle_deg)))
-    return e0 / (1.0 + (e0 / 511.0) * (1.0 - cos_theta))
+    return e0 / (1.0 + (e0 / ELECTRON_REST_KEV) * (1.0 - cos_theta))
+
+
+def scatter_angle_from_compton_energy(incident_energy_kev, compton_energy_kev):
+    """
+    Invert the Compton formula: θ (deg) that shifts E₀ to E'.
+
+    Returns None when E' is outside the physically reachable range
+    [E'(180°), E₀].
+    """
+    e0 = float(incident_energy_kev)
+    ec = float(compton_energy_kev)
+    if ec <= 0 or ec > e0:
+        return None
+    one_minus_cos = ELECTRON_REST_KEV * (e0 / ec - 1.0) / e0
+    cos_theta = 1.0 - one_minus_cos
+    if cos_theta < -1.0 or cos_theta > 1.0:
+        return None
+    return math.degrees(math.acos(cos_theta))
+
+
+def tube_compton_incident_energy(tube_element='Rh', excitation_kv=50.0):
+    """
+    Intensity-weighted Kα incident energy for the anode Compton hump.
+
+    Kα1 and Kα2 Compton components are unresolved (~120 eV apart for Rh),
+    so the observed centroid corresponds to their weighted mean.
+    """
+    tube_lines = get_tube_lines(tube_element, excitation_kv)
+    num = 0.0
+    den = 0.0
+    for line in tube_lines.get('K', []):
+        if line['name'] not in ('Kα1', 'Kα2'):
+            continue
+        if float(line['energy']) >= float(excitation_kv):
+            continue
+        w = float(line.get('intensity', 1.0)) or 1.0
+        num += w * float(line['energy'])
+        den += w
+    if den <= 0:
+        return None
+    return num / den
+
+
+def estimate_scatter_angle(
+    energy,
+    counts,
+    tube_element='Rh',
+    excitation_kv=50.0,
+    angle_min_deg=90.0,
+    angle_max_deg=SCATTER_ANGLE_MAX_DEG,
+    min_snr=5.0,
+):
+    """
+    Fit the anode Compton Kα hump and return the implied scattering angle.
+
+    A Gaussian + linear baseline is fitted over the energy range that the
+    Compton Kα centroid can occupy for θ ∈ [angle_min, angle_max]. The
+    centroid is inverted through the Compton formula using the Kα1/Kα2
+    intensity-weighted incident energy.
+
+    Returns:
+        dict with 'angle_deg', 'centroid_kev', 'fwhm_kev', 'amplitude',
+        'snr', 'incident_kev', 'window_kev' — or None when no credible hump
+        is found (low SNR, centroid at the window edge, unphysical width).
+    """
+    import numpy as np
+    from scipy import optimize
+
+    e_in = tube_compton_incident_energy(tube_element, excitation_kv)
+    if e_in is None:
+        return None
+
+    energy = np.asarray(energy, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+
+    e_lo_c = compton_energy(e_in, angle_max_deg)  # most shifted (lowest E)
+    e_hi_c = compton_energy(e_in, angle_min_deg)
+    # Keep the elastic Kα peak (≥ E_in − ~3σ) out of the window
+    e_elastic_edge = e_in - 0.45
+    lo = e_lo_c - 0.9
+    hi = min(e_hi_c + 0.45, e_elastic_edge)
+    mask = (energy >= lo) & (energy <= hi)
+    if int(mask.sum()) < 15:
+        return None
+    x = energy[mask]
+    y = counts[mask]
+
+    def model(xx, amp, cen, sig, b0, b1):
+        return amp * np.exp(-0.5 * ((xx - cen) / sig) ** 2) + b0 + b1 * (xx - cen)
+
+    # The Compton hump is Doppler + angular-spread broadened: always much
+    # wider than the detector response (~270 eV at 19 keV). A narrow fit is a
+    # fluorescence / pile-up line (e.g. Mo Kβ, Zn Kα+Kβ sum), not Compton.
+    fwhm_min, fwhm_max = 0.35, 1.6
+    sig_min, sig_max = fwhm_min / 2.3548, fwhm_max / 2.3548
+
+    base0 = float(np.percentile(y, 10))
+    i_max = int(np.argmax(y))
+    amp0 = max(float(y[i_max]) - base0, 1.0)
+    cen0 = float(np.clip(x[i_max], e_lo_c, e_hi_c))
+    sig0 = 0.25
+    try:
+        popt, _ = optimize.curve_fit(
+            model, x, y,
+            p0=[amp0, cen0, sig0, base0, 0.0],
+            bounds=(
+                [0.0, lo, sig_min, 0.0, -np.inf],
+                [np.inf, hi, sig_max, np.inf, np.inf],
+            ),
+            maxfev=20000,
+        )
+    except Exception:
+        return None
+
+    amp, cen, sig, b0, _b1 = [float(v) for v in popt]
+    sig = abs(sig)
+    fwhm = 2.3548 * sig
+    snr = amp / math.sqrt(max(b0, 1.0))
+    if snr < float(min_snr):
+        return None
+    # Reject fits pinned at the window or width bounds
+    if cen <= lo + 0.05 or cen >= hi - 0.05:
+        return None
+    if fwhm <= fwhm_min + 0.01 or fwhm >= fwhm_max - 0.01:
+        return None
+
+    angle = scatter_angle_from_compton_energy(e_in, cen)
+    if angle is None:
+        # Centroid slightly below the 180° limit (noise / calibration): clamp
+        if cen < e_lo_c:
+            angle = SCATTER_ANGLE_MAX_DEG
+        else:
+            return None
+    angle = float(np.clip(angle, SCATTER_ANGLE_MIN_DEG, SCATTER_ANGLE_MAX_DEG))
+
+    return {
+        'angle_deg': angle,
+        'centroid_kev': cen,
+        'fwhm_kev': fwhm,
+        'amplitude': amp,
+        'snr': float(snr),
+        'incident_kev': float(e_in),
+        'window_kev': (float(lo), float(hi)),
+    }
 
 
 def get_tube_compton_lines(
     tube_element='Rh',
     excitation_kv=50.0,
-    scatter_angle_deg=90.0,
+    scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
     fwhm_kev=0.250,
 ):
     """
@@ -320,7 +475,7 @@ TUBE_K_EDGE_KEV = {
 def compton_seed_diagnostics(
     tube_element='Rh',
     excitation_kv=50.0,
-    scatter_angle_deg=90.0,
+    scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
     fwhm_kev=0.500,
     energy_min=None,
     energy_max=None,
@@ -373,7 +528,7 @@ def build_tube_guide_regions(
     excitation_kv: float = 50.0,
     *,
     include_compton: bool = True,
-    scatter_angle_deg: float = 90.0,
+    scatter_angle_deg: float = DEFAULT_SCATTER_ANGLE_DEG,
     compton_fwhm_kev: float = 0.500,
     energy_min=None,
     energy_max=None,
