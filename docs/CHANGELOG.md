@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Peak profiles (2026-09-06)
+## Version 2.0.0 - Peak profiles (2026-09-19)
 
 - Fitting default is **Tail-Gaussian**; Gaussian remains the simple option
 - **Hypermet** is the full Phillips–Marlow form (Gaussian + continuous exponential ICC tail + low-energy step/shelf)

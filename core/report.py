@@ -115,7 +115,7 @@ class ReportContext:
     generated: Optional[datetime] = None
 
 
-def app_version(default: str = "1.3.1") -> str:
+def app_version(default: str = "2.0.0") -> str:
     """Read the project version from pyproject.toml when available."""
     path = Path(__file__).resolve().parents[1] / "pyproject.toml"
     try:
