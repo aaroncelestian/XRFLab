@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import math
 
 import numpy as np
 import pytest
@@ -16,12 +17,15 @@ from core.standards_calibration import (
     LINE_SERIES,
     MODEL_LINEAR,
     MODEL_THROUGH_ORIGIN,
+    ElementCurve,
     SpotIntensity,
+    StandardPoint,
     StandardRecord,
     StandardsCalibration,
     choose_line_group,
     extract_spot_intensities,
     line_matches_group,
+    suggest_outlier_exclusions,
 )
 
 
@@ -211,3 +215,130 @@ def test_negative_r_squared_is_not_a_fitted_curve():
     assert curve.r_squared < 0
     assert curve.fitted is False
     assert "No correlation" in curve.message
+
+
+def test_suggest_outlier_exclusions_rescues_cu_like_scatter():
+    """Two low-cps ores wreck an otherwise linear Cu set (real CRM numbers)."""
+    cal = _cal_with_points("Cu", [
+        ("OREAS_466", 0.00342, 12.615),
+        ("OREAS_460b", 0.0041, 13.136),
+        ("LKSD_1", 0.0044, 10.482),
+        ("STSD_2", 0.0047, 12.380),
+        ("TILL_1", 0.0047, 14.785),
+        ("OREAS_462", 0.0061, 0.941),
+        ("NIST_SRM_2586", 0.0081, 18.009),
+        ("OREAS_464", 0.0092, 2.024),
+        ("NIST_SRM_2587", 0.0160, 29.537),
+        ("PACS_2", 0.0310, 37.302),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    assert cal.curves["Cu"].r_squared < 0.80
+    applied = cal.exclude_outliers(["Cu"])
+    assert set(applied["Cu"]) == {"OREAS_462", "OREAS_464"}
+    curve = cal.curves["Cu"]
+    assert curve.fitted
+    assert curve.r_squared > 0.90
+    assert curve.slope > 0
+    used = {p.standard for p in curve.points if p.included}
+    assert "OREAS_462" not in used and "OREAS_464" not in used
+    assert "Excluded outlier" in curve.message
+
+
+def test_suggest_outlier_exclusions_leaves_good_curves_alone():
+    cal = _cal_with_points("Ba", [
+        ("s1", 0.10, 20.0), ("s2", 0.20, 40.0),
+        ("s3", 0.40, 80.0), ("s4", 0.80, 160.0),
+        ("s5", 1.20, 240.0),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=False)
+    assert cal.curves["Ba"].r_squared > 0.99
+    assert suggest_outlier_exclusions(cal.curves["Ba"].points) == []
+    assert cal.exclude_outliers(["Ba"]) == {}
+
+
+def test_suggest_outlier_exclusions_does_not_invent_a_fit():
+    """V-like: intensity does not track concentration, no useful subset."""
+    cal = _cal_with_points("V", [
+        ("NIST_SRM_2587", 0.0078, 0.846),
+        ("OREAS_466", 0.0128, 1.208),
+        ("NIST_SRM_2586", 0.0160, 2.538),
+        ("OREAS_464", 0.0207, 0.413),
+        ("OREAS_460b", 0.0222, 0.565),
+        ("OREAS_462", 0.0353, 0.813),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    assert cal.curves["V"].fitted is False
+    assert cal.exclude_outliers(["V"]) == {}
+    assert all(p.included for p in cal.curves["V"].points)
+
+
+def test_exclude_outliers_drops_single_zr_wrecking_point():
+    cal = _cal_with_points("Zr", [
+        ("OREAS_466", 0.0163, 70.876),
+        ("OREAS_464", 0.0210, 5.185),
+        ("OREAS_462", 0.0270, 13.233),
+        ("OREAS_460b", 0.0415, 64.297),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    assert cal.curves["Zr"].r_squared < 0.1
+    applied = cal.exclude_outliers(["Zr"])
+    assert applied["Zr"] == ["OREAS_466"]
+    assert cal.curves["Zr"].fitted
+    assert cal.curves["Zr"].r_squared > 0.90
+
+
+def test_clear_point_exclusions_restores_curve():
+    cal = _cal_with_points("Zr", [
+        ("OREAS_466", 0.0163, 70.876),
+        ("OREAS_464", 0.0210, 5.185),
+        ("OREAS_462", 0.0270, 13.233),
+        ("OREAS_460b", 0.0415, 64.297),
+    ])
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    cal.exclude_outliers(["Zr"])
+    cal.clear_point_exclusions("Zr")
+    cal.build_curves(model=MODEL_LINEAR, weighted=True)
+    assert all(p.included for p in cal.curves["Zr"].points)
+    assert cal.curves["Zr"].r_squared < 0.1
+
+
+def _mdc_curve(c0, c1, residual_variance=0.04, fitted=True):
+    points = [
+        StandardPoint("a", 1.0, 10.0, 0.2, 0.1, 3, 2.0, True),
+        StandardPoint("b", 2.0, 20.0, 0.3, 0.15, 3, 1.5, True),
+        StandardPoint("c", 4.0, 40.0, 0.4, 0.2, 3, 1.0, True),
+    ]
+    return ElementCurve(
+        element="Cu",
+        line_group="K",
+        model=MODEL_LINEAR,
+        coefficients=[c0, c1, 0.0],
+        coefficient_errors=[0.0, 0.0, 0.0],
+        r_squared=0.99,
+        rmse=math.sqrt(residual_variance),
+        n_standards=3,
+        n_spectra=9,
+        mean_rsd_percent=1.5,
+        residual_variance=residual_variance,
+        covariance=[],
+        points=points,
+        enabled=True,
+        fitted=fitted,
+    )
+
+
+def test_mdc_is_always_non_negative_even_with_negative_intercept():
+    # s = 0.2 wt%, slope = 0.1 → 3σ MDC = 0.6, independent of intercept
+    pos = _mdc_curve(0.5, 0.1)
+    neg = _mdc_curve(-2.0, 0.1)
+    assert pos.minimum_detectable_concentration() == pytest.approx(0.6)
+    assert neg.minimum_detectable_concentration() == pytest.approx(0.6)
+    assert pos.minimum_detectable_concentration() > 0
+    assert neg.minimum_detectable_concentration() > 0
+
+
+def test_mdc_undefined_when_slope_is_not_positive():
+    failed = _mdc_curve(0.01, -0.002, fitted=False)
+    assert failed.minimum_detectable_concentration() is None
+    zero_slope = _mdc_curve(0.01, 0.0)
+    assert zero_slope.minimum_detectable_concentration() is None

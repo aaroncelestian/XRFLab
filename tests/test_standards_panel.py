@@ -200,3 +200,12 @@ def test_auto_load_keeps_set_even_when_old_calibration_exists(tmp_path, monkeypa
     finally:
         panel.close()
         panel.deleteLater()
+
+
+def test_concentration_axis_scale_uses_ppm_for_traces():
+    from ui.standards_panel import concentration_axis_scale
+
+    assert concentration_axis_scale([0.00342, 0.031]) == (1e4, "ppm")
+    assert concentration_axis_scale([0.1128]) == (1e4, "ppm")
+    assert concentration_axis_scale([1.2, 4.97, 12.0]) == (1.0, "wt%")
+    assert concentration_axis_scale([]) == (1.0, "wt%")

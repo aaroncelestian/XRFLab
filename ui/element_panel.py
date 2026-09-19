@@ -42,6 +42,8 @@ class ElementPanel(QWidget):
     identify_add_element = Signal(str)  # Add candidate element from identify list
     tube_guides_changed = Signal()  # Tube overlay settings (anode / kV / Compton)
     scatter_angle_fit_requested = Signal()  # Fit θ from the loaded spectrum's Compton hump
+    ree_select_requested = Signal()  # Select REEs + spectroscopic overlaps
+    ree_fit_requested = Signal()  # Select REEs + overlaps, then fit / quantify
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -197,6 +199,7 @@ class ElementPanel(QWidget):
         self.periodic_table.elements_changed.connect(self._on_periodic_table_changed)
         self.periodic_table.element_clicked.connect(self.element_clicked.emit)
         self.periodic_table.element_info_requested.connect(self._show_element_info)
+        self.periodic_table.ree_select_requested.connect(self.ree_select_requested.emit)
         self.periodic_table.setToolTip(
             "Click an element to preview its emission lines on the spectrum.\n"
             "Double-click to add or remove it from the fitting list."
@@ -705,13 +708,24 @@ class ElementPanel(QWidget):
         smart_layout.addRow(self.smart_id_apply_check)
         layout.addWidget(smart_group)
 
+        fit_row = QHBoxLayout()
         self.fit_button = QPushButton("Fit Spectrum")
         self.fit_button.setObjectName("primaryButton")
         self.fit_button.setToolTip(
             "Fit peaks using the Elements selection and the Peak Find list."
         )
         self.fit_button.clicked.connect(self.fit_requested.emit)
-        layout.addWidget(self.fit_button)
+        fit_row.addWidget(self.fit_button)
+
+        self.fit_rees_button = QPushButton("Fit REEs + overlaps")
+        self.fit_rees_button.setToolTip(
+            "Select Y, La–Lu and spectroscopic overlap partners\n"
+            "(Ba, Ti, Fe, …), then fit only that list and read wt%\n"
+            "from the standards curves when they are applied."
+        )
+        self.fit_rees_button.clicked.connect(self.ree_fit_requested.emit)
+        fit_row.addWidget(self.fit_rees_button)
+        layout.addLayout(fit_row)
 
         return group
 

@@ -415,7 +415,11 @@ class ResultsPanel(QWidget):
         table.setRowCount(len(results))
         assumed_brush = QBrush(QColor("#f3f3f3"))
         for i, result in enumerate(results):
-            element_item = QTableWidgetItem(result['element'])
+            role = result.get("role")
+            element_label = result['element']
+            if role == "overlap":
+                element_label = f"{element_label} (overlap)"
+            element_item = QTableWidgetItem(element_label)
             element_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(i, 0, element_item)
 
@@ -426,7 +430,6 @@ class ResultsPanel(QWidget):
             )
             table.setItem(i, 1, conc_item)
 
-            role = result.get("role")
             error = result.get('error', None)
             if is_fp:
                 source = "assumed" if role == "assumed" else "measured"

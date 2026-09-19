@@ -11,8 +11,9 @@ Empirical element calibration from certified reference standards:
                     "Fit Standard Spectra" runs in a worker thread.
 * Curves tab      – per-element calibration curves (C = f(I)) with R², RMSE
                     and replicate RSD (instrument precision). Individual
-                    standards can be excluded per element and the curves are
-                    rebuilt instantly without re-fitting spectra.
+                    standards can be excluded per element (manually or via
+                    "Exclude outliers") and the curves are rebuilt instantly
+                    without re-fitting spectra.
 
 The resulting StandardsCalibration converts fitted peaks of unknowns to wt%.
 """
@@ -496,9 +497,16 @@ class StandardsPanel(QWidget):
         el = QVBoxLayout(el_group)
         el.setContentsMargins(5, 8, 5, 5)
         self.curves_table = QTableWidget()
-        cols = ["Use", "El", "Line", "Std", "Spec", "Slope wt%/cps", "R²", "RMSE wt%", "RSD %", "Note"]
+        cols = ["Use", "El", "Line", "Std", "Spec", "Slope wt%/cps", "R²", "RMSE wt%", "RSD %", "MDC wt%", "Note"]
         self.curves_table.setColumnCount(len(cols))
         self.curves_table.setHorizontalHeaderLabels(cols)
+        mdc_hdr = self.curves_table.horizontalHeaderItem(9)
+        if mdc_hdr is not None:
+            mdc_hdr.setToolTip(
+                "Predicted minimum detectable concentration (Currie 3σ). "
+                "Always ≥ 0: 3·σ intensity mapped through the positive slope, "
+                "so a negative intercept cannot produce a negative MDC."
+            )
         ch = self.curves_table.horizontalHeader()
         for i in range(len(cols) - 1):
             ch.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
@@ -514,6 +522,27 @@ class StandardsPanel(QWidget):
         pt_group = QGroupBox("Standards in selected curve (untick Use to exclude an outlier)")
         pl = QVBoxLayout(pt_group)
         pl.setContentsMargins(5, 8, 5, 5)
+        pt_btns = QHBoxLayout()
+        self.exclude_outliers_btn = QPushButton("Exclude outliers")
+        self.exclude_outliers_btn.setToolTip(
+            "Drop standards that wreck this element's curve, but only if the "
+            "remaining points then give a usable positive-slope fit"
+        )
+        self.exclude_outliers_btn.clicked.connect(self._exclude_outliers_selected)
+        pt_btns.addWidget(self.exclude_outliers_btn)
+        self.exclude_outliers_all_btn = QPushButton("Exclude on all weak curves")
+        self.exclude_outliers_all_btn.setToolTip(
+            "Same search on every element whose R² is below 0.80 or whose "
+            "fit failed. Good curves are left alone."
+        )
+        self.exclude_outliers_all_btn.clicked.connect(self._exclude_outliers_all)
+        pt_btns.addWidget(self.exclude_outliers_all_btn)
+        self.restore_points_btn = QPushButton("Restore points")
+        self.restore_points_btn.setToolTip("Re-include every excluded standard on this element")
+        self.restore_points_btn.clicked.connect(self._restore_points_selected)
+        pt_btns.addWidget(self.restore_points_btn)
+        pt_btns.addStretch()
+        pl.addLayout(pt_btns)
         self.points_table = QTableWidget()
         pcols = ["Use", "Standard", "Cert. wt%", "Mean cps", "SD cps", "RSD %", "n", "Pred. wt%", "Resid. wt%"]
         self.points_table.setColumnCount(len(pcols))
@@ -583,6 +612,12 @@ class StandardsPanel(QWidget):
         self.residual_plot.setLabel("left", "Predicted − certified (wt%)", color="k")
         self.residual_plot.setLabel("bottom", "Certified concentration (wt%)", color="k")
         self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
+        for plot, axis in (
+            (self.curve_plot, "bottom"),
+            (self.residual_plot, "bottom"),
+            (self.residual_plot, "left"),
+        ):
+            plot.getAxis(axis).enableAutoSIPrefix(False)
         self.residual_plot.addLine(y=0, pen=pg.mkPen("r", width=1, style=Qt.DashLine))
         self.residual_plot.setXLink(self.curve_plot)
         self.curve_plot_widget.ci.layout.setRowStretchFactor(0, 3)
@@ -1129,7 +1164,9 @@ class StandardsPanel(QWidget):
         self.legacy_result = None
         self._adopt_calibration(calibration, load_spectra=False)
         self._log("✓ Spectra fitted; building curves…")
+        self.calibration.clear_point_exclusions()
         self._rebuild_curves()
+        self._apply_outlier_exclusions(elements=None, log_prefix="Auto-excluded")
         self._auto_save_calibration()
         self.left_tabs.setCurrentIndex(2)
 
@@ -1223,6 +1260,13 @@ class StandardsPanel(QWidget):
             )
         else:
             self.curves_summary.setText("No calibration curves yet — fit standard spectra first.")
+        has_curves = bool(self.calibration.curves)
+        curve = self._current_curve()
+        self.exclude_outliers_btn.setEnabled(curve is not None)
+        self.exclude_outliers_all_btn.setEnabled(has_curves)
+        self.restore_points_btn.setEnabled(
+            curve is not None and bool(self.calibration.excluded_points.get(curve.element))
+        )
 
     def _refresh_curves_table(self):
         self._updating = True
@@ -1242,12 +1286,17 @@ class StandardsPanel(QWidget):
                     self.curves_table.setItem(row, 5, _num_item(c.slope, ".4g"))
                     self.curves_table.setItem(row, 6, _num_item(c.r_squared, ".4f"))
                     self.curves_table.setItem(row, 7, _num_item(c.rmse, ".3g"))
+                    mdc = c.minimum_detectable_concentration()
+                    self.curves_table.setItem(
+                        row, 9,
+                        _num_item(mdc, ".3g") if mdc is not None else QTableWidgetItem("—"),
+                    )
                 else:
-                    for col in (5, 6, 7):
+                    for col in (5, 6, 7, 9):
                         self.curves_table.setItem(row, col, QTableWidgetItem("—"))
                 self.curves_table.setItem(row, 8, _num_item(c.mean_rsd_percent, ".1f"))
                 note = QTableWidgetItem(c.message)
-                self.curves_table.setItem(row, 9, note)
+                self.curves_table.setItem(row, 10, note)
                 if not c.fitted:
                     for col in range(self.curves_table.columnCount()):
                         item = self.curves_table.item(row, col)
@@ -1334,6 +1383,58 @@ class StandardsPanel(QWidget):
         self.calibration.set_point_included(curve.element, std_item.text(), item.checkState() == Qt.Checked)
         self._rebuild_curves()
 
+    def _apply_outlier_exclusions(self, elements=None, *, log_prefix="Excluded"):
+        if not self.calibration.curves:
+            return {}
+        applied = self.calibration.exclude_outliers(elements)
+        if applied:
+            n = sum(len(v) for v in applied.values())
+            self._log(
+                f"✓ {log_prefix} {n} outlier point(s) on "
+                f"{len(applied)} element(s):"
+            )
+            for el, names in applied.items():
+                self._log(f"  • {el}: {', '.join(names)}")
+            self._refresh_all()
+        return applied
+
+    def _exclude_outliers_selected(self):
+        curve = self._current_curve()
+        if curve is None:
+            QMessageBox.information(self, "No Curve", "Select an element curve first.")
+            return
+        applied = self._apply_outlier_exclusions([curve.element])
+        if not applied:
+            QMessageBox.information(
+                self, "No Outliers Removed",
+                f"{curve.element}: no standard could be dropped without "
+                "leaving a failed or still-weak fit. The scatter is probably "
+                "the line (overlap, below detection, or matrix), not a single "
+                "bad point — leave it unused or pick a different line group.",
+            )
+
+    def _exclude_outliers_all(self):
+        if not self.calibration.curves:
+            QMessageBox.information(self, "No Curves", "Fit standard spectra first.")
+            return
+        applied = self._apply_outlier_exclusions(None)
+        if not applied:
+            QMessageBox.information(
+                self, "No Outliers Removed",
+                "No weak curve had a subset of standards that produced a "
+                "usable positive-slope fit.",
+            )
+
+    def _restore_points_selected(self):
+        curve = self._current_curve()
+        if curve is None:
+            return
+        if not self.calibration.excluded_points.get(curve.element):
+            return
+        self.calibration.clear_point_exclusions(curve.element)
+        self._rebuild_curves()
+        self._log(f"✓ Restored excluded points on {curve.element}")
+
     # ---- curve plot -------------------------------------------------------- #
     def _clear_curve_plot(self):
         for it in self._curve_plot_items:
@@ -1363,11 +1464,15 @@ class StandardsPanel(QWidget):
 
         inc = [p for p in curve.points if p.included]
         exc = [p for p in curve.points if not p.included]
+        scale, unit = concentration_axis_scale(p.concentration for p in curve.points)
+        self.curve_plot.setLabel("bottom", f"Certified concentration ({unit})", color="k")
+        self.residual_plot.setLabel("bottom", f"Certified concentration ({unit})", color="k")
+        self.residual_plot.setLabel("left", f"Predicted − certified ({unit})", color="k")
 
         def _scatter(points, brush, pen, name):
             if not points:
                 return
-            x = np.array([p.concentration for p in points])
+            x = np.array([p.concentration * scale for p in points])
             y = np.array([p.intensity for p in points])
             err = np.array([p.intensity_sd for p in points])
             sc = pg.ScatterPlotItem(x=x, y=y, size=9, brush=brush, pen=pen, name=name)
@@ -1380,7 +1485,7 @@ class StandardsPanel(QWidget):
             self._curve_plot_items.append(eb)
             for p in points:
                 label = pg.TextItem(p.standard, color=(80, 80, 80), anchor=(0, 1))
-                label.setPos(p.concentration, p.intensity)
+                label.setPos(p.concentration * scale, p.intensity)
                 self.curve_plot.addItem(label)
                 self._curve_plot_items.append(label)
 
@@ -1390,15 +1495,29 @@ class StandardsPanel(QWidget):
         if curve.fitted:
             pts = curve.points
             i_max = max(p.intensity for p in pts) * 1.1 if pts else 1.0
+            # Fit is only drawn in the physical quadrant: I ≥ 0 and C ≥ 0.
             i_grid = np.linspace(0.0, i_max, 200)
             c_grid = np.array([curve.evaluate(i) for i in i_grid])
-            ok = c_grid >= 0
-            fit_line = self.curve_plot.plot(c_grid[ok], i_grid[ok], pen=pg.mkPen("r", width=2), name="Fit")
+            ok = (c_grid >= 0) & (i_grid >= 0)
+            fit_line = self.curve_plot.plot(
+                c_grid[ok] * scale, i_grid[ok], pen=pg.mkPen("r", width=2), name="Fit",
+            )
             self._curve_plot_items.append(fit_line)
+            mdc = curve.minimum_detectable_concentration()
+            if mdc is not None and mdc > 0:
+                mdc_disp = mdc * scale
+                mdc_line = pg.InfiniteLine(
+                    pos=mdc_disp, angle=90,
+                    pen=pg.mkPen("#2ca02c", width=1, style=Qt.DashLine),
+                    label=f"MDC {mdc_disp:.3g} {unit}",
+                    labelOpts={"color": "#2ca02c", "position": 0.92},
+                )
+                self.curve_plot.addItem(mdc_line)
+                self._curve_plot_items.append(mdc_line)
             if inc:
-                x = np.array([p.concentration for p in inc])
-                r = np.array([p.residual for p in inc])
-                e = np.array([abs(curve.slope) * p.intensity_sem for p in inc])
+                x = np.array([p.concentration * scale for p in inc])
+                r = np.array([p.residual * scale for p in inc])
+                e = np.array([abs(curve.slope) * p.intensity_sem * scale for p in inc])
                 sc = pg.ScatterPlotItem(x=x, y=r, size=8, brush=pg.mkBrush("#1f77b4"), pen=pg.mkPen("#1f77b4"))
                 self.residual_plot.addItem(sc)
                 self._curve_plot_items.append(sc)
@@ -1632,6 +1751,19 @@ class StandardsPanel(QWidget):
 # ---------------------------------------------------------------------- #
 # helpers
 # ---------------------------------------------------------------------- #
+# Traces (< 1 wt%) plot as ppm so the axis shows 80, 160, 310 — not "8 (×0.001)".
+_CONC_PPM_MAX_WT = 1.0
+
+
+def concentration_axis_scale(concentrations) -> tuple:
+    """Return (scale, unit) to plot certified wt% as ppm or wt%."""
+    vals = [float(c) for c in concentrations if c is not None]
+    cmax = max(vals, default=0.0)
+    if 0 < cmax < _CONC_PPM_MAX_WT:
+        return 1e4, "ppm"
+    return 1.0, "wt%"
+
+
 def _app_data_dir() -> Path:
     app_data = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
     if not app_data:

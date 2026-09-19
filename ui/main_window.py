@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self.settings = QSettings()
         self._displayed_element_lines = None  # symbol currently shown on plot, or None
         self._project_path = None
+        self._ree_fit_set = None  # ReeFitSet when the last selection was REEs + overlaps
         self.analysis_splitter = None
         
         # Setup UI (status bar before central widget)
@@ -185,6 +186,14 @@ class MainWindow(QMainWindow):
             "(continuum + anode lines) and the matrix model."
         )
         self.fp_quantify_action.triggered.connect(self.quantify_fp)
+
+        self.quantify_rees_action = QAction("Quantify &REEs + overlaps", self)
+        self.quantify_rees_action.setShortcut("Ctrl+Shift+R")
+        self.quantify_rees_action.setStatusTip(
+            "Fit only Y, La–Lu and their spectroscopic overlaps, "
+            "then read wt% from the standards curves."
+        )
+        self.quantify_rees_action.triggered.connect(self.quantify_rees)
         
         # View actions
         self.toggle_log_action = QAction("&Logarithmic Y-axis", self)
@@ -275,6 +284,7 @@ class MainWindow(QMainWindow):
         # Analysis menu
         analysis_menu = menubar.addMenu("&Analysis")
         analysis_menu.addAction(self.fit_spectrum_action)
+        analysis_menu.addAction(self.quantify_rees_action)
         analysis_menu.addAction(self.quantify_action)
         analysis_menu.addAction(self.fp_quantify_action)
         
@@ -555,6 +565,8 @@ class MainWindow(QMainWindow):
 
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
+        self.element_panel.ree_select_requested.connect(self.select_rees_and_overlaps)
+        self.element_panel.ree_fit_requested.connect(self.quantify_rees)
         self.element_panel.peak_find_requested.connect(self.preview_peak_find)
         self.element_panel.peak_list_changed.connect(self.on_peak_list_changed)
         self.element_panel.element_clicked.connect(self.on_element_clicked)
@@ -1302,7 +1314,7 @@ class MainWindow(QMainWindow):
                 f"Failed to export results:\n{str(e)}",
             )
     
-    def fit_spectrum(self):
+    def fit_spectrum(self, checked=False, *, auto_find_peaks=None):
         """Fit the current spectrum"""
         if self.current_spectrum is None:
             QMessageBox.warning(
@@ -1363,7 +1375,10 @@ class MainWindow(QMainWindow):
                 elements=elements,
                 background_method=background_method,
                 peak_shape=peak_shape,
-                auto_find_peaks=fit_params.get('auto_find_peaks', True),
+                auto_find_peaks=(
+                    fit_params.get('auto_find_peaks', True)
+                    if auto_find_peaks is None else bool(auto_find_peaks)
+                ),
                 tube_element=fit_params.get('tube_element', 'Rh'),
                 excitation_kv=fit_params.get('excitation_kv', 50.0),
                 include_tube_lines=fit_params.get('include_tube_lines', True),
@@ -1481,6 +1496,9 @@ class MainWindow(QMainWindow):
             if calibrated:
                 concentrations = calibrated
                 method = "standards_curve"
+            concentrations, method_label = self._apply_ree_quant_roles(
+                concentrations, method_label
+            )
             self.session.set_concentrations(concentrations, method=method)
             self.results_panel.set_fp_live(False)
             self.results_panel.set_formula_summary("")
@@ -1724,6 +1742,9 @@ class MainWindow(QMainWindow):
             if calibrated:
                 concentrations = calibrated
                 method = "standards_curve"
+            concentrations, method_label = self._apply_ree_quant_roles(
+                concentrations, method_label
+            )
             self.session.set_concentrations(concentrations, method=method)
             self.results_panel.set_fp_live(False)
             self.results_panel.set_formula_summary("")
@@ -1943,6 +1964,66 @@ class MainWindow(QMainWindow):
     def on_elements_changed(self, elements):
         """Handle element selection changes"""
         self.session.set_elements(elements)
+        if self._ree_fit_set is None:
+            return
+        selected = {
+            e.get("symbol") for e in (elements or []) if e.get("symbol")
+        }
+        if not selected.intersection(self._ree_fit_set.ree_set):
+            self._ree_fit_set = None
+
+    def select_rees_and_overlaps(self, checked=False):
+        """Select Y, La–Lu plus spectroscopic / calibration overlaps."""
+        from core.ree_targets import build_ree_fit_set, clusters_from_calibration
+
+        fit_params = self.element_panel.get_fitting_params()
+        kv = float(fit_params.get("excitation_kv", 50.0) or 50.0)
+        extra = []
+        cal = getattr(self.session.instrument, "standards_calibration", None)
+        if cal is not None:
+            extra = clusters_from_calibration(cal)
+        fit_set = build_ree_fit_set(excitation_kv=kv, extra_clusters=extra)
+        self._ree_fit_set = fit_set
+        self.element_panel.set_selected_elements(fit_set.symbols)
+        if hasattr(self, "analysis_left_tabs"):
+            self.analysis_left_tabs.setCurrentIndex(self.TAB_ELEMENTS)
+        self.status_bar.showMessage(
+            f"REE suite: {fit_set.summary()} ({kv:g} kV)", 8000
+        )
+        return fit_set
+
+    def quantify_rees(self, checked=False):
+        """Fit only REEs + overlaps and quantify from the standards curves."""
+        self.select_rees_and_overlaps()
+        if self.current_spectrum is None:
+            QMessageBox.information(
+                self,
+                "REEs + overlaps selected",
+                "Selected the REE suite and overlap partners.\n\n"
+                "Load a spectrum, then Fit REEs + overlaps again to quantify.",
+            )
+            return
+        # Unknown auto-find peaks in the L-line region steal REE area.
+        self.fit_spectrum(auto_find_peaks=False)
+
+    def _apply_ree_quant_roles(self, concentrations, method_label):
+        """Tag REE vs overlap rows when the current selection is a REE suite."""
+        from core.ree_targets import apply_ree_roles
+
+        fit_set = self._ree_fit_set
+        if not fit_set or not concentrations:
+            return concentrations, method_label
+        tagged = apply_ree_roles(concentrations, fit_set)
+        n_ree = sum(1 for v in tagged.values() if v.get("role") == "ree")
+        n_ov = sum(1 for v in tagged.values() if v.get("role") == "overlap")
+        extra = f"REE suite: {n_ree} REE(s)"
+        if n_ov:
+            extra += f" + {n_ov} overlap partner(s)"
+        if method_label:
+            method_label = f"{method_label} — {extra}"
+        else:
+            method_label = f"Method: {extra}"
+        return tagged, method_label
 
     def on_identify_on_plot_toggled(self, enabled):
         """Enable/disable click-to-identify on the spectrum plot."""

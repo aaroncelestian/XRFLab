@@ -227,6 +227,7 @@ class PeriodicTableWidget(QWidget):
     elements_changed = Signal(list)  # Emitted when selection changes
     element_clicked = Signal(str, int)  # Emitted when element is clicked (symbol, Z)
     element_info_requested = Signal(str, int)  # Emitted when right-click (symbol, Z)
+    ree_select_requested = Signal()  # Select REEs + spectroscopic overlaps
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -288,6 +289,16 @@ class PeriodicTableWidget(QWidget):
         self.clear_all_btn.setMaximumHeight(24)
         self.clear_all_btn.clicked.connect(self._clear_all)
         button_layout.addWidget(self.clear_all_btn)
+
+        self.ree_btn = QPushButton("REEs")
+        self.ree_btn.setToolTip(
+            "Select Y and La–Lu plus elements whose lines overlap them\n"
+            "at the current tube kV (Ba, Ti, Fe, Rb, …). Fit only this list\n"
+            "to read REE wt% from the standards curves."
+        )
+        self.ree_btn.setMaximumHeight(24)
+        self.ree_btn.clicked.connect(self.ree_select_requested.emit)
+        button_layout.addWidget(self.ree_btn)
 
         self._custom_set_buttons = []
         for i in range(2):

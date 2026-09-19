@@ -14,7 +14,8 @@ Workflow
 4. A weighted regression C = f(I) is fitted per element over the *included*
    standards. Curves, points and raw spot intensities are kept so standards or
    points can be toggled and the curves rebuilt instantly without re-fitting
-   spectra.
+   spectra. Weak curves can drop a few wrecking standards (greedy
+   leave-one-out) when that produces a usable positive-slope fit.
 5. `StandardsCalibration.quantify` converts fitted peaks of an unknown into
    wt% with a propagated uncertainty.
 """
@@ -49,6 +50,16 @@ MIN_Z = 11
 K_OVERVOLTAGE_MIN = 1.5
 # R² below this is reported as a weak-correlation warning (still fitted).
 WEAK_R_SQUARED = 0.5
+# Currie / IUPAC factor: I_MDC = 3·σ, then mapped through the (positive) slope.
+MDC_SIGMA = 3.0
+# Outlier search: leave already-good curves alone, stop once R² reaches the
+# target, and never drop a point unless it improves R² by at least this much.
+OUTLIER_SKIP_R2 = 0.80
+OUTLIER_TARGET_R2 = 0.80
+OUTLIER_MIN_R2_GAIN = 0.08
+OUTLIER_MAX_DROP_FRAC = 1.0 / 3.0
+# Currie / IUPAC factor: I_MDC = 3·σ, then mapped through the (positive) slope.
+MDC_SIGMA = 3.0
 
 
 # --------------------------------------------------------------------------- #
@@ -187,9 +198,49 @@ class ElementCurve:
     def included_points(self) -> List[StandardPoint]:
         return [p for p in self.points if p.included]
 
+    def slope_at(self, intensity: float = 0.0) -> float:
+        """dC/dI at a given intensity (wt% per cps)."""
+        c = list(self.coefficients) + [0.0, 0.0, 0.0]
+        if self.model == MODEL_QUADRATIC:
+            return c[1] + 2.0 * c[2] * float(intensity)
+        return c[1]
+
     def evaluate(self, intensity: float) -> float:
         c = list(self.coefficients) + [0.0, 0.0, 0.0]
         return c[0] + c[1] * intensity + c[2] * intensity ** 2
+
+    def minimum_detectable_concentration(self) -> Optional[float]:
+        """
+        Predicted minimum detectable concentration (wt%).
+
+        Always ≥ 0 when defined. Currie 3σ intensity is mapped through the
+        positive slope as |C(I_MDC) − C(0)| so a negative intercept cannot
+        produce a negative MDC. Residual scatter is preferred; the median
+        replicate SEM is the fallback when there is no residual dof.
+        """
+        if not self.fitted:
+            return None
+        pts = self.included_points()
+        if self.model == MODEL_QUADRATIC and pts:
+            i_ref = float(np.mean([p.intensity for p in pts]))
+        else:
+            i_ref = 0.0
+        dcdi = self.slope_at(i_ref)
+        if dcdi <= 0:
+            return None
+        s = math.sqrt(max(self.residual_variance, 0.0))
+        dof = len(pts) - _min_points(self.model)
+        if s > 0 and dof > 0:
+            i_mdc = MDC_SIGMA * s / dcdi
+            mdc = abs(self.evaluate(i_mdc) - self.evaluate(0.0))
+        else:
+            sems = [p.intensity_sem for p in pts if p.intensity_sem > 0]
+            if not sems:
+                return None
+            mdc = dcdi * MDC_SIGMA * float(np.median(sems))
+        if not math.isfinite(mdc) or mdc < 0:
+            return None
+        return float(mdc)
 
     def predict(self, intensity: float, intensity_err: float = 0.0) -> Tuple[float, float]:
         """
@@ -366,6 +417,101 @@ def fit_curve(
         "residuals": resid.tolist(),
         "dof": int(dof),
     }
+
+
+def _usable_fit(result: Dict[str, Any]) -> bool:
+    """Same acceptance rule as `build_curves`: positive slope and R² ≥ 0."""
+    return result["coefficients"][1] > 0 and result["r_squared"] >= 0.0
+
+
+def _concentration_span_ok(points: Sequence[StandardPoint], model: str) -> bool:
+    need = 1 if model == MODEL_THROUGH_ORIGIN else 2
+    return len({round(p.concentration, 9) for p in points}) >= need
+
+
+def suggest_outlier_exclusions(
+    points: Sequence[StandardPoint],
+    model: str = MODEL_LINEAR,
+    weighted: bool = True,
+) -> List[str]:
+    """
+    Standards whose removal would rescue a weak or failed curve.
+
+    Greedy leave-one-out: drop the point that most improves R², repeating
+    until the fit is usable (positive slope, R² ≥ 0) and preferably
+    R² ≥ OUTLIER_TARGET_R2. Already-good curves are left alone. Returns []
+    when no subset with redundancy yields a usable fit — so a genuinely
+    uncorrelated element (below detection, wrong line) is not "fixed" by
+    throwing points away.
+    """
+    candidates = [p for p in points if p.included]
+    # Keep at least one degree of freedom so a 2-point linear fit cannot
+    # report a perfect R² just by dropping down to an exact line.
+    need = _min_points(model) + 1
+    if len(candidates) <= need:
+        return []
+
+    def _fit(subset: Sequence[StandardPoint]) -> Dict[str, Any]:
+        return fit_curve(
+            [p.intensity for p in subset],
+            [p.concentration for p in subset],
+            [p.intensity_sem for p in subset],
+            model=model,
+            weighted=weighted,
+        )
+
+    def _score(result: Dict[str, Any]) -> float:
+        if result["coefficients"][1] <= 0:
+            return float("-inf")
+        return float(result["r_squared"])
+
+    try:
+        base = _fit(candidates)
+    except Exception:
+        return []
+    if _usable_fit(base) and base["r_squared"] >= OUTLIER_SKIP_R2:
+        return []
+
+    dropped: List[str] = []
+    remaining = list(candidates)
+    score = _score(base)
+    max_drop = max(1, int(len(candidates) * OUTLIER_MAX_DROP_FRAC))
+
+    while len(dropped) < max_drop and len(remaining) > need:
+        best: Optional[Tuple[float, StandardPoint, Dict[str, Any]]] = None
+        for pt in remaining:
+            trial = [q for q in remaining if q is not pt]
+            if not _concentration_span_ok(trial, model):
+                continue
+            try:
+                result = _fit(trial)
+            except Exception:
+                continue
+            s = _score(result)
+            if best is None or s > best[0]:
+                best = (s, pt, result)
+        if best is None or not math.isfinite(best[0]):
+            break
+        s, pt, result = best
+        if s < score + OUTLIER_MIN_R2_GAIN:
+            break
+        dropped.append(pt.standard)
+        remaining = [q for q in remaining if q is not pt]
+        score = s
+        if _usable_fit(result) and result["r_squared"] >= OUTLIER_TARGET_R2:
+            break
+
+    if not dropped:
+        return []
+    try:
+        final = _fit(remaining)
+    except Exception:
+        return []
+    if not _usable_fit(final) or not _concentration_span_ok(remaining, model):
+        return []
+    if _usable_fit(base) and final["r_squared"] < base["r_squared"] + OUTLIER_MIN_R2_GAIN:
+        return []
+    return dropped
 
 
 # --------------------------------------------------------------------------- #
@@ -671,6 +817,54 @@ class StandardsCalibration:
 
     def is_point_included(self, element: str, standard: str) -> bool:
         return standard not in self.excluded_points.get(element, [])
+
+    def clear_point_exclusions(self, element: Optional[str] = None) -> None:
+        """Re-include every excluded standard, or just those of one element."""
+        if element is None:
+            self.excluded_points.clear()
+        else:
+            self.excluded_points.pop(element, None)
+
+    def exclude_outliers(
+        self,
+        elements: Optional[Iterable[str]] = None,
+        *,
+        rebuild: bool = True,
+    ) -> Dict[str, List[str]]:
+        """
+        Drop wrecking standards on weak or failed curves.
+
+        Only commits a drop list when the remaining points produce a usable
+        fit (positive slope, R² ≥ 0). Returns {element: [standard, …]}.
+        """
+        if not self.curves:
+            self.build_curves()
+        wanted = None if elements is None else {str(e) for e in elements}
+        weighted = bool(self.settings.get("weighted", True))
+        applied: Dict[str, List[str]] = {}
+        for el, curve in self.curves.items():
+            if wanted is not None and el not in wanted:
+                continue
+            drops = suggest_outlier_exclusions(
+                curve.points, model=curve.model, weighted=weighted,
+            )
+            if not drops:
+                continue
+            for name in drops:
+                self.set_point_included(el, name, False)
+            applied[el] = drops
+        if rebuild and applied:
+            self.build_curves()
+            for el, names in applied.items():
+                curve = self.curves.get(el)
+                if curve is None:
+                    continue
+                note = "Excluded outlier(s): " + ", ".join(names)
+                if curve.message:
+                    curve.message = f"{curve.message}; {note}"
+                else:
+                    curve.message = note
+        return applied
 
     def has_intensities(self) -> bool:
         return any(self.intensities.values())
@@ -1089,7 +1283,8 @@ class StandardsCalibration:
                 lines.append(
                     f"{c.element:>2} {c.line_group:<3} n={c.n_standards} "
                     f"R²={c.r_squared:.4f} RMSE={c.rmse:.3g} wt% "
-                    f"RSD={c.mean_rsd_percent:.1f}%{flag}"
+                    f"RSD={c.mean_rsd_percent:.1f}% "
+                    f"MDC={c.minimum_detectable_concentration() or float('nan'):.3g} wt%{flag}"
                 )
             else:
                 lines.append(f"{c.element:>2} — {c.message}")
@@ -1105,15 +1300,18 @@ class StandardsCalibration:
             w.writerow([
                 "element", "line", "model", "enabled", "fitted", "n_standards",
                 "n_spectra", "c0", "c0_err", "c1", "c1_err", "c2", "c2_err",
-                "r_squared", "rmse_wt_pct", "mean_replicate_rsd_pct", "message",
+                "r_squared", "rmse_wt_pct", "mean_replicate_rsd_pct",
+                "mdc_wt_pct", "message",
             ])
             for c in self.curves.values():
                 co, ce = c.coefficients + [0.0] * 3, c.coefficient_errors + [0.0] * 3
+                mdc = c.minimum_detectable_concentration() if c.fitted else None
                 w.writerow([
                     c.element, c.line_group, c.model, c.enabled, c.fitted,
                     c.n_standards, c.n_spectra,
                     co[0], ce[0], co[1], ce[1], co[2], ce[2],
-                    c.r_squared, c.rmse, c.mean_rsd_percent, c.message,
+                    c.r_squared, c.rmse, c.mean_rsd_percent,
+                    "" if mdc is None else mdc, c.message,
                 ])
             w.writerow([])
             w.writerow(["# Calibration points (one per standard per element)"])
