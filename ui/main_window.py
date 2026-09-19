@@ -158,9 +158,11 @@ class MainWindow(QMainWindow):
         )
         self.export_report_action.triggered.connect(self.export_report)
         
-        self.exit_action = QAction("E&xit", self)
+        self.exit_action = QAction("&Quit", self)
+        self.exit_action.setMenuRole(QAction.QuitRole)
         self.exit_action.setShortcut(QKeySequence.Quit)
-        self.exit_action.setStatusTip("Exit application")
+        self.exit_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.exit_action.setStatusTip("Quit XRFLab")
         self.exit_action.triggered.connect(self.close)
         
         # Analysis actions
@@ -170,7 +172,7 @@ class MainWindow(QMainWindow):
         self.fit_spectrum_action.triggered.connect(self.fit_spectrum)
         
         self.quantify_action = QAction("&Semi-Quant (Relative Intensities)", self)
-        self.quantify_action.setShortcut("Ctrl+Q")
+        self.quantify_action.setShortcut("Ctrl+I")
         self.quantify_action.setStatusTip(
             "Area-normalized relative intensities (not FP wt%)."
         )

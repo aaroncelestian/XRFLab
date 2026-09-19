@@ -249,9 +249,10 @@ class StandardsPanel(QWidget):
 
         info = QLabel(
             "Add standards by file, or import one or more folders at once. "
-            "A parent folder (for example <code>STANDARDS</code>) imports every "
-            "child that has spectra and a concentration CSV. Untick <b>Use</b> "
-            "to leave a standard out of every curve. The set is saved automatically."
+            "A parent folder (for example STANDARDS) imports every child that "
+            "has spectra and a concentration CSV. Untick <b>Use</b> to leave a "
+            "standard out of every curve. The list is restored the next time "
+            "the app opens."
         )
         info.setWordWrap(True)
         gl.addWidget(info)
@@ -1465,16 +1466,23 @@ class StandardsPanel(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Load Error", f"Failed to load calibration:\n{exc}")
 
-    def _load_calibration_file(self, path):
+    def _load_calibration_file(self, path, *, merge_standards: bool = False):
         import json
 
         with open(path) as fh:
             data = json.load(fh)
         result = load_any_standards_calibration(data)
         if isinstance(result, StandardsCalibration):
+            kept_stds = dict(self.calibration.standards) if merge_standards else {}
+            kept_spectra = (
+                {name: list(entries) for name, entries in self.spectra.items()}
+                if merge_standards else {}
+            )
             self.legacy_result = None
             self._adopt_calibration(result, load_spectra=True)
-            if result.has_intensities():
+            if merge_standards and kept_stds:
+                self._merge_saved_standards(kept_stds, kept_spectra)
+            if result.has_intensities() or self.calibration.has_intensities():
                 self._rebuild_curves()
             else:
                 self._refresh_all()
@@ -1483,6 +1491,31 @@ class StandardsPanel(QWidget):
             self.legacy_result = result
             self._refresh_all()
             self._log(f"✓ Loaded legacy intensity calibration from {path}")
+
+    def _merge_saved_standards(self, kept_stds, kept_spectra):
+        """Keep CRM folders from the last session on top of a saved curve file."""
+        for name, rec in kept_stds.items():
+            if name not in self.calibration.standards:
+                self.calibration.add_standard(rec)
+                if name in kept_spectra:
+                    self.spectra[name] = kept_spectra[name]
+                continue
+            dest = self.calibration.standards[name]
+            extra = [p for p in rec.spectrum_paths if p not in dest.spectrum_paths]
+            dest.spectrum_paths.extend(extra)
+            if rec.concentrations:
+                dest.concentrations = rec.concentrations
+            dest.enabled = rec.enabled
+            have = {e["path"] for e in self.spectra.get(name, [])}
+            missing = [p for p in dest.spectrum_paths if p not in have and Path(p).exists()]
+            if missing:
+                entries, errors = self._load_spectra_from_paths(missing)
+                self.spectra.setdefault(name, []).extend(entries)
+                for err in errors:
+                    self._log(f"  ⚠ {name}: {err}")
+        self._refresh_standards_table()
+        self._refresh_elements_list()
+        self._check_ready()
 
     def _export_csv(self):
         if not self.calibration.curves:
@@ -1540,7 +1573,7 @@ class StandardsPanel(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Load Error", f"Failed to load standards set:\n{exc}")
 
-    def _load_standards_set_file(self, path, *, replace: bool):
+    def _load_standards_set_file(self, path, *, replace: bool, announce: bool = True):
         import json
 
         with open(path) as fh:
@@ -1554,28 +1587,33 @@ class StandardsPanel(QWidget):
         self._adopt_calibration(self.calibration, load_spectra=True)
         self._after_standards_changed()
         self._refresh_all()
-        self._log(f"✓ Loaded {len(records)} standard(s) from {path}")
+        if announce:
+            self._log(f"✓ Loaded {len(records)} standard(s) from {path}")
+        return records
 
     # ---- startup ----------------------------------------------------------- #
     def _auto_load(self):
         cal_path = self.get_default_calibration_path()
         set_path = self.get_default_standards_set_path()
-        loaded_cal = False
+        loaded_set = False
+        if set_path.exists():
+            try:
+                self._load_standards_set_file(str(set_path), replace=True, announce=False)
+                loaded_set = True
+            except Exception as exc:
+                self._log(f"⚠ Could not load saved standards set: {exc}")
         if cal_path.exists():
             try:
-                self._load_calibration_file(str(cal_path))
-                loaded_cal = isinstance(self.calibration_result, StandardsCalibration) or bool(self.calibration.standards)
+                self._load_calibration_file(str(cal_path), merge_standards=loaded_set)
                 if self.calibration_result is not None:
                     self.calibration_complete.emit(self.calibration_result)
             except Exception as exc:
                 self._log(f"⚠ Could not load saved calibration: {exc}")
-        if not loaded_cal and set_path.exists():
-            try:
-                self._load_standards_set_file(str(set_path), replace=False)
-            except Exception as exc:
-                self._log(f"⚠ Could not load saved standards set: {exc}")
-        if not cal_path.exists() and not set_path.exists():
-            self._log("No saved standards yet — click Add Standard to begin.")
+        if loaded_set:
+            n = len(self.calibration.standards)
+            self._log(f"✓ Restored {n} standard{'s' if n != 1 else ''} from last session")
+        elif not cal_path.exists():
+            self._log("No saved standards yet — click Add Standard or Import Folders… to begin.")
 
     def _auto_save_calibration(self):
         result = self.calibration_result

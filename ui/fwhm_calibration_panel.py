@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths, QSettings
 from PySide6.QtGui import QFont
 from pathlib import Path
+import json
 import re
 import pyqtgraph as pg
 import numpy as np
@@ -130,7 +131,7 @@ class FWHMCalibrationPanel(QWidget):
 
         self._init_ui()
         self._auto_load_calibration()
-        self._restore_data_dir()
+        self._restore_session()
 
     @staticmethod
     def get_default_calibration_path():
@@ -174,8 +175,9 @@ class FWHMCalibrationPanel(QWidget):
         layout.setSpacing(6)
 
         hint = QLabel(
-            "Choose a folder of foil spectra. Elements come from the "
-            "filename and the line database — no CSV needed."
+            "Choose a folder of foil spectra. The last folder and file "
+            "choices are restored when the app opens. Elements come from "
+            "the filename — no CSV needed."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #555;")
@@ -250,6 +252,7 @@ class FWHMCalibrationPanel(QWidget):
             "Tag FWHM peak measurements with the instrument mode used.\n"
             "FWHM itself is still one FWHM(E) curve — pooling 15/30/50 is fine."
         )
+        self.tube_kv_combo.currentIndexChanged.connect(self._save_session)
         row.addWidget(self.tube_kv_combo, 1)
         return group
 
@@ -268,6 +271,7 @@ class FWHMCalibrationPanel(QWidget):
         self.model_combo.addItem("Exponential", "exponential")
         self.model_combo.addItem("Power", "power")
         self.model_combo.setCurrentIndex(0)
+        self.model_combo.currentIndexChanged.connect(self._save_session)
         self.model_combo.setToolTip(
             "Linear (default): a + b·E\n"
             "  Best match to measured peak widths on this instrument.\n\n"
@@ -473,11 +477,77 @@ class FWHMCalibrationPanel(QWidget):
         layout.addWidget(self.plot_widget)
         return widget
 
-    def _restore_data_dir(self):
-        """Reopen the last folder the user chose, if it still exists."""
-        saved = QSettings().value("fwhm/data_dir", "")
-        if saved and Path(str(saved)).is_dir():
-            self._set_data_dir(Path(str(saved)))
+    def _restore_session(self):
+        """Reopen the last foil folder, file ticks, and options."""
+        settings = QSettings()
+        self.holder_al_check.blockSignals(True)
+        self.holder_al_check.setChecked(_settings_bool(settings.value("fwhm/holder_al"), True))
+        self.holder_al_check.blockSignals(False)
+        model = settings.value("fwhm/model", "linear")
+        idx = self.model_combo.findData(model)
+        if idx >= 0:
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentIndex(idx)
+            self.model_combo.blockSignals(False)
+        kv = settings.value("fwhm/tube_kv")
+        kv_idx = self.tube_kv_combo.findData(_settings_float(kv))
+        if kv_idx >= 0:
+            self.tube_kv_combo.blockSignals(True)
+            self.tube_kv_combo.setCurrentIndex(kv_idx)
+            self.tube_kv_combo.blockSignals(False)
+
+        saved = settings.value("fwhm/data_dir", "")
+        folder = Path(str(saved)) if saved and Path(str(saved)).is_dir() else example_standards_dir()
+        if folder is None:
+            return
+        self._set_data_dir(Path(folder), persist=False)
+        self._apply_file_assignments(_settings_assignments(settings.value("fwhm/file_assignments")))
+        self._save_session()
+
+    def _save_session(self, *_):
+        settings = QSettings()
+        if self.data_dir:
+            settings.setValue("fwhm/data_dir", str(self.data_dir))
+        settings.setValue("fwhm/holder_al", self.holder_al_check.isChecked())
+        settings.setValue("fwhm/model", self.model_combo.currentData())
+        settings.setValue("fwhm/tube_kv", self.tube_kv_combo.currentData())
+        settings.setValue(
+            "fwhm/file_assignments",
+            json.dumps({
+                item.filename: {"element": item.element, "included": bool(item.included)}
+                for item in self._scanned_files
+            }),
+        )
+
+    def _apply_file_assignments(self, assignments):
+        if not assignments:
+            return
+        include_al = self.holder_al_check.isChecked()
+        for item in self._scanned_files:
+            saved = assignments.get(item.filename)
+            if not saved:
+                continue
+            element = saved.get("element") or None
+            item.element = element
+            item.included = bool(saved.get("included") and element)
+            item.lines = (
+                fwhm_lines_for_element(element, include_holder_al=include_al)
+                if element else []
+            )
+            if element:
+                item.reason = f"Using {element} K-lines from the line database"
+            else:
+                item.reason = "Could not tell which element — assign one to include"
+        self._populate_files_table()
+        self._sync_calibrate_enabled()
+        n_use = sum(1 for item in self._scanned_files if item.included and item.element)
+        n_skip = len(self._scanned_files) - n_use
+        extra = f" · {n_skip} skipped" if n_skip else ""
+        if n_use:
+            self.files_summary.setText(
+                f"{n_use} foil{'s' if n_use != 1 else ''} ready{extra}. "
+                "Uncheck mixed standards or assign an element to include a file."
+            )
 
     def _use_example_standards(self):
         example = example_standards_dir()
@@ -485,7 +555,7 @@ class FWHMCalibrationPanel(QWidget):
             QMessageBox.warning(
                 self,
                 "No Example Data",
-                "Could not find sample_data/data next to the application.",
+                "Could not find sample_data/STANDARDS/foils next to the application.",
             )
             return
         self._set_data_dir(example)
@@ -501,17 +571,19 @@ class FWHMCalibrationPanel(QWidget):
         if dir_path:
             self._set_data_dir(Path(dir_path))
 
-    def _set_data_dir(self, path: Path):
+    def _set_data_dir(self, path: Path, *, persist: bool = True):
         self.data_dir = Path(path)
-        QSettings().setValue("fwhm/data_dir", str(self.data_dir))
         self.data_dir_label.setText(str(self.data_dir))
         self.data_dir_label.setToolTip(str(self.data_dir))
         self.data_dir_label.setStyleSheet("color: #222;")
         self._rescan_folder()
+        if persist:
+            self._save_session()
 
     def _on_holder_al_toggled(self, _checked=False):
         if self.data_dir:
             self._rescan_folder()
+        self._save_session()
 
     def _rescan_folder(self):
         if not self.data_dir:
@@ -610,6 +682,7 @@ class FWHMCalibrationPanel(QWidget):
                 box.setChecked(False)
                 self._updating_table = False
         self._sync_calibrate_enabled()
+        self._save_session()
 
     def _on_element_changed(self, row: int):
         if self._updating_table or row >= len(self._scanned_files):
@@ -638,6 +711,7 @@ class FWHMCalibrationPanel(QWidget):
         if self.files_table.currentRow() == row:
             self._on_file_row_selected()
         self._sync_calibrate_enabled()
+        self._save_session()
 
     def _on_file_row_selected(self):
         row = self.files_table.currentRow()
@@ -1009,3 +1083,32 @@ class FWHMCalibrationPanel(QWidget):
             self._plot_fitted_curve_only(calibration)
         except Exception:
             pass
+
+
+def _settings_bool(value, default=True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _settings_float(value):
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _settings_assignments(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        data = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}

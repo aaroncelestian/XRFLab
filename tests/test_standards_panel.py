@@ -142,3 +142,61 @@ def test_import_parent_folder_imports_children(tmp_path, monkeypatch):
     finally:
         panel.close()
         panel.deleteLater()
+
+
+def test_auto_load_keeps_set_even_when_old_calibration_exists(tmp_path, monkeypatch):
+    _app()
+    set_path = tmp_path / "standards_set.json"
+    cal_path = tmp_path / "standards_calibration.json"
+    folder, paths = _write_standard_folder(tmp_path, "OREAS_466")
+    import json as json_mod
+    set_path.write_text(json_mod.dumps({
+        "type": "standards_set",
+        "standards": {
+            "OREAS_466": {
+                "name": "OREAS_466",
+                "concentrations": {"Fe": 4.97},
+                "spectrum_paths": paths,
+                "enabled": True,
+                "notes": "",
+            }
+        },
+    }), encoding="utf-8")
+    cal_path.write_text(json_mod.dumps({
+        "type": "standards_curves",
+        "standards": {
+            "OLD": {
+                "name": "OLD",
+                "concentrations": {"Ni": 1.0},
+                "spectrum_paths": [],
+                "enabled": True,
+                "notes": "",
+            }
+        },
+        "curves": {},
+        "intensities": {},
+    }), encoding="utf-8")
+
+    monkeypatch.setattr(StandardsPanel, "get_default_standards_set_path", staticmethod(lambda: set_path))
+    monkeypatch.setattr(StandardsPanel, "get_default_calibration_path", staticmethod(lambda: cal_path))
+    monkeypatch.setattr(StandardsPanel, "_auto_save_standards_set", lambda self: None)
+    monkeypatch.setattr(
+        StandardsPanel,
+        "_load_spectra_from_paths",
+        lambda self, loaded: (
+            [{"path": p, "name": Path(p).name, "spectrum": Spectrum(
+                energy=np.linspace(0.0, 1.0, 4), counts=np.ones(4)
+            )} for p in loaded],
+            [],
+        ),
+    )
+
+    panel = StandardsPanel()
+    try:
+        assert "OREAS_466" in panel.calibration.standards
+        assert "OLD" in panel.calibration.standards
+        assert panel.calibration.standards["OREAS_466"].concentrations["Fe"] == 4.97
+        assert len(panel.calibration.standards["OREAS_466"].spectrum_paths) == 2
+    finally:
+        panel.close()
+        panel.deleteLater()
