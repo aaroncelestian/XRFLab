@@ -1,783 +1,824 @@
 """
 Standards Calibration Panel UI
 
-This panel focuses on intensity calibration using reference standards with known concentrations.
-FWHM parameters are taken from the FWHM Calibration tab and held fixed during optimization.
-The goal is to match calculated intensities to measured intensities for accurate quantification.
+Empirical element calibration from certified reference standards:
+
+* Standards tab   – many standards, each with replicate spot spectra and a
+                    certified composition. A "Use" checkbox includes/excludes
+                    a whole standard. The set is auto-saved between sessions.
+* Elements & Fit  – choose which elements to calibrate and how the standard
+                    spectra are fitted (line group, background, tube kV).
+                    "Fit Standard Spectra" runs in a worker thread.
+* Curves tab      – per-element calibration curves (C = f(I)) with R², RMSE
+                    and replicate RSD (instrument precision). Individual
+                    standards can be excluded per element and the curves are
+                    rebuilt instantly without re-fitting spectra.
+
+The resulting StandardsCalibration converts fitted peaks of unknowns to wt%.
 """
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGroupBox,
-                               QPushButton, QLabel, QLineEdit, QTextEdit,
-                               QFileDialog, QProgressBar, QMessageBox, QSplitter,
-                               QCheckBox, QDoubleSpinBox, QListWidget, QListWidgetItem,
-                               QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
-                               QTabWidget, QDialog)
-from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths
-from pathlib import Path
-import pyqtgraph as pg
-import numpy as np
-from typing import Dict, List
+from __future__ import annotations
 
-from core.calibration import InstrumentCalibrator, CalibrationResult
+import copy
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import pyqtgraph as pg
+from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths, QSize
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, QLabel,
+    QTextEdit, QFileDialog, QProgressBar, QMessageBox, QSplitter, QCheckBox,
+    QDoubleSpinBox, QListWidget, QListWidgetItem, QComboBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QTabWidget, QDialog, QStackedWidget,
+    QInputDialog, QAbstractItemView,
+)
+
+from core.calibration import CalibrationResult
+from core.fitting import SpectrumFitter
+from core.instrument_state import InstrumentState
+from core.peak_fitting import PEAK_SHAPE_UI_CHOICES, PEAK_SHAPE_UI_DEFAULT
 from core.reference_composition import find_composition_csv, load_composition_csv
+from core.standards_calibration import (
+    StandardsCalibration, StandardRecord, ElementCurve,
+    MODEL_LINEAR, MODEL_THROUGH_ORIGIN, MODEL_QUADRATIC,
+    LINE_AUTO, LINE_ALL, element_list_for_fit, suggest_elements,
+    load_any_standards_calibration,
+)
 from ui.concentration_entry_dialog import ConcentrationEntryDialog
 from utils.io_handler import IOHandler
 
 
-class CalibrationWorker(QThread):
-    """Worker thread for running calibration"""
-    finished = Signal(object)  # CalibrationResult
-    progress = Signal(str)  # Progress message
-    
-    def __init__(self, calibrator, energy, counts, concentrations, excitation_energy, 
-                 experimental_params=None, use_measured_intensities=True, bg_params=None):
+MODEL_LABELS = [
+    ("Linear (C = a + b·I)", MODEL_LINEAR),
+    ("Through origin (C = b·I)", MODEL_THROUGH_ORIGIN),
+    ("Quadratic (C = a + b·I + c·I²)", MODEL_QUADRATIC),
+]
+LINE_LABELS = [
+    ("Principal line (Kα, else Lα)", LINE_AUTO),
+    ("All fitted lines of element", LINE_ALL),
+]
+NORMALISE_LABELS = [
+    ("Live time → counts/s", "live_time"),
+    ("Real time → counts/s", "real_time"),
+    ("None (raw counts)", "none"),
+]
+BACKGROUND_LABELS = [
+    ("SNIP", "snip"),
+    ("AsLS", "als"),
+    ("Polynomial", "polynomial"),
+    ("Linear", "linear"),
+    ("Adaptive", "adaptive"),
+]
+
+
+class StandardsFitWorker(QThread):
+    """Fit every spot spectrum of the enabled standards in the background."""
+
+    finished = Signal(object)          # StandardsCalibration
+    failed = Signal(str)
+    progress = Signal(str, int, int)   # message, done, total
+
+    def __init__(self, calibration, spectra, fitter, *, fit_kwargs, elements,
+                 line_selection, normalise):
         super().__init__()
-        self.calibrator = calibrator
-        self.energy = energy
-        self.counts = counts
-        self.concentrations = concentrations
-        self.excitation_energy = excitation_energy
-        self.experimental_params = experimental_params
-        self.use_measured_intensities = use_measured_intensities
-        self.bg_params = bg_params or {}
-    
+        self.calibration = calibration
+        self.spectra = spectra
+        self.fitter = fitter
+        self.fit_kwargs = fit_kwargs
+        self.elements = elements
+        self.line_selection = line_selection
+        self.normalise = normalise
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
     def run(self):
-        """Run calibration in background thread"""
         try:
-            self.progress.emit("Starting intensity calibration...")
-            self.progress.emit("Note: FWHM parameters are fixed from FWHM Calibration")
-            result = self.calibrator.calibrate(
-                self.energy,
-                self.counts,
-                self.concentrations,
-                self.excitation_energy,
-                use_measured_intensities=self.use_measured_intensities,
-                experimental_params=self.experimental_params,
-                bg_params=self.bg_params
+            self.calibration.fit_spectra(
+                self.spectra,
+                self.fitter,
+                fit_kwargs=self.fit_kwargs,
+                elements=self.elements,
+                line_selection=self.line_selection,
+                normalise=self.normalise,
+                progress=lambda m, i, n: self.progress.emit(m, i, n),
+                should_stop=lambda: self._stop,
             )
-            self.finished.emit(result)
-        except Exception as e:
-            self.progress.emit(f"Error: {str(e)}")
-            result = CalibrationResult(
-                fwhm_0=0.050,
-                epsilon=0.0015,
-                voigt_gamma_ratio=0.15,
-                efficiency_params={},
-                chi_squared=float('inf'),
-                r_squared=0.0,
-                success=False,
-                message=str(e)
-            )
-            self.finished.emit(result)
+            self.finished.emit(self.calibration)
+        except InterruptedError:
+            self.failed.emit("Cancelled")
+        except Exception as exc:  # pragma: no cover - surfaced in UI
+            import traceback
+            traceback.print_exc()
+            self.failed.emit(str(exc))
 
 
 class StandardsPanel(QWidget):
-    """Panel for intensity calibration using reference standards with known concentrations"""
-    
-    calibration_complete = Signal(object)  # CalibrationResult
-    
+    """Panel for empirical element calibration using reference standards."""
+
+    calibration_complete = Signal(object)  # StandardsCalibration (or legacy CalibrationResult)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.calibrator = InstrumentCalibrator()
         self.io_handler = IOHandler()
-        self.current_spectrum = None
-        self.reference_concentrations = None
-        self.calibration_result = None
-        self.worker = None
-        # {name: {concentrations, spectra: [{path, name, spectrum}], loaded}}
-        self.standards_data = {}
+        self.fwhm_calibration = None
+        self.tube_profile_library = None
+        self.calibration: StandardsCalibration = StandardsCalibration()
+        # Legacy CalibrationResult objects loaded from old files are kept here
+        self.legacy_result: Optional[CalibrationResult] = None
+        self.worker: Optional[StandardsFitWorker] = None
+        # {standard_name: [{path, name, spectrum}]}
+        self.spectra: Dict[str, List[dict]] = {}
         self._spot_plot_curves = []
-        
+        self._curve_plot_items = []
+        self._updating = False
+        self._selected_element: Optional[str] = None
+
         self._init_ui()
-        
-        # Try to load saved calibration on startup
-        self._auto_load_calibration()
-    
+        self._auto_load()
+
+    # ------------------------------------------------------------------ #
+    # Compatibility surface used by MainWindow / project files
+    # ------------------------------------------------------------------ #
+    @property
+    def calibration_result(self):
+        """Active calibration object (curve-based, or a legacy result)."""
+        if self.legacy_result is not None and not self.calibration.success:
+            return self.legacy_result
+        if self.calibration.success:
+            return self.calibration
+        return None
+
     @staticmethod
     def get_default_calibration_path():
-        """Get the default path for saving/loading Standards calibration"""
-        # Use application data directory
-        app_data = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
-        if not app_data:
-            # Fallback to home directory
-            app_data = str(Path.home() / ".xrflab")
-        
-        # Create directory if it doesn't exist
-        cal_dir = Path(app_data) / "calibrations"
-        cal_dir.mkdir(parents=True, exist_ok=True)
-        
-        return cal_dir / "standards_calibration.json"
-    
+        return _app_data_dir() / "standards_calibration.json"
+
+    @staticmethod
+    def get_default_standards_set_path():
+        return _app_data_dir() / "standards_set.json"
+
+    def update_fwhm_status(self, fwhm_calibration):
+        """Show which FWHM model the standard fits will use."""
+        self.fwhm_calibration = fwhm_calibration
+        if fwhm_calibration:
+            cal_date = getattr(fwhm_calibration, "calibration_date", None) or ""
+            date_str = cal_date[:16].replace("T", " ") if cal_date else "Unknown"
+            if getattr(fwhm_calibration, "model_type", "") == "detector":
+                p = fwhm_calibration.parameters
+                detail = (
+                    f"FWHM₀ = {p['fwhm_0'] * 1000:.1f} eV, "
+                    f"ε = {p['epsilon'] * 1000:.2f} eV/keV"
+                )
+            else:
+                detail = f"Model: {fwhm_calibration.model_type}"
+            self.fwhm_status_label.setText(
+                f"<b>✓ FWHM calibration active</b> — {detail}, "
+                f"R² = {fwhm_calibration.r_squared:.4f} "
+                f"<small>({date_str})</small>"
+            )
+            self.fwhm_status_label.setStyleSheet("color: green;")
+        else:
+            self.fwhm_status_label.setText(
+                "<b>⚠️ No FWHM calibration</b> — peak widths will be free. "
+                "Calibrate on the FWHM tab first for more stable intensities."
+            )
+            self.fwhm_status_label.setStyleSheet("color: #cc6600;")
+        self._check_ready()
+
+    def set_tube_profile_library(self, library):
+        self.tube_profile_library = library
+
+    def restore_calibration(self, result) -> None:
+        """Install a calibration from a project file (no AppData write)."""
+        if result is None:
+            return
+        if isinstance(result, StandardsCalibration):
+            self._adopt_calibration(result, load_spectra=True)
+        else:
+            self.legacy_result = result
+            self._log(f"Loaded legacy intensity calibration (R² = {getattr(result, 'r_squared', 0):.3f})")
+        self._refresh_all()
+
+    # ------------------------------------------------------------------ #
+    # UI construction
+    # ------------------------------------------------------------------ #
     def _init_ui(self):
-        """Initialize the user interface with sub-tabs"""
         layout = QVBoxLayout(self)
-        
-        # Create splitter for controls and plot
         splitter = QSplitter(Qt.Horizontal)
-        
-        # Left panel - Tabbed interface for compact layout
-        left_tab_widget = QTabWidget()
-        left_tab_widget.setMaximumWidth(700)  # Same as Analysis tab
-        
-        # Tab 1: Standards Selection
-        standards_tab = self._create_standards_selection_tab()
-        left_tab_widget.addTab(standards_tab, "Standards")
-        
-        # Tab 2: Calibration & Output
-        calibration_tab = self._create_calibration_tab()
-        left_tab_widget.addTab(calibration_tab, "Calibration")
-        
-        splitter.addWidget(left_tab_widget)
-        
-        # Right side: Spectrum comparison plot (keep as is)
-        plot_widget = self._create_plot_widget()
-        splitter.addWidget(plot_widget)
-        
-        # Set initial sizes for horizontal splitter (50% left, 50% right)
+
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setMaximumWidth(700)
+        self.left_tabs.addTab(self._create_standards_tab(), "Standards")
+        self.left_tabs.addTab(self._create_fit_tab(), "Elements && Fit")
+        self.left_tabs.addTab(self._create_curves_tab(), "Curves")
+        self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
+        splitter.addWidget(self.left_tabs)
+
+        self.plot_stack = QStackedWidget()
+        self.plot_stack.addWidget(self._create_spectra_plot())
+        self.plot_stack.addWidget(self._create_curve_plot())
+        splitter.addWidget(self.plot_stack)
         splitter.setSizes([600, 600])
-        
         layout.addWidget(splitter)
-    
-    def _create_standards_selection_tab(self):
-        """Create Standards Selection tab"""
+
+    # ---- Standards tab ------------------------------------------------- #
+    def _create_standards_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(3)
-        
-        # FWHM status group
-        fwhm_group = self._create_fwhm_status_group()
-        layout.addWidget(fwhm_group)
-        
-        # Standards list (add / reload / remove)
-        standards_group = self._create_standards_group()
-        layout.addWidget(standards_group, stretch=1)
-        
-        return widget
-    
-    def _create_calibration_tab(self):
-        """Create Calibration & Output tab"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(3, 3, 3, 3)
-        layout.setSpacing(3)
-        
-        # Calibration controls
-        controls_group = self._create_controls_group()
-        layout.addWidget(controls_group)
-        
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
-        
-        # Results display
-        results_group = self._create_results_group()
-        layout.addWidget(results_group, stretch=1)
-        
-        return widget
-    
-    def _create_fwhm_status_group(self):
-        """Create FWHM calibration status display"""
-        group = QGroupBox("FWHM Calibration Status")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
-        # Status label
+
+        fwhm_group = QGroupBox("FWHM Calibration Status")
+        fl = QVBoxLayout(fwhm_group)
+        fl.setContentsMargins(5, 8, 5, 5)
         self.fwhm_status_label = QLabel(
-            "<b>⚠️ No FWHM calibration loaded</b><br>"
-            "Calibrate detector FWHM first (Calibration → FWHM). "
-            "Intensity calibration is optional — Analysis Semi-Quant works without it."
+            "<b>⚠️ No FWHM calibration</b> — peak widths will be free. "
+            "Calibrate on the FWHM tab first for more stable intensities."
         )
         self.fwhm_status_label.setWordWrap(True)
         self.fwhm_status_label.setStyleSheet("color: #cc6600;")
-        layout.addWidget(self.fwhm_status_label)
-        
-        # Info text
-        info = QLabel(
-            "<small>Optional intensity / FP path. Semi-Quant on Analysis does not "
-            "need this. FWHM₀ and ε stay fixed from the FWHM tab.</small>"
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        
-        return group
-    
-    def _create_standards_group(self):
-        """Create standards list; each standard can hold multiple spot spectra"""
+        fl.addWidget(self.fwhm_status_label)
+        layout.addWidget(fwhm_group)
+
         group = QGroupBox("Standards")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
+        gl = QVBoxLayout(group)
+        gl.setContentsMargins(5, 8, 5, 5)
+        gl.setSpacing(3)
+
         info = QLabel(
-            "Add a certified standard: spectra first, then confirm the "
-            "composition table. A nearby CSV (including same filename) is "
-            "only used to pre-fill that table."
+            "Add each certified standard with all of its replicate spot spectra. "
+            "Untick <b>Use</b> to leave a standard out of every curve. The set "
+            "(names, spectrum paths, compositions) is saved automatically."
         )
         info.setWordWrap(True)
-        layout.addWidget(info)
-        
-        self.selected_table = QTableWidget()
-        self.selected_table.setColumnCount(3)
-        self.selected_table.setHorizontalHeaderLabels(["Standard", "Spots", "Elements"])
-        header = self.selected_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        gl.addWidget(info)
+
+        self.standards_table = QTableWidget()
+        self.standards_table.setColumnCount(4)
+        self.standards_table.setHorizontalHeaderLabels(["Use", "Standard", "Spots", "Elements"])
+        header = self.standards_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.selected_table.setMinimumHeight(100)
-        self.selected_table.setMaximumHeight(160)
-        self.selected_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.selected_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.selected_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.selected_table.itemSelectionChanged.connect(self._on_standard_selection_changed)
-        layout.addWidget(self.selected_table)
-        
-        spots_label = QLabel("Spot spectra for selected standard:")
-        layout.addWidget(spots_label)
-        
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.standards_table.setMinimumHeight(120)
+        self.standards_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.standards_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.standards_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.standards_table.itemSelectionChanged.connect(self._on_standard_selection_changed)
+        self.standards_table.itemChanged.connect(self._on_standard_item_changed)
+        gl.addWidget(self.standards_table, stretch=2)
+
+        gl.addWidget(QLabel("Spot spectra for selected standard:"))
         self.spots_list = QListWidget()
-        self.spots_list.setMinimumHeight(80)
-        self.spots_list.setToolTip("Individual measurement spots on the selected standard")
-        layout.addWidget(self.spots_list, stretch=1)
-        
-        btn_layout = QHBoxLayout()
-        
-        add_btn = QPushButton("Add Standard")
-        add_btn.setToolTip(
-            "Create a new standard: name, spot spectrum file(s), then concentrations"
-        )
-        add_btn.clicked.connect(self._add_standard)
-        btn_layout.addWidget(add_btn)
-        
-        add_spectra_btn = QPushButton("Add Spectra…")
-        add_spectra_btn.setToolTip(
-            "Add more spot spectra to the selected standard (same concentrations)"
-        )
-        add_spectra_btn.clicked.connect(self._add_spectra_to_selected)
-        btn_layout.addWidget(add_spectra_btn)
-        
-        remove_spot_btn = QPushButton("Remove Spot")
-        remove_spot_btn.setToolTip("Remove the selected spot spectrum")
-        remove_spot_btn.clicked.connect(self._remove_selected_spot)
-        btn_layout.addWidget(remove_spot_btn)
-        
-        remove_btn = QPushButton("Remove Standard")
-        remove_btn.setToolTip("Remove the selected standard and all its spectra")
-        remove_btn.clicked.connect(self._remove_selected_standard)
-        btn_layout.addWidget(remove_btn)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-        
-        return group
-    
-    def _create_controls_group(self):
-        """Create calibration control buttons"""
-        group = QGroupBox("Calibration")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
+        self.spots_list.setMinimumHeight(70)
+        gl.addWidget(self.spots_list, stretch=1)
+
+        row1 = QHBoxLayout()
+        b = QPushButton("Add Standard")
+        b.setToolTip("Pick spectrum file(s) → name → confirm certified wt% table")
+        b.clicked.connect(self._add_standard)
+        row1.addWidget(b)
+        b = QPushButton("Add Spectra…")
+        b.setToolTip("Add more replicate spot spectra to the selected standard")
+        b.clicked.connect(self._add_spectra_to_selected)
+        row1.addWidget(b)
+        b = QPushButton("Edit Composition…")
+        b.setToolTip("Edit certified concentrations of the selected standard")
+        b.clicked.connect(self._edit_composition)
+        row1.addWidget(b)
+        row1.addStretch()
+        gl.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        b = QPushButton("Remove Spot")
+        b.clicked.connect(self._remove_selected_spot)
+        row2.addWidget(b)
+        b = QPushButton("Remove Standard")
+        b.clicked.connect(self._remove_selected_standard)
+        row2.addWidget(b)
+        row2.addStretch()
+        b = QPushButton("Save Set…")
+        b.setToolTip("Save the standards set (paths + compositions) to a JSON file")
+        b.clicked.connect(self._save_standards_set_as)
+        row2.addWidget(b)
+        b = QPushButton("Load Set…")
+        b.setToolTip("Load a standards set JSON (replaces the current list)")
+        b.clicked.connect(self._load_standards_set_from)
+        row2.addWidget(b)
+        gl.addLayout(row2)
+
+        layout.addWidget(group, stretch=1)
+        return widget
+
+    # ---- Elements & Fit tab -------------------------------------------- #
+    def _create_fit_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(3)
-        
-        # Background method selection
-        bg_method_layout = QHBoxLayout()
-        bg_method_layout.addWidget(QLabel("Background Method:"))
-        
-        self.bg_method_combo = QComboBox()
-        self.bg_method_combo.addItems(["AsLS (Recommended)", "SNIP", "Polynomial", "Linear", "None"])
-        self.bg_method_combo.setCurrentIndex(0)  # Default to AsLS
-        self.bg_method_combo.currentIndexChanged.connect(self._on_bg_method_changed)
-        self.bg_method_combo.setToolTip(
-            "AsLS: Asymmetric Least Squares (best for XRF)\n"
-            "SNIP: Statistics-sensitive Non-linear Iterative Peak-clipping\n"
-            "Polynomial: Polynomial fit\n"
-            "Linear: Simple linear baseline"
+
+        el_group = QGroupBox("Elements to calibrate")
+        el = QVBoxLayout(el_group)
+        el.setContentsMargins(5, 8, 5, 5)
+        el.setSpacing(3)
+        hint = QLabel(
+            "Ticked elements are fitted in every standard spectrum. Fewer "
+            "elements → faster fits. <i>Suggest</i> ticks elements certified in "
+            "≥2 used standards and reaching ≥100 ppm."
         )
-        bg_method_layout.addWidget(self.bg_method_combo)
-        bg_method_layout.addStretch()
-        layout.addLayout(bg_method_layout)
-        
-        # AsLS parameters (default)
-        self.als_params_widget = QWidget()
-        als_layout = QHBoxLayout(self.als_params_widget)
-        als_layout.setContentsMargins(0, 0, 0, 0)
-        
-        als_layout.addWidget(QLabel("λ (smoothness):"))
-        self.als_lam_spin = QDoubleSpinBox()
-        self.als_lam_spin.setRange(1e3, 1e7)
-        self.als_lam_spin.setValue(1e5)
-        self.als_lam_spin.setDecimals(0)
-        self.als_lam_spin.setSingleStep(1e4)
-        self.als_lam_spin.setToolTip("Smoothness: 10³ to 10⁷ (higher = smoother)")
-        als_layout.addWidget(self.als_lam_spin)
-        
-        als_layout.addWidget(QLabel("p (asymmetry):"))
-        self.als_p_spin = QDoubleSpinBox()
-        self.als_p_spin.setRange(0.001, 0.05)
-        self.als_p_spin.setValue(0.01)
-        self.als_p_spin.setDecimals(3)
-        self.als_p_spin.setSingleStep(0.001)
-        self.als_p_spin.setToolTip("Asymmetry: 0.001 to 0.05 (lower = tighter fit)")
-        als_layout.addWidget(self.als_p_spin)
-        
-        als_layout.addStretch()
-        layout.addWidget(self.als_params_widget)
-        
-        # SNIP parameters (hidden by default)
-        self.snip_params_widget = QWidget()
-        snip_layout = QHBoxLayout(self.snip_params_widget)
-        snip_layout.setContentsMargins(0, 0, 0, 0)
-        
-        snip_layout.addWidget(QLabel("Iterations:"))
-        self.snip_iter_spin = QDoubleSpinBox()
-        self.snip_iter_spin.setRange(5, 100)
-        self.snip_iter_spin.setValue(20)
-        self.snip_iter_spin.setDecimals(0)
-        self.snip_iter_spin.setSingleStep(5)
-        self.snip_iter_spin.setToolTip("Number of iterations (higher = smoother)")
-        snip_layout.addWidget(self.snip_iter_spin)
-        snip_layout.addStretch()
-        layout.addWidget(self.snip_params_widget)
-        self.snip_params_widget.setVisible(False)
-        
-        # Apply background button
-        apply_bg_layout = QHBoxLayout()
-        self.apply_bg_btn = QPushButton("Preview Background")
-        self.apply_bg_btn.setToolTip("Preview background subtraction with current parameters")
-        self.apply_bg_btn.setEnabled(False)
-        apply_bg_layout.addWidget(self.apply_bg_btn)
-        apply_bg_layout.addStretch()
-        layout.addLayout(apply_bg_layout)
-        
-        # Main buttons
-        btn_layout = QHBoxLayout()
-        
-        self.calibrate_btn = QPushButton("Run Intensity Calibration")
-        self.calibrate_btn.clicked.connect(self._run_calibration)
-        self.calibrate_btn.setEnabled(False)
-        self.calibrate_btn.setToolTip("Optimize intensity scaling to match known concentrations")
-        btn_layout.addWidget(self.calibrate_btn)
-        
-        self.apply_btn = QPushButton("Apply Calibration")
-        self.apply_btn.clicked.connect(self._apply_calibration)
-        self.apply_btn.setEnabled(False)
-        btn_layout.addWidget(self.apply_btn)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-        
-        # Save/Load
-        save_load_layout = QHBoxLayout()
-        
-        self.save_btn = QPushButton("Save Calibration...")
-        self.save_btn.clicked.connect(self._save_calibration)
-        self.save_btn.setEnabled(False)
-        save_load_layout.addWidget(self.save_btn)
-        
-        self.load_btn = QPushButton("Load Calibration...")
-        self.load_btn.clicked.connect(self._load_calibration)
-        save_load_layout.addWidget(self.load_btn)
-        
-        save_load_layout.addStretch()
-        layout.addLayout(save_load_layout)
-        
-        return group
-    
-    def _create_results_group(self):
-        """Create results display group"""
-        group = QGroupBox("Calibration Output")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(5, 8, 5, 5)
-        layout.setSpacing(3)
-        
-        # Progress output
-        self.terminal_output = QTextEdit()
-        self.terminal_output.setReadOnly(True)
-        self.terminal_output.setMaximumHeight(80)
-        self.terminal_output.setStyleSheet(
+        hint.setWordWrap(True)
+        el.addWidget(hint)
+        self.elements_list = QListWidget()
+        self.elements_list.setFlow(QListWidget.Flow.LeftToRight)
+        self.elements_list.setWrapping(True)
+        self.elements_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.elements_list.setGridSize(QSize(72, 22))
+        self.elements_list.setMinimumHeight(90)
+        self.elements_list.setMaximumHeight(160)
+        el.addWidget(self.elements_list)
+        erow = QHBoxLayout()
+        for label, slot in (
+            ("Suggest", self._suggest_elements),
+            ("All", lambda: self._set_all_elements(True)),
+            ("None", lambda: self._set_all_elements(False)),
+        ):
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            erow.addWidget(b)
+        erow.addStretch()
+        el.addLayout(erow)
+        layout.addWidget(el_group)
+
+        set_group = QGroupBox("Fit settings")
+        sl = QVBoxLayout(set_group)
+        sl.setContentsMargins(5, 8, 5, 5)
+        sl.setSpacing(3)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Intensity from:"))
+        self.line_combo = QComboBox()
+        for label, key in LINE_LABELS:
+            self.line_combo.addItem(label, key)
+        self.line_combo.setToolTip(
+            "Which fitted lines are summed to the element intensity.\n"
+            "Principal line is the usual choice; Kα1+Kα2 are summed."
+        )
+        r.addWidget(self.line_combo, stretch=1)
+        r.addWidget(QLabel("Normalize:"))
+        self.normalise_combo = QComboBox()
+        for label, key in NORMALISE_LABELS:
+            self.normalise_combo.addItem(label, key)
+        r.addWidget(self.normalise_combo, stretch=1)
+        sl.addLayout(r)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Background:"))
+        self.bg_combo = QComboBox()
+        for label, key in BACKGROUND_LABELS:
+            self.bg_combo.addItem(label, key)
+        r.addWidget(self.bg_combo)
+        r.addWidget(QLabel("Peak shape:"))
+        self.shape_combo = QComboBox()
+        for label, key in PEAK_SHAPE_UI_CHOICES:
+            self.shape_combo.addItem(label, key)
+        self.shape_combo.setCurrentText(PEAK_SHAPE_UI_DEFAULT)
+        self.shape_combo.setToolTip(
+            "Use the same background and peak shape here and on the Analysis "
+            "Fitting tab — intensities must be extracted the same way for the "
+            "curves to transfer to unknowns."
+        )
+        r.addWidget(self.shape_combo)
+        r.addStretch()
+        sl.addLayout(r)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Tube:"))
+        self.tube_combo = QComboBox()
+        self.tube_combo.addItems(["Rh", "W", "Mo", "Ag", "Cu", "Cr"])
+        r.addWidget(self.tube_combo)
+        r.addWidget(QLabel("kV:"))
+        self.kv_spin = QDoubleSpinBox()
+        self.kv_spin.setRange(5.0, 100.0)
+        self.kv_spin.setDecimals(1)
+        self.kv_spin.setValue(50.0)
+        self.kv_spin.setToolTip("Excitation voltage; read from spectrum metadata when available")
+        r.addWidget(self.kv_spin)
+        r.addStretch()
+        sl.addLayout(r)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Curve model:"))
+        self.model_combo = QComboBox()
+        for label, key in MODEL_LABELS:
+            self.model_combo.addItem(label, key)
+        self.model_combo.currentIndexChanged.connect(self._on_curve_settings_changed)
+        r.addWidget(self.model_combo, stretch=1)
+        self.weighted_check = QCheckBox("Weight by replicate scatter")
+        self.weighted_check.setChecked(True)
+        self.weighted_check.setToolTip(
+            "Weighted least squares: standards whose replicate spots agree "
+            "better count more (1/σ²). Counting statistics set a floor."
+        )
+        self.weighted_check.toggled.connect(self._on_curve_settings_changed)
+        r.addWidget(self.weighted_check)
+        sl.addLayout(r)
+        layout.addWidget(set_group)
+
+        run_group = QGroupBox("Fit standard spectra")
+        rl = QVBoxLayout(run_group)
+        rl.setContentsMargins(5, 8, 5, 5)
+        rl.setSpacing(3)
+        row = QHBoxLayout()
+        self.fit_btn = QPushButton("Fit Standard Spectra")
+        self.fit_btn.setToolTip(
+            "Fit every spot spectrum of the used standards with the ticked "
+            "elements, then build the calibration curves"
+        )
+        self.fit_btn.setEnabled(False)
+        self.fit_btn.clicked.connect(self._run_fit)
+        row.addWidget(self.fit_btn)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_fit)
+        row.addWidget(self.cancel_btn)
+        row.addStretch()
+        rl.addLayout(row)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        rl.addWidget(self.progress_bar)
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setStyleSheet(
             "QTextEdit { background-color: #1e1e1e; color: #d4d4d4; "
             "font-family: 'Courier New', monospace; font-size: 10pt; }"
         )
-        self.terminal_output.setPlainText("Ready for calibration...")
-        layout.addWidget(QLabel("Progress:"))
-        layout.addWidget(self.terminal_output)
-        
-        # Results summary
-        self.results_text = QTextEdit()
-        self.results_text.setReadOnly(True)
-        self.results_text.setMaximumHeight(120)
-        self.results_text.setMinimumHeight(100)
-        self.results_text.setPlainText("No calibration results yet")
-        layout.addWidget(QLabel("Results:"))
-        layout.addWidget(self.results_text)
-        
-        return group
-    
-    def _create_plot_widget(self):
-        """Create spectrum comparison plot"""
+        self.log_output.setPlainText("Ready.")
+        rl.addWidget(self.log_output, stretch=1)
+        layout.addWidget(run_group, stretch=1)
+        return widget
+
+    # ---- Curves tab ------------------------------------------------------ #
+    def _create_curves_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(3)
+
+        self.curves_summary = QLabel("No calibration curves yet — fit standard spectra first.")
+        self.curves_summary.setWordWrap(True)
+        layout.addWidget(self.curves_summary)
+
+        el_group = QGroupBox("Element curves (untick Use to drop an element from quantification)")
+        el = QVBoxLayout(el_group)
+        el.setContentsMargins(5, 8, 5, 5)
+        self.curves_table = QTableWidget()
+        cols = ["Use", "El", "Line", "Std", "Spec", "Slope wt%/cps", "R²", "RMSE wt%", "RSD %", "Note"]
+        self.curves_table.setColumnCount(len(cols))
+        self.curves_table.setHorizontalHeaderLabels(cols)
+        ch = self.curves_table.horizontalHeader()
+        for i in range(len(cols) - 1):
+            ch.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        ch.setSectionResizeMode(len(cols) - 1, QHeaderView.ResizeMode.Stretch)
+        self.curves_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.curves_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.curves_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.curves_table.itemSelectionChanged.connect(self._on_curve_selection_changed)
+        self.curves_table.itemChanged.connect(self._on_curve_item_changed)
+        el.addWidget(self.curves_table)
+        layout.addWidget(el_group, stretch=3)
+
+        pt_group = QGroupBox("Standards in selected curve (untick Use to exclude an outlier)")
+        pl = QVBoxLayout(pt_group)
+        pl.setContentsMargins(5, 8, 5, 5)
+        self.points_table = QTableWidget()
+        pcols = ["Use", "Standard", "Cert. wt%", "Mean cps", "SD cps", "RSD %", "n", "Pred. wt%", "Resid. wt%"]
+        self.points_table.setColumnCount(len(pcols))
+        self.points_table.setHorizontalHeaderLabels(pcols)
+        ph = self.points_table.horizontalHeader()
+        ph.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for i in [0] + list(range(2, len(pcols))):
+            ph.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        self.points_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.points_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.points_table.itemChanged.connect(self._on_point_item_changed)
+        pl.addWidget(self.points_table)
+        layout.addWidget(pt_group, stretch=2)
+
+        row = QHBoxLayout()
+        self.apply_btn = QPushButton("Apply Calibration")
+        self.apply_btn.setToolTip("Use these curves to report wt% on the Analysis tab; auto-saved")
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self._apply_calibration)
+        row.addWidget(self.apply_btn)
+        self.save_btn = QPushButton("Save Calibration…")
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self._save_calibration)
+        row.addWidget(self.save_btn)
+        b = QPushButton("Load Calibration…")
+        b.clicked.connect(self._load_calibration)
+        row.addWidget(b)
+        self.export_btn = QPushButton("Export CSV…")
+        self.export_btn.setToolTip("Curves, per-standard points and spot intensities")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self._export_csv)
+        row.addWidget(self.export_btn)
+        row.addStretch()
+        layout.addLayout(row)
+        return widget
+
+    # ---- plots ------------------------------------------------------------ #
+    def _create_spectra_plot(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create plot with two subplots
-        self.plot_widget = pg.GraphicsLayoutWidget()
-        self.plot_widget.setBackground('w')
-        
-        # Top plot: Measured vs Calculated
-        self.spectrum_plot = self.plot_widget.addPlot(row=0, col=0)
-        self.spectrum_plot.setLabel('left', 'Counts', color='k')
-        self.spectrum_plot.setLabel('bottom', 'Energy (keV)', color='k')
-        self.spectrum_plot.setTitle('Intensity Calibration Fit', color='k')
+        self.spectra_plot_widget = pg.GraphicsLayoutWidget()
+        self.spectra_plot_widget.setBackground("w")
+        self.spectrum_plot = self.spectra_plot_widget.addPlot(row=0, col=0)
+        self.spectrum_plot.setLabel("left", "Counts", color="k")
+        self.spectrum_plot.setLabel("bottom", "Energy (keV)", color="k")
+        self.spectrum_plot.setTitle("Spot spectra", color="k")
         self.spectrum_plot.addLegend()
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.3)
-        
-        self.measured_curve = self.spectrum_plot.plot(
-            pen=pg.mkPen('#00008B', width=2), name='Measured'
-        )
-        self.calculated_curve = self.spectrum_plot.plot(
-            pen=pg.mkPen('r', width=2, style=Qt.DashLine), name='Calculated'
-        )
-        self.background_curve = self.spectrum_plot.plot(
-            pen=pg.mkPen('#FFA500', width=1, style=Qt.DotLine), name='Background'
-        )
-        
-        # Bottom plot: Residuals
-        self.residual_plot = self.plot_widget.addPlot(row=1, col=0)
-        self.residual_plot.setLabel('left', 'Residuals (σ)', color='k')
-        self.residual_plot.setLabel('bottom', 'Energy (keV)', color='k')
-        self.residual_plot.setTitle('Fit Residuals', color='k')
-        self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.residual_plot.addLine(y=0, pen=pg.mkPen('r', width=1, style=Qt.DashLine))
-        
-        self.residual_curve = self.residual_plot.plot(
-            pen=None, symbol='o', symbolSize=5, symbolBrush='b'
-        )
-        
-        layout.addWidget(self.plot_widget)
-        
+        self.measured_curve = self.spectrum_plot.plot(pen=pg.mkPen("#00008B", width=2), name="Mean")
+        layout.addWidget(self.spectra_plot_widget)
         return widget
-    
-    def update_fwhm_status(self, fwhm_calibration):
-        """Update FWHM status when calibration is applied"""
-        if fwhm_calibration:
-            # Update the calibrator with the FWHM calibration
-            self.calibrator.fwhm_calibration = fwhm_calibration
-            # Get calibration date
-            cal_date = fwhm_calibration.calibration_date
-            if cal_date:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(cal_date)
-                    date_str = dt.strftime("%Y-%m-%d %H:%M")
-                except:
-                    date_str = "Unknown"
-            else:
-                date_str = "Unknown"
-            
-            if fwhm_calibration.model_type == 'detector':
-                fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
-                epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
-                status_text = (
-                    f"<b>✓ FWHM Calibration Active</b><br>"
-                    f"FWHM₀ = {fwhm_0_ev:.1f} eV<br>"
-                    f"ε = {epsilon_ev:.2f} eV/keV<br>"
-                    f"R² = {fwhm_calibration.r_squared:.4f}<br>"
-                    f"<small>Calibrated: {date_str}</small><br>"
-                    f"<small>Auto-saved and will persist between sessions</small>"
-                )
-                self.fwhm_status_label.setStyleSheet("color: green;")
-            else:
-                status_text = (
-                    f"<b>✓ FWHM Calibration Active</b><br>"
-                    f"Model: {fwhm_calibration.model_type}<br>"
-                    f"R² = {fwhm_calibration.r_squared:.4f}<br>"
-                    f"<small>Calibrated: {date_str}</small><br>"
-                    f"<small>Auto-saved and will persist between sessions</small>"
-                )
-                self.fwhm_status_label.setStyleSheet("color: green;")
-            
-            self.fwhm_status_label.setText(status_text)
-            
-            # Update calibrator with FWHM calibration
-            self.calibrator = InstrumentCalibrator(fwhm_calibration=fwhm_calibration)
-        else:
-            self.fwhm_status_label.setText(
-                "<b>⚠️ No FWHM calibration loaded</b><br>"
-                "Please run FWHM Calibration first (FWHM Calibration tab)"
-            )
-            self.fwhm_status_label.setStyleSheet("color: #cc6600;")
-    
+
+    def _create_curve_plot(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.curve_plot_widget = pg.GraphicsLayoutWidget()
+        self.curve_plot_widget.setBackground("w")
+        self.curve_plot = self.curve_plot_widget.addPlot(row=0, col=0)
+        self.curve_plot.setLabel("left", "Intensity (counts/s)", color="k")
+        self.curve_plot.setLabel("bottom", "Certified concentration (wt%)", color="k")
+        self.curve_plot.setTitle("Calibration curve", color="k")
+        self.curve_plot.addLegend()
+        self.curve_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.residual_plot = self.curve_plot_widget.addPlot(row=1, col=0)
+        self.residual_plot.setLabel("left", "Predicted − certified (wt%)", color="k")
+        self.residual_plot.setLabel("bottom", "Certified concentration (wt%)", color="k")
+        self.residual_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.residual_plot.addLine(y=0, pen=pg.mkPen("r", width=1, style=Qt.DashLine))
+        self.residual_plot.setXLink(self.curve_plot)
+        self.curve_plot_widget.ci.layout.setRowStretchFactor(0, 3)
+        self.curve_plot_widget.ci.layout.setRowStretchFactor(1, 1)
+        layout.addWidget(self.curve_plot_widget)
+        return widget
+
+    # ------------------------------------------------------------------ #
+    # Standards management
+    # ------------------------------------------------------------------ #
     def _spectrum_file_filter(self):
         return (
             "All Supported (*.txt *.csv *.mca);;"
             "Text Files (*.txt);;CSV Files (*.csv);;MCA Files (*.mca)"
         )
-    
+
     def _pick_spectrum_files(self, title):
-        """Multi-select spectrum files; returns list of paths"""
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, title, "", self._spectrum_file_filter()
-        )
+        paths, _ = QFileDialog.getOpenFileNames(self, title, "", self._spectrum_file_filter())
         return paths or []
-    
+
     def _load_spectra_from_paths(self, paths):
-        """Load spectrum objects from file paths. Returns (entries, errors)."""
-        entries = []
-        errors = []
+        entries, errors = [], []
         for path in paths:
             try:
                 spectrum = self.io_handler.load_spectrum(path)
-                entries.append({
-                    'path': path,
-                    'name': Path(path).name,
-                    'spectrum': spectrum,
-                })
-            except Exception as e:
-                errors.append(f"{Path(path).name}: {e}")
+                entries.append({"path": path, "name": Path(path).name, "spectrum": spectrum})
+                kv = (spectrum.metadata or {}).get("excitation_energy")
+                if kv and not self._kv_from_data:
+                    self.kv_spin.setValue(float(kv))
+                    self._kv_from_data = True
+            except Exception as exc:
+                errors.append(f"{Path(path).name}: {exc}")
         return entries, errors
-    
-    def _add_standard(self):
-        """Add a new standard: spectra → name → confirm composition table."""
-        from PySide6.QtWidgets import QInputDialog
 
+    _kv_from_data = False
+
+    def _add_standard(self):
         paths = self._pick_spectrum_files(
-            "Select spectrum file(s) for this standard "
-            "(multi-select replicate spots)"
+            "Select spectrum file(s) for this standard (multi-select replicate spots)"
         )
         if not paths:
             return
-
-        suggested = Path(paths[0]).stem
-        standard_name, ok = QInputDialog.getText(
-            self,
-            "Standard name",
-            "Name for this standard:",
-            text=suggested,
-        )
-        if not ok or not standard_name.strip():
+        suggested = Path(paths[0]).parent.name if len(paths) > 1 else Path(paths[0]).stem
+        name, ok = QInputDialog.getText(self, "Standard name", "Name for this standard:", text=suggested)
+        if not ok or not name.strip():
             return
-        standard_name = standard_name.strip()
+        name = name.strip()
 
-        if standard_name in self.standards_data:
+        if name in self.calibration.standards:
             reply = QMessageBox.question(
-                self,
-                "Standard Exists",
-                f"'{standard_name}' is already in the list.\n\n"
-                "Add these files as more spot spectra?\n"
-                "(Composition stays the same.)",
+                self, "Standard Exists",
+                f"'{name}' is already in the list.\n\nAdd these files as more spot spectra?",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.Yes:
-                self._add_spectra_to_standard(standard_name, paths=paths)
+                self._add_spectra_to_standard(name, paths=paths)
             return
 
         entries, errors = self._load_spectra_from_paths(paths)
         if errors:
-            QMessageBox.warning(
-                self,
-                "Some Files Failed",
-                "Could not load:\n" + "\n".join(errors),
-            )
+            QMessageBox.warning(self, "Some Files Failed", "Could not load:\n" + "\n".join(errors))
         if not entries:
             QMessageBox.critical(
-                self,
-                "Error Loading Spectra",
-                "No spectrum files could be loaded.\n\n"
-                "Select measured XRF spectra (energy/counts), "
-                "not the concentration CSV.",
+                self, "Error Loading Spectra",
+                "No spectrum files could be loaded.\n\nSelect measured XRF spectra "
+                "(energy/counts), not the concentration CSV.",
             )
             return
 
-        concentrations = self._confirm_composition(standard_name, paths)
+        concentrations = self._confirm_composition(name, paths)
         if not concentrations:
             return
 
-        self.standards_data[standard_name] = {
-            'concentrations': concentrations,
-            'spectra': entries,
-            'loaded': True,
-        }
+        record = StandardRecord(
+            name=name, concentrations=concentrations,
+            spectrum_paths=[e["path"] for e in entries], enabled=True,
+        )
+        self.calibration.add_standard(record)
+        self.spectra[name] = entries
+        self._after_standards_changed(select=name)
 
-        self._upsert_standard_row(standard_name)
-        self._select_standard_row(standard_name)
-        self._check_ready_for_calibration()
-    
     def _add_spectra_to_selected(self):
-        """Add more spot spectra to the currently selected standard"""
         name = self._selected_standard_name()
         if not name:
-            QMessageBox.information(
-                self,
-                "No Selection",
-                "Select a standard in the list, then click Add Spectra…"
-            )
+            QMessageBox.information(self, "No Selection", "Select a standard first.")
             return
         self._add_spectra_to_standard(name)
-    
-    def _add_spectra_to_standard(self, standard_name, paths=None):
-        """Append spot spectra to an existing standard"""
-        if standard_name not in self.standards_data:
+
+    def _add_spectra_to_standard(self, name, paths=None):
+        record = self.calibration.standards.get(name)
+        if record is None:
             return
-        
         if not paths:
-            paths = self._pick_spectrum_files(
-                f"Add Spot Spectra to {standard_name}"
-            )
+            paths = self._pick_spectrum_files(f"Add spot spectra to {name}")
         if not paths:
             return
-        
-        # Skip duplicates by path
-        existing = {
-            entry['path'] for entry in self.standards_data[standard_name]['spectra']
-        }
-        new_paths = [p for p in paths if p not in existing]
+        new_paths = [p for p in paths if p not in record.spectrum_paths]
         if not new_paths:
-            QMessageBox.information(
-                self,
-                "Already Loaded",
-                "All selected files are already loaded for this standard."
-            )
+            QMessageBox.information(self, "Already Loaded", "All selected files are already in this standard.")
             return
-        
         entries, errors = self._load_spectra_from_paths(new_paths)
         if errors:
-            QMessageBox.warning(
-                self,
-                "Some Files Failed",
-                "Could not load:\n" + "\n".join(errors)
-            )
+            QMessageBox.warning(self, "Some Files Failed", "Could not load:\n" + "\n".join(errors))
         if not entries:
             return
-        
-        self.standards_data[standard_name]['spectra'].extend(entries)
-        self.standards_data[standard_name]['loaded'] = True
-        
-        self._upsert_standard_row(standard_name)
-        self._refresh_spots_list(standard_name)
-        self._plot_standard_spots(standard_name)
-        self._check_ready_for_calibration()
-        
-        n = len(self.standards_data[standard_name]['spectra'])
-        self.spots_list.setToolTip(f"{n} spot(s) on {standard_name}")
-    
-    def _upsert_standard_row(self, standard_name):
-        """Insert or update a row for this standard in the table"""
-        data = self.standards_data.get(standard_name)
-        if not data:
+        record.spectrum_paths.extend(e["path"] for e in entries)
+        self.spectra.setdefault(name, []).extend(entries)
+        self._after_standards_changed(select=name)
+
+    def _edit_composition(self):
+        name = self._selected_standard_name()
+        if not name:
+            QMessageBox.information(self, "No Selection", "Select a standard first.")
             return
-        
-        row = self._find_standard_row(standard_name)
-        if row is None:
-            row = self.selected_table.rowCount()
-            self.selected_table.insertRow(row)
-            self.selected_table.setItem(row, 0, QTableWidgetItem(standard_name))
-        
-        n_spots = len(data.get('spectra', []))
-        spots_item = QTableWidgetItem(str(n_spots))
-        spots_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if n_spots > 0:
-            spots_item.setForeground(Qt.green)
-        self.selected_table.setItem(row, 1, spots_item)
-        
-        n_elem = len(data.get('concentrations', {}))
-        elem_item = QTableWidgetItem(str(n_elem))
-        elem_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.selected_table.setItem(row, 2, elem_item)
-    
-    def _find_standard_row(self, standard_name):
-        """Return table row index for a standard name, or None"""
-        for row in range(self.selected_table.rowCount()):
-            item = self.selected_table.item(row, 0)
-            if item and item.text() == standard_name:
+        record = self.calibration.standards[name]
+        dialog = ConcentrationEntryDialog(
+            name, self, concentrations=dict(record.concentrations),
+            source_label="Edit certified values (wt%).",
+        )
+        if dialog.exec() == QDialog.Accepted:
+            record.concentrations = dialog.get_concentrations()
+            self._after_standards_changed(select=name, rebuild=True)
+
+    def _remove_selected_spot(self):
+        name = self._selected_standard_name()
+        if not name:
+            QMessageBox.information(self, "No Selection", "Select a standard first.")
+            return
+        item = self.spots_list.currentItem()
+        if not item:
+            QMessageBox.information(self, "No Spot Selected", "Select a spot spectrum to remove.")
+            return
+        path = item.data(Qt.UserRole)
+        record = self.calibration.standards[name]
+        record.spectrum_paths = [p for p in record.spectrum_paths if p != path]
+        self.spectra[name] = [e for e in self.spectra.get(name, []) if e["path"] != path]
+        self.calibration.intensities.get(name, {}).pop(path, None)
+        self._after_standards_changed(select=name, rebuild=True)
+
+    def _remove_selected_standard(self):
+        name = self._selected_standard_name()
+        if not name:
+            QMessageBox.information(self, "No Selection", "Select a standard first.")
+            return
+        self.calibration.remove_standard(name)
+        self.spectra.pop(name, None)
+        self.spots_list.clear()
+        self._clear_spot_plot()
+        self._after_standards_changed(rebuild=True)
+
+    def _confirm_composition(self, name, spectrum_paths):
+        found = find_composition_csv(spectrum_paths, standard_name=name)
+        initial, source = {}, ""
+        if found:
+            try:
+                initial = load_composition_csv(found)
+                source = f"Pre-filled from {found.name} ({len(initial)} elements). Check before accepting."
+            except Exception:
+                source = f"Could not parse {found.name}; enter values or load another CSV."
+        dialog = ConcentrationEntryDialog(name, self, concentrations=initial or None, source_label=source)
+        if dialog.exec() == QDialog.Accepted:
+            return dialog.get_concentrations()
+        return None
+
+    def _after_standards_changed(self, select=None, rebuild=False):
+        self._refresh_standards_table()
+        if select:
+            self._select_standard_row(select)
+        self._refresh_elements_list()
+        self._check_ready()
+        self._auto_save_standards_set()
+        if rebuild and self.calibration.has_intensities():
+            self._rebuild_curves()
+
+    # ---- standards table --------------------------------------------------- #
+    def _refresh_standards_table(self):
+        self._updating = True
+        try:
+            names = list(self.calibration.standards.keys())
+            self.standards_table.setRowCount(len(names))
+            for row, name in enumerate(names):
+                rec = self.calibration.standards[name]
+                use = QTableWidgetItem()
+                use.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                use.setCheckState(Qt.Checked if rec.enabled else Qt.Unchecked)
+                self.standards_table.setItem(row, 0, use)
+                self.standards_table.setItem(row, 1, QTableWidgetItem(name))
+                n_loaded = len(self.spectra.get(name, []))
+                n_paths = len(rec.spectrum_paths)
+                spots = QTableWidgetItem(str(n_loaded) if n_loaded == n_paths else f"{n_loaded}/{n_paths}")
+                spots.setTextAlignment(Qt.AlignCenter)
+                if n_loaded < n_paths:
+                    spots.setForeground(Qt.red)
+                    spots.setToolTip("Some spectrum files could not be found")
+                self.standards_table.setItem(row, 2, spots)
+                el = QTableWidgetItem(str(len(rec.concentrations)))
+                el.setTextAlignment(Qt.AlignCenter)
+                self.standards_table.setItem(row, 3, el)
+        finally:
+            self._updating = False
+
+    def _find_standard_row(self, name):
+        for row in range(self.standards_table.rowCount()):
+            item = self.standards_table.item(row, 1)
+            if item and item.text() == name:
                 return row
         return None
-    
-    def _select_standard_row(self, standard_name):
-        """Select a standard row and refresh its spot list"""
-        row = self._find_standard_row(standard_name)
+
+    def _select_standard_row(self, name):
+        row = self._find_standard_row(name)
         if row is not None:
-            self.selected_table.selectRow(row)
-    
+            self.standards_table.selectRow(row)
+
     def _selected_standard_name(self):
-        """Return name of currently selected standard, or None"""
-        rows = {index.row() for index in self.selected_table.selectedIndexes()}
+        rows = {i.row() for i in self.standards_table.selectedIndexes()}
         if len(rows) != 1:
             return None
-        item = self.selected_table.item(next(iter(rows)), 0)
+        item = self.standards_table.item(next(iter(rows)), 1)
         return item.text() if item else None
-    
+
     def _on_standard_selection_changed(self):
-        """Refresh spot list and plot when a standard is selected"""
         name = self._selected_standard_name()
         self._refresh_spots_list(name)
         if name:
             self._plot_standard_spots(name)
-    
-    def _refresh_spots_list(self, standard_name):
-        """Populate the spot spectra list for a standard"""
-        self.spots_list.clear()
-        if not standard_name or standard_name not in self.standards_data:
+
+    def _on_standard_item_changed(self, item):
+        if self._updating or item.column() != 0:
             return
-        
-        for i, entry in enumerate(self.standards_data[standard_name]['spectra'], start=1):
-            item = QListWidgetItem(f"Spot {i}: {entry['name']}")
-            item.setData(Qt.UserRole, entry['path'])
-            item.setToolTip(entry['path'])
+        name_item = self.standards_table.item(item.row(), 1)
+        if not name_item:
+            return
+        rec = self.calibration.standards.get(name_item.text())
+        if rec is None:
+            return
+        rec.enabled = item.checkState() == Qt.Checked
+        self._refresh_elements_list()
+        self._check_ready()
+        self._auto_save_standards_set()
+        if self.calibration.has_intensities():
+            self._rebuild_curves()
+
+    def _refresh_spots_list(self, name):
+        self.spots_list.clear()
+        if not name or name not in self.calibration.standards:
+            return
+        loaded = {e["path"] for e in self.spectra.get(name, [])}
+        for i, path in enumerate(self.calibration.standards[name].spectrum_paths, start=1):
+            item = QListWidgetItem(f"Spot {i}: {Path(path).name}" + ("" if path in loaded else "  (missing)"))
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            if path not in loaded:
+                item.setForeground(Qt.red)
             self.spots_list.addItem(item)
-    
-    def _remove_selected_spot(self):
-        """Remove the selected spot spectrum from the current standard"""
-        standard_name = self._selected_standard_name()
-        if not standard_name:
-            QMessageBox.information(
-                self, "No Selection", "Select a standard first."
-            )
-            return
-        
-        spot_item = self.spots_list.currentItem()
-        if not spot_item:
-            QMessageBox.information(
-                self, "No Spot Selected", "Select a spot spectrum to remove."
-            )
-            return
-        
-        path = spot_item.data(Qt.UserRole)
-        spectra = self.standards_data[standard_name]['spectra']
-        self.standards_data[standard_name]['spectra'] = [
-            e for e in spectra if e['path'] != path
-        ]
-        
-        if not self.standards_data[standard_name]['spectra']:
-            self.standards_data[standard_name]['loaded'] = False
-        
-        self._upsert_standard_row(standard_name)
-        self._refresh_spots_list(standard_name)
-        self._plot_standard_spots(standard_name)
-        self._check_ready_for_calibration()
-    
-    def _remove_selected_standard(self):
-        """Remove the currently selected standard and all its spectra"""
-        name = self._selected_standard_name()
-        if not name:
-            QMessageBox.information(
-                self,
-                "No Selection",
-                "Select a standard in the list, then click Remove Standard."
-            )
-            return
-        
-        row = self._find_standard_row(name)
-        self.standards_data.pop(name, None)
-        if row is not None:
-            self.selected_table.removeRow(row)
-        
-        self.spots_list.clear()
-        self._clear_spot_plot()
-        self._check_ready_for_calibration()
-    
+
+    # ---- spot spectra plot ------------------------------------------------- #
     def _clear_spot_plot(self):
-        """Clear overlay curves for spot spectra"""
         for curve in self._spot_plot_curves:
             try:
                 self.spectrum_plot.removeItem(curve)
@@ -785,357 +826,671 @@ class StandardsPanel(QWidget):
                 pass
         self._spot_plot_curves.clear()
         self.measured_curve.setData([], [])
-        self.calculated_curve.setData([], [])
-        self.background_curve.setData([], [])
-        self.residual_curve.setData([], [])
-    
-    def _plot_standard_spots(self, standard_name):
-        """Overlay spot spectra and show mean for variance check"""
+
+    def _plot_standard_spots(self, name):
         self._clear_spot_plot()
-        
-        data = self.standards_data.get(standard_name)
-        if not data or not data.get('spectra'):
-            self.spectrum_plot.setTitle('Intensity Calibration Fit', color='k')
+        entries = self.spectra.get(name, [])
+        if not entries:
+            self.spectrum_plot.setTitle("Spot spectra", color="k")
             return
-        
-        entries = data['spectra']
         n = len(entries)
-        self.spectrum_plot.setTitle(
-            f'{standard_name}: {n} spot{"s" if n != 1 else ""}',
-            color='k'
-        )
-        
-        # Light overlays for each spot
+        self.spectrum_plot.setTitle(f"{name}: {n} spot{'s' if n != 1 else ''}", color="k")
         for i, entry in enumerate(entries):
-            spec = entry['spectrum']
+            spec = entry["spectrum"]
             color = pg.intColor(i, hues=max(n, 1), values=1, maxValue=200)
             curve = self.spectrum_plot.plot(
-                spec.energy,
-                spec.counts,
-                pen=pg.mkPen(color, width=1),
+                spec.energy, spec.counts, pen=pg.mkPen(color, width=1),
                 name=f"Spot {i + 1}" if n <= 8 else None,
             )
             self._spot_plot_curves.append(curve)
-        
-        # Mean spectrum (bold)
-        mean_spec = self._mean_spectrum(entries)
-        if mean_spec is not None:
-            self.measured_curve.setData(mean_spec.energy, mean_spec.counts)
-            self.measured_curve.opts['name'] = 'Mean'
-    
-    def _mean_spectrum(self, entries):
-        """Average counts across spot spectra (requires matching energy grids)"""
-        if not entries:
-            return None
-        
-        from core.spectrum import Spectrum
-        
-        ref = entries[0]['spectrum']
-        counts_stack = []
-        for entry in entries:
-            spec = entry['spectrum']
-            if len(spec.energy) != len(ref.energy) or not np.allclose(
-                spec.energy, ref.energy, rtol=0, atol=1e-6
-            ):
-                # Different grids — skip averaging; caller still has overlays
-                return None
-            counts_stack.append(spec.counts)
-        
-        mean_counts = np.mean(np.vstack(counts_stack), axis=0)
-        return Spectrum(
-            energy=ref.energy.copy(),
-            counts=mean_counts,
-            live_time=float(np.mean([e['spectrum'].live_time for e in entries])),
-            real_time=float(np.mean([e['spectrum'].real_time for e in entries])),
-            metadata={'averaged_from': len(entries)},
-        )
-    
-    def get_standard_mean_spectrum(self, standard_name):
-        """Return mean spectrum for a standard, or first spot if grids differ"""
-        data = self.standards_data.get(standard_name)
-        if not data or not data.get('spectra'):
-            return None
-        mean = self._mean_spectrum(data['spectra'])
+        mean = _mean_spectrum(entries)
         if mean is not None:
-            return mean
-        return data['spectra'][0]['spectrum']
-    
-    def _confirm_composition(self, standard_name, spectrum_paths):
-        """Show an editable composition table, pre-filled from a nearby CSV if found."""
-        found = find_composition_csv(spectrum_paths, standard_name=standard_name)
-        initial = {}
-        source = ""
-        if found:
-            try:
-                initial = load_composition_csv(found)
-                source = (
-                    f"Pre-filled from {found.name} "
-                    f"({len(initial)} elements). Same-name matching is a hint only."
-                )
-            except Exception:
-                initial = {}
-                source = f"Could not parse {found.name}; enter values or load another CSV."
+            self.measured_curve.setData(mean.energy, mean.counts)
+        if self.left_tabs.currentIndex() == 0:
+            self.plot_stack.setCurrentIndex(0)
 
-        dialog = ConcentrationEntryDialog(
-            standard_name,
-            self,
-            concentrations=initial or None,
-            source_label=source,
-        )
-        if dialog.exec() == QDialog.Accepted:
-            return dialog.get_concentrations()
-        return None
+    # ------------------------------------------------------------------ #
+    # Elements list
+    # ------------------------------------------------------------------ #
+    def _refresh_elements_list(self):
+        previous = {
+            self.elements_list.item(i).text(): self.elements_list.item(i).checkState() == Qt.Checked
+            for i in range(self.elements_list.count())
+        }
+        kv = float(self.kv_spin.value())
+        candidates = [e["symbol"] for e in element_list_for_fit(self.calibration.standards.values(), excitation_kv=kv)]
+        suggested = set(suggest_elements(self.calibration.standards.values(), excitation_kv=kv))
+        self.elements_list.clear()
+        for sym in candidates:
+            item = QListWidgetItem(sym)
+            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            checked = previous.get(sym, sym in suggested)
+            item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            self.elements_list.addItem(item)
 
-    def _load_or_enter_concentrations(self, standard_name):
-        """Backward-compatible alias used by older call sites."""
-        return self._confirm_composition(standard_name, [])
-    
-    def _on_bg_method_changed(self, index):
-        """Handle background method selection change"""
-        method = self.bg_method_combo.currentText()
-        
-        # Hide all parameter widgets
-        self.als_params_widget.setVisible(False)
-        self.snip_params_widget.setVisible(False)
-        
-        # Show relevant parameters
-        if "AsLS" in method:
-            self.als_params_widget.setVisible(True)
-        elif "SNIP" in method:
-            self.snip_params_widget.setVisible(True)
-    
-    def _check_ready_for_calibration(self):
-        """Check if ready to run calibration"""
-        has_loaded_standards = any(
-            data.get("loaded", False) and data.get("spectra")
-            for data in self.standards_data.values()
-        )
-        has_fwhm = self.calibrator.fwhm_calibration is not None
-        
-        self.calibrate_btn.setEnabled(has_loaded_standards and has_fwhm)
-    
-    def _auto_load_calibration(self):
-        """Automatically load saved calibration on startup"""
-        cal_path = self.get_default_calibration_path()
-        
-        if cal_path.exists():
-            try:
-                self.calibration_result = CalibrationResult.load(str(cal_path))
-                
-                # Enable buttons
-                self.apply_btn.setEnabled(True)
-                self.save_btn.setEnabled(True)
-                
-                # Display results
-                self._display_calibration_results(self.calibration_result)
-                
-                # Update terminal output
-                self.terminal_output.append(f"✓ Loaded saved Standards calibration from {cal_path}")
-                
-                # Auto-apply
-                self.calibration_complete.emit(self.calibration_result)
-                
-            except Exception as e:
-                # Silently fail - no calibration available
-                self.terminal_output.append("No saved Standards calibration found (this is normal on first run)")
-    
-    def _auto_save_calibration(self):
-        """Automatically save calibration to default location"""
-        if self.calibration_result is None:
-            return
-        
-        try:
-            cal_path = self.get_default_calibration_path()
-            self.calibration_result.save(str(cal_path))
-            self.terminal_output.append(f"✓ Auto-saved Standards calibration to {cal_path}")
-        except Exception as e:
-            self.terminal_output.append(f"⚠ Auto-save failed: {str(e)}")
-    
-    def _display_calibration_results(self, result):
-        """Display calibration results in the results text box"""
-        if result and result.success:
-            # Get calibration date
-            cal_date = result.calibration_date
-            if cal_date:
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(cal_date)
-                    date_str = dt.strftime("%Y-%m-%d %H:%M")
-                except:
-                    date_str = "Unknown"
-            else:
-                date_str = "Unknown"
-            
-            results_html = f"""
-            <b>Standards Calibration Loaded</b><br><br>
-            <b>Intensity Parameters:</b><br>
-            Intensity Scale: {result.efficiency_params.get('intensity_scale', 'N/A'):.2f}<br>
-            Rh Scatter Scale: {result.efficiency_params.get('rh_scatter_scale', 'N/A'):.4f}<br><br>
-            <b>Fit Quality:</b><br>
-            R² = {result.r_squared:.4f}<br>
-            χ² = {result.chi_squared:.2f}<br><br>
-            <small>Calibrated: {date_str}</small><br>
-            <small>Auto-saved and will persist between sessions</small>
-            """
-            self.results_text.setHtml(results_html)
-    
-    def _run_calibration(self):
-        """Run intensity calibration using multiple standards"""
-        # Check if we have loaded standards
-        loaded_standards = [
-            name for name, data in self.standards_data.items()
-            if data.get('loaded', False) and data.get('spectra')
+    def _suggest_elements(self):
+        kv = float(self.kv_spin.value())
+        suggested = set(suggest_elements(self.calibration.standards.values(), excitation_kv=kv))
+        for i in range(self.elements_list.count()):
+            item = self.elements_list.item(i)
+            item.setCheckState(Qt.Checked if item.text() in suggested else Qt.Unchecked)
+
+    def _set_all_elements(self, state: bool):
+        for i in range(self.elements_list.count()):
+            self.elements_list.item(i).setCheckState(Qt.Checked if state else Qt.Unchecked)
+
+    def _checked_elements(self) -> List[str]:
+        return [
+            self.elements_list.item(i).text()
+            for i in range(self.elements_list.count())
+            if self.elements_list.item(i).checkState() == Qt.Checked
         ]
-        
-        if not loaded_standards:
-            QMessageBox.warning(
-                self,
-                "No Standards Loaded",
-                "Please add at least one standard with spot spectra before "
-                "running calibration.\n\n"
-                "Click Add Standard, then Add Spectra… for more spots."
-            )
+
+    # ------------------------------------------------------------------ #
+    # Fitting
+    # ------------------------------------------------------------------ #
+    def _check_ready(self):
+        has = any(
+            rec.enabled and self.spectra.get(name)
+            for name, rec in self.calibration.standards.items()
+        )
+        self.fit_btn.setEnabled(bool(has) and self.worker is None)
+
+    def _build_fitter(self) -> SpectrumFitter:
+        fitter = SpectrumFitter()
+        state = InstrumentState()
+        if self.fwhm_calibration is not None:
+            state.apply_fwhm_calibration(self.fwhm_calibration)
+        state.tube_profile_library = self.tube_profile_library
+        fitter.apply_instrument_state(state)
+        return fitter
+
+    def _run_fit(self):
+        elements = self._checked_elements()
+        if not elements:
+            QMessageBox.warning(self, "No Elements", "Tick at least one element on the Elements & Fit tab.")
             return
-        
-        # Check if FWHM calibration is available
-        if self.calibrator.fwhm_calibration is None:
+        used = [n for n, r in self.calibration.standards.items() if r.enabled and self.spectra.get(n)]
+        if not used:
+            QMessageBox.warning(self, "No Standards", "Add at least one standard with spot spectra and tick Use.")
+            return
+        if self.fwhm_calibration is None:
             reply = QMessageBox.question(
-                self,
-                "No FWHM Calibration",
-                "No FWHM calibration is loaded. This may affect calibration quality.\n\n"
-                "Do you want to continue anyway?",
-                QMessageBox.Yes | QMessageBox.No
+                self, "No FWHM Calibration",
+                "No FWHM calibration is loaded; peak widths will be fitted freely, "
+                "which makes intensities noisier.\n\nContinue anyway?",
+                QMessageBox.Yes | QMessageBox.No,
             )
             if reply == QMessageBox.No:
                 return
-        
-        # Show progress
-        self.terminal_output.append(f"\n{'='*50}")
-        self.terminal_output.append(f"Starting calibration with {len(loaded_standards)} standard(s):")
-        summary_lines = []
-        for name in loaded_standards:
-            n_elements = len(self.standards_data[name]['concentrations'])
-            n_spots = len(self.standards_data[name].get('spectra', []))
-            line = f"  • {name}: {n_spots} spot(s), {n_elements} elements"
-            self.terminal_output.append(line)
-            summary_lines.append(f"• {name}: {n_spots} spot(s), {n_elements} elements")
-        self.terminal_output.append(f"{'='*50}\n")
-        
-        # Multi-standard calibration is not implemented yet — be honest with the user
-        QMessageBox.information(
-            self,
-            "Multi-Standard Calibration",
-            f"{len(loaded_standards)} standard(s) are loaded:\n\n"
-            + "\n".join(summary_lines) + "\n\n"
-            "Multi-standard optimization is not available yet.\n"
-            "Use a single standard with known concentrations for now.\n"
-            "This action will be enabled when multi-standard support lands."
-        )
-        
-        self.terminal_output.append(
-            "Multi-standard calibration is not implemented yet — no run performed.\n"
-        )
-        return
-        
-        # TODO: Implement actual calibration
-        # This will involve:
-        # 1. For each standard:
-        #    - Fit spectrum with fixed FWHM from FWHM calibration
-        #    - Extract peak intensities
-        # 2. Combine all standards data
-        # 3. Optimize global parameters (intensity scale, efficiency, etc.)
-        # 4. Create CalibrationResult with all parameters
-        
-        # When calibration completes, auto-save it
-        # self._auto_save_calibration()
-    
-    def _apply_calibration(self):
-        """Apply calibration"""
-        if self.calibration_result is None:
-            QMessageBox.warning(self, "No Calibration", "Please run calibration first.")
-            return
-        
-        # Auto-save when applying
-        self._auto_save_calibration()
-        
-        # Emit signal
-        self.calibration_complete.emit(self.calibration_result)
-        
-        QMessageBox.information(
-            self,
-            "Calibration Applied",
-            "Standards calibration has been applied and saved.\n\n"
-            "This calibration will be automatically loaded next time you open the app."
-        )
-    
-    def _save_calibration(self):
-        """Save calibration to file"""
-        if self.calibration_result is None:
-            QMessageBox.warning(self, "No Calibration", "Please run calibration first.")
-            return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Standards Calibration",
-            str(Path.home() / "standards_calibration.json"),
-            "JSON Files (*.json)"
-        )
-        
-        if file_path:
-            try:
-                self.calibration_result.save(file_path)
-                QMessageBox.information(
-                    self,
-                    "Calibration Saved",
-                    f"Standards calibration saved to:\n{file_path}"
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Save Error",
-                    f"Failed to save calibration:\n{str(e)}"
-                )
-    
-    def _load_calibration(self):
-        """Load calibration from file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Standards Calibration",
-            str(Path.home()),
-            "JSON Files (*.json)"
-        )
-        
-        if file_path:
-            try:
-                self.calibration_result = CalibrationResult.load(file_path)
-                
-                # Enable buttons
-                self.apply_btn.setEnabled(True)
-                self.save_btn.setEnabled(True)
-                
-                # Display results
-                self._display_calibration_results(self.calibration_result)
-                
-                QMessageBox.information(
-                    self,
-                    "Calibration Loaded",
-                    f"Standards calibration loaded from:\n{file_path}"
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Load Error",
-                    f"Failed to load calibration:\n{str(e)}"
-                )
 
-    def restore_calibration(self, result) -> None:
-        """Install a standards calibration from a project file (no AppData write)."""
-        self.calibration_result = result
-        if result is None:
-            return
-        self.apply_btn.setEnabled(True)
-        self.save_btn.setEnabled(True)
+        n_spec = sum(len(self.spectra[n]) for n in used)
+        self._log("=" * 50)
+        self._log(f"Fitting {n_spec} spectra from {len(used)} standard(s), {len(elements)} elements:")
+        for n in used:
+            self._log(f"  • {n}: {len(self.spectra[n])} spot(s), {len(self.calibration.standards[n].concentrations)} certified elements")
+
+        fit_kwargs = {
+            "background_method": self.bg_combo.currentData(),
+            "peak_shape": self.shape_combo.currentData(),
+            "tube_element": self.tube_combo.currentText(),
+            "excitation_kv": float(self.kv_spin.value()),
+        }
+        cal_copy = copy.deepcopy(self.calibration)
+        cal_copy.fwhm_calibration = (
+            self.fwhm_calibration.to_dict() if hasattr(self.fwhm_calibration, "to_dict") and self.fwhm_calibration else None
+        )
+        spectra = {n: [(e["path"], e["spectrum"]) for e in self.spectra[n]] for n in used}
+
+        self.worker = StandardsFitWorker(
+            cal_copy, spectra, self._build_fitter(),
+            fit_kwargs=fit_kwargs, elements=elements,
+            line_selection=self.line_combo.currentData(),
+            normalise=self.normalise_combo.currentData(),
+        )
+        self.worker.progress.connect(self._on_fit_progress)
+        self.worker.finished.connect(self._on_fit_finished)
+        self.worker.failed.connect(self._on_fit_failed)
+        self.progress_bar.setRange(0, n_spec)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.fit_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.worker.start()
+
+    def _cancel_fit(self):
+        if self.worker is not None:
+            self.worker.stop()
+            self._log("Cancelling after the current spectrum…")
+
+    def _on_fit_progress(self, message, done, total):
+        self.progress_bar.setValue(done)
+        self.log_output.append(f"[{done}/{total}] {message}")
+
+    def _finish_worker(self):
+        self.worker = None
+        self.progress_bar.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+        self._check_ready()
+
+    def _on_fit_failed(self, message):
+        self._finish_worker()
+        self._log(f"✗ {message}")
+        if message != "Cancelled":
+            QMessageBox.critical(self, "Calibration Failed", message)
+
+    def _on_fit_finished(self, calibration: StandardsCalibration):
+        self._finish_worker()
+        self.legacy_result = None
+        self._adopt_calibration(calibration, load_spectra=False)
+        self._log("✓ Spectra fitted; building curves…")
+        self._rebuild_curves()
+        self._auto_save_calibration()
+        self.left_tabs.setCurrentIndex(2)
+
+    def _adopt_calibration(self, calibration: StandardsCalibration, *, load_spectra: bool):
+        """Make `calibration` the working object; optionally (re)load spectra from disk."""
+        self.calibration = calibration
+        if load_spectra:
+            for name, rec in calibration.standards.items():
+                have = {e["path"] for e in self.spectra.get(name, [])}
+                missing = [p for p in rec.spectrum_paths if p not in have and Path(p).exists()]
+                if missing:
+                    entries, errors = self._load_spectra_from_paths(missing)
+                    self.spectra.setdefault(name, []).extend(entries)
+                    for err in errors:
+                        self._log(f"  ⚠ {name}: {err}")
+                for p in rec.spectrum_paths:
+                    if not Path(p).exists():
+                        self._log(f"  ⚠ {name}: missing file {p}")
+        # Restore UI settings from the calibration
+        self._updating = True
         try:
-            self._display_calibration_results(result)
+            _set_combo_data(self.model_combo, calibration.settings.get("model", MODEL_LINEAR))
+            self.weighted_check.setChecked(bool(calibration.settings.get("weighted", True)))
+            _set_combo_data(self.line_combo, calibration.settings.get("line_selection", LINE_AUTO))
+            _set_combo_data(self.normalise_combo, calibration.settings.get("normalise", "live_time"))
+            fs = calibration.fit_settings or {}
+            _set_combo_data(self.bg_combo, fs.get("background_method", "snip"))
+            _set_combo_data(self.shape_combo, fs.get("peak_shape", "tail_gaussian"))
+            if fs.get("tube_element"):
+                idx = self.tube_combo.findText(fs["tube_element"])
+                if idx >= 0:
+                    self.tube_combo.setCurrentIndex(idx)
+            if fs.get("excitation_kv"):
+                self.kv_spin.setValue(float(fs["excitation_kv"]))
+                self._kv_from_data = True
+        finally:
+            self._updating = False
+        self._refresh_standards_table()
+        self._refresh_elements_list()
+        fitted_elements = set(calibration.fit_settings.get("elements") or [])
+        if fitted_elements:
+            for i in range(self.elements_list.count()):
+                item = self.elements_list.item(i)
+                item.setCheckState(Qt.Checked if item.text() in fitted_elements else Qt.Unchecked)
+        self._check_ready()
+
+    # ------------------------------------------------------------------ #
+    # Curves
+    # ------------------------------------------------------------------ #
+    def _on_curve_settings_changed(self, *_):
+        if self._updating:
+            return
+        if self.calibration.has_intensities():
+            self._rebuild_curves()
+
+    def _rebuild_curves(self):
+        try:
+            self.calibration.build_curves(
+                model=self.model_combo.currentData(),
+                weighted=self.weighted_check.isChecked(),
+            )
+        except Exception as exc:
+            self._log(f"✗ Curve build failed: {exc}")
+            return
+        self._refresh_all()
+
+    def _refresh_all(self):
+        self._refresh_curves_table()
+        self._refresh_points_table()
+        self._plot_selected_curve()
+        n_ok = len(self.calibration.fitted_curves())
+        has_any = bool(self.calibration.curves)
+        self.apply_btn.setEnabled(n_ok > 0 or self.legacy_result is not None)
+        self.save_btn.setEnabled(has_any or self.legacy_result is not None)
+        self.export_btn.setEnabled(has_any)
+        if has_any:
+            date = (self.calibration.calibration_date or "")[:16].replace("T", " ")
+            n_std = len([s for s in self.calibration.standards.values() if s.enabled])
+            self.curves_summary.setText(
+                f"<b>{n_ok} usable curve(s)</b> from {n_std} used standard(s) · "
+                f"model: {self.model_combo.currentText()} · "
+                f"{'weighted' if self.weighted_check.isChecked() else 'unweighted'} · "
+                f"fitted {date}"
+            )
+        elif self.legacy_result is not None:
+            self.curves_summary.setText(
+                f"Legacy intensity calibration loaded (R² = {getattr(self.legacy_result, 'r_squared', 0):.3f}). "
+                "Fit standard spectra to build element curves."
+            )
+        else:
+            self.curves_summary.setText("No calibration curves yet — fit standard spectra first.")
+
+    def _refresh_curves_table(self):
+        self._updating = True
+        try:
+            curves = list(self.calibration.curves.values())
+            self.curves_table.setRowCount(len(curves))
+            for row, c in enumerate(curves):
+                use = QTableWidgetItem()
+                use.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                use.setCheckState(Qt.Checked if c.enabled else Qt.Unchecked)
+                self.curves_table.setItem(row, 0, use)
+                self.curves_table.setItem(row, 1, QTableWidgetItem(c.element))
+                self.curves_table.setItem(row, 2, QTableWidgetItem(c.line_group))
+                self.curves_table.setItem(row, 3, _num_item(c.n_standards, "d"))
+                self.curves_table.setItem(row, 4, _num_item(c.n_spectra, "d"))
+                if c.fitted:
+                    self.curves_table.setItem(row, 5, _num_item(c.slope, ".4g"))
+                    self.curves_table.setItem(row, 6, _num_item(c.r_squared, ".4f"))
+                    self.curves_table.setItem(row, 7, _num_item(c.rmse, ".3g"))
+                else:
+                    for col in (5, 6, 7):
+                        self.curves_table.setItem(row, col, QTableWidgetItem("—"))
+                self.curves_table.setItem(row, 8, _num_item(c.mean_rsd_percent, ".1f"))
+                note = QTableWidgetItem(c.message)
+                self.curves_table.setItem(row, 9, note)
+                if not c.fitted:
+                    for col in range(self.curves_table.columnCount()):
+                        item = self.curves_table.item(row, col)
+                        if item:
+                            item.setForeground(Qt.gray)
+                elif c.message:
+                    note.setForeground(Qt.darkYellow)
+            # Keep selection on the same element
+            if self._selected_element:
+                for row, c in enumerate(curves):
+                    if c.element == self._selected_element:
+                        self.curves_table.selectRow(row)
+                        break
+                else:
+                    self._selected_element = None
+            if self._selected_element is None and curves:
+                self.curves_table.selectRow(0)
+                self._selected_element = curves[0].element
+        finally:
+            self._updating = False
+
+    def _on_curve_selection_changed(self):
+        if self._updating:
+            return
+        rows = {i.row() for i in self.curves_table.selectedIndexes()}
+        if len(rows) != 1:
+            return
+        item = self.curves_table.item(next(iter(rows)), 1)
+        if item:
+            self._selected_element = item.text()
+            self._refresh_points_table()
+            self._plot_selected_curve()
+            self.plot_stack.setCurrentIndex(1)
+
+    def _on_curve_item_changed(self, item):
+        if self._updating or item.column() != 0:
+            return
+        el_item = self.curves_table.item(item.row(), 1)
+        curve = self.calibration.curves.get(el_item.text()) if el_item else None
+        if curve is None:
+            return
+        curve.enabled = item.checkState() == Qt.Checked
+        self._refresh_all()
+
+    def _current_curve(self) -> Optional[ElementCurve]:
+        if not self._selected_element:
+            return None
+        return self.calibration.curves.get(self._selected_element)
+
+    def _refresh_points_table(self):
+        curve = self._current_curve()
+        self._updating = True
+        try:
+            points = curve.points if curve else []
+            self.points_table.setRowCount(len(points))
+            for row, p in enumerate(points):
+                use = QTableWidgetItem()
+                use.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                use.setCheckState(Qt.Checked if p.included else Qt.Unchecked)
+                self.points_table.setItem(row, 0, use)
+                self.points_table.setItem(row, 1, QTableWidgetItem(p.standard))
+                self.points_table.setItem(row, 2, _num_item(p.concentration, ".4g"))
+                self.points_table.setItem(row, 3, _num_item(p.intensity, ".4g"))
+                self.points_table.setItem(row, 4, _num_item(p.intensity_sd, ".3g"))
+                self.points_table.setItem(row, 5, _num_item(p.rsd_percent, ".1f"))
+                self.points_table.setItem(row, 6, _num_item(p.n_spots, "d"))
+                self.points_table.setItem(row, 7, _num_item(p.predicted, ".4g") if p.predicted is not None else QTableWidgetItem("—"))
+                self.points_table.setItem(row, 8, _num_item(p.residual, "+.3g") if p.residual is not None else QTableWidgetItem("—"))
+                if not p.included:
+                    for col in range(self.points_table.columnCount()):
+                        item = self.points_table.item(row, col)
+                        if item:
+                            item.setForeground(Qt.gray)
+        finally:
+            self._updating = False
+
+    def _on_point_item_changed(self, item):
+        if self._updating or item.column() != 0:
+            return
+        curve = self._current_curve()
+        std_item = self.points_table.item(item.row(), 1)
+        if curve is None or std_item is None:
+            return
+        self.calibration.set_point_included(curve.element, std_item.text(), item.checkState() == Qt.Checked)
+        self._rebuild_curves()
+
+    # ---- curve plot -------------------------------------------------------- #
+    def _clear_curve_plot(self):
+        for it in self._curve_plot_items:
+            for plot in (self.curve_plot, self.residual_plot):
+                try:
+                    plot.removeItem(it)
+                except Exception:
+                    pass
+        self._curve_plot_items.clear()
+        try:
+            self.curve_plot.legend.clear()
         except Exception:
             pass
+
+    def _plot_selected_curve(self):
+        self._clear_curve_plot()
+        curve = self._current_curve()
+        if curve is None:
+            self.curve_plot.setTitle("Calibration curve", color="k")
+            return
+        title = f"{curve.element} {curve.line_group} — "
+        if curve.fitted:
+            title += f"R² = {curve.r_squared:.4f}, RMSE = {curve.rmse:.3g} wt%, replicate RSD ≈ {curve.mean_rsd_percent:.1f}%"
+        else:
+            title += curve.message or "not fitted"
+        self.curve_plot.setTitle(title, color="k")
+
+        inc = [p for p in curve.points if p.included]
+        exc = [p for p in curve.points if not p.included]
+
+        def _scatter(points, brush, pen, name):
+            if not points:
+                return
+            x = np.array([p.concentration for p in points])
+            y = np.array([p.intensity for p in points])
+            err = np.array([p.intensity_sd for p in points])
+            sc = pg.ScatterPlotItem(x=x, y=y, size=9, brush=brush, pen=pen, name=name)
+            sc.setData(x=x, y=y, data=[p.standard for p in points])
+            sc.setToolTip("Hover a point for its standard")
+            self.curve_plot.addItem(sc)
+            self._curve_plot_items.append(sc)
+            eb = pg.ErrorBarItem(x=x, y=y, top=err, bottom=err, beam=0.0, pen=pen)
+            self.curve_plot.addItem(eb)
+            self._curve_plot_items.append(eb)
+            for p in points:
+                label = pg.TextItem(p.standard, color=(80, 80, 80), anchor=(0, 1))
+                label.setPos(p.concentration, p.intensity)
+                self.curve_plot.addItem(label)
+                self._curve_plot_items.append(label)
+
+        _scatter(inc, pg.mkBrush("#1f77b4"), pg.mkPen("#1f77b4"), "Used (±1 SD of spots)")
+        _scatter(exc, pg.mkBrush(None), pg.mkPen("#999999"), "Excluded")
+
+        if curve.fitted:
+            pts = curve.points
+            i_max = max(p.intensity for p in pts) * 1.1 if pts else 1.0
+            i_grid = np.linspace(0.0, i_max, 200)
+            c_grid = np.array([curve.evaluate(i) for i in i_grid])
+            ok = c_grid >= 0
+            fit_line = self.curve_plot.plot(c_grid[ok], i_grid[ok], pen=pg.mkPen("r", width=2), name="Fit")
+            self._curve_plot_items.append(fit_line)
+            if inc:
+                x = np.array([p.concentration for p in inc])
+                r = np.array([p.residual for p in inc])
+                e = np.array([abs(curve.slope) * p.intensity_sem for p in inc])
+                sc = pg.ScatterPlotItem(x=x, y=r, size=8, brush=pg.mkBrush("#1f77b4"), pen=pg.mkPen("#1f77b4"))
+                self.residual_plot.addItem(sc)
+                self._curve_plot_items.append(sc)
+                eb = pg.ErrorBarItem(x=x, y=r, top=e, bottom=e, beam=0.0, pen=pg.mkPen("#1f77b4"))
+                self.residual_plot.addItem(eb)
+                self._curve_plot_items.append(eb)
+        self.curve_plot.enableAutoRange()
+        self.residual_plot.enableAutoRange()
+
+    def _on_left_tab_changed(self, index):
+        if index == 0:
+            self.plot_stack.setCurrentIndex(0)
+        elif index == 2:
+            self.plot_stack.setCurrentIndex(1)
+
+    # ------------------------------------------------------------------ #
+    # Apply / save / load
+    # ------------------------------------------------------------------ #
+    def _apply_calibration(self):
+        result = self.calibration_result
+        if result is None:
+            QMessageBox.warning(self, "No Calibration", "Fit standard spectra first.")
+            return
+        self._auto_save_calibration()
+        self.calibration_complete.emit(result)
+        if isinstance(result, StandardsCalibration):
+            n = len(result.fitted_curves())
+            QMessageBox.information(
+                self, "Calibration Applied",
+                f"{n} element curve(s) applied. Fitted spectra on the Analysis tab "
+                "now report wt% for these elements.\n\n"
+                "The calibration is auto-saved and reloaded next time.",
+            )
+        else:
+            QMessageBox.information(self, "Calibration Applied", "Legacy intensity calibration applied.")
+
+    def _save_calibration(self):
+        result = self.calibration_result if self.calibration_result is not None else (
+            self.calibration if self.calibration.curves else None
+        )
+        if result is None:
+            QMessageBox.warning(self, "No Calibration", "Fit standard spectra first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Standards Calibration",
+            str(Path.home() / "standards_calibration.json"), "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            result.save(path)
+            QMessageBox.information(self, "Calibration Saved", f"Saved to:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", f"Failed to save calibration:\n{exc}")
+
+    def _load_calibration(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Standards Calibration", str(Path.home()), "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            self._load_calibration_file(path)
+            QMessageBox.information(self, "Calibration Loaded", f"Loaded from:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Failed to load calibration:\n{exc}")
+
+    def _load_calibration_file(self, path):
+        import json
+
+        with open(path) as fh:
+            data = json.load(fh)
+        result = load_any_standards_calibration(data)
+        if isinstance(result, StandardsCalibration):
+            self.legacy_result = None
+            self._adopt_calibration(result, load_spectra=True)
+            if result.has_intensities():
+                self._rebuild_curves()
+            else:
+                self._refresh_all()
+            self._log(f"✓ Loaded standards calibration from {path}")
+        else:
+            self.legacy_result = result
+            self._refresh_all()
+            self._log(f"✓ Loaded legacy intensity calibration from {path}")
+
+    def _export_csv(self):
+        if not self.calibration.curves:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Calibration CSV",
+            str(Path.home() / "standards_calibration.csv"), "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            self.calibration.export_csv(path)
+            QMessageBox.information(self, "Exported", f"Curves and points written to:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
+
+    # ---- standards set persistence ------------------------------------------ #
+    def _standards_set_dict(self):
+        return {
+            "type": "standards_set",
+            "standards": {k: v.to_dict() for k, v in self.calibration.standards.items()},
+        }
+
+    def _auto_save_standards_set(self):
+        try:
+            import json
+
+            with open(self.get_default_standards_set_path(), "w") as fh:
+                json.dump(self._standards_set_dict(), fh, indent=2)
+        except Exception as exc:
+            self._log(f"⚠ Could not auto-save standards set: {exc}")
+
+    def _save_standards_set_as(self):
+        if not self.calibration.standards:
+            QMessageBox.information(self, "Nothing to Save", "Add a standard first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Standards Set", str(Path.home() / "standards_set.json"), "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        import json
+
+        with open(path, "w") as fh:
+            json.dump(self._standards_set_dict(), fh, indent=2)
+
+    def _load_standards_set_from(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Standards Set", str(Path.home()), "JSON Files (*.json)",
+        )
+        if not path:
+            return
+        try:
+            self._load_standards_set_file(path, replace=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Error", f"Failed to load standards set:\n{exc}")
+
+    def _load_standards_set_file(self, path, *, replace: bool):
+        import json
+
+        with open(path) as fh:
+            data = json.load(fh)
+        records = {k: StandardRecord.from_dict(v) for k, v in (data.get("standards") or {}).items()}
+        if replace:
+            self.calibration = StandardsCalibration()
+            self.spectra = {}
+        for name, rec in records.items():
+            self.calibration.add_standard(rec)
+        self._adopt_calibration(self.calibration, load_spectra=True)
+        self._after_standards_changed()
+        self._refresh_all()
+        self._log(f"✓ Loaded {len(records)} standard(s) from {path}")
+
+    # ---- startup ----------------------------------------------------------- #
+    def _auto_load(self):
+        cal_path = self.get_default_calibration_path()
+        set_path = self.get_default_standards_set_path()
+        loaded_cal = False
+        if cal_path.exists():
+            try:
+                self._load_calibration_file(str(cal_path))
+                loaded_cal = isinstance(self.calibration_result, StandardsCalibration) or bool(self.calibration.standards)
+                if self.calibration_result is not None:
+                    self.calibration_complete.emit(self.calibration_result)
+            except Exception as exc:
+                self._log(f"⚠ Could not load saved calibration: {exc}")
+        if not loaded_cal and set_path.exists():
+            try:
+                self._load_standards_set_file(str(set_path), replace=False)
+            except Exception as exc:
+                self._log(f"⚠ Could not load saved standards set: {exc}")
+        if not cal_path.exists() and not set_path.exists():
+            self._log("No saved standards yet — click Add Standard to begin.")
+
+    def _auto_save_calibration(self):
+        result = self.calibration_result
+        if result is None:
+            return
+        try:
+            result.save(str(self.get_default_calibration_path()))
+            self._log(f"✓ Auto-saved calibration to {self.get_default_calibration_path()}")
+        except Exception as exc:
+            self._log(f"⚠ Auto-save failed: {exc}")
+
+    def _log(self, text: str):
+        self.log_output.append(text)
+
+
+# ---------------------------------------------------------------------- #
+# helpers
+# ---------------------------------------------------------------------- #
+def _app_data_dir() -> Path:
+    app_data = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+    if not app_data:
+        app_data = str(Path.home() / ".xrflab")
+    cal_dir = Path(app_data) / "calibrations"
+    cal_dir.mkdir(parents=True, exist_ok=True)
+    return cal_dir
+
+
+def _num_item(value, fmt) -> QTableWidgetItem:
+    try:
+        text = format(value, fmt)
+    except (TypeError, ValueError):
+        text = str(value)
+    item = QTableWidgetItem(text)
+    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    return item
+
+
+def _set_combo_data(combo: QComboBox, data):
+    for i in range(combo.count()):
+        if combo.itemData(i) == data:
+            combo.setCurrentIndex(i)
+            return
+
+
+def _mean_spectrum(entries):
+    """Average counts across spot spectra (requires matching energy grids)."""
+    if not entries:
+        return None
+    from core.spectrum import Spectrum
+
+    ref = entries[0]["spectrum"]
+    stack = []
+    for entry in entries:
+        spec = entry["spectrum"]
+        if len(spec.energy) != len(ref.energy) or not np.allclose(spec.energy, ref.energy, rtol=0, atol=1e-6):
+            return None
+        stack.append(spec.counts)
+    return Spectrum(
+        energy=ref.energy.copy(),
+        counts=np.mean(np.vstack(stack), axis=0),
+        live_time=float(np.mean([e["spectrum"].live_time for e in entries])),
+        real_time=float(np.mean([e["spectrum"].real_time for e in entries])),
+        metadata={"averaged_from": len(entries)},
+    )

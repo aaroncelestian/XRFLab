@@ -118,16 +118,28 @@ After **Apply**, the Analysis **Elements** / Fitting status should show FWHM as 
 
 ### Purpose
 
-Standards with **known concentrations** support instrument intensity calibration and FP/fisx-style work. This is separate from Analysis Semi-Quant.
+Standards with **known concentrations** build **empirical calibration curves, one per element**: net intensity (counts/s) versus certified wt%. Each standard can carry many replicate spot spectra; their scatter is the instrument precision at that concentration and is used to weight the fit. Once applied, fitted spectra on the Analysis tab report **wt% ± 1σ** for the calibrated elements instead of relative intensities.
 
-### Steps (load and prepare)
+### Steps
 
-1. Confirm FWHM status is applied (green / ready) on **Calibration → Standards**.
-2. **Add Standard** — give a name (e.g. `NIST 2586`).
-3. Attach one or more spot spectra for that standard.
-4. Enter concentrations (CSV or manual). For shipped CSVs with mg/kg, values above 100 are treated as mg/kg and converted to wt% in the UI.
-5. Optionally add replicate spots with **Add Spectra…**.
-6. On the Calibration sub-panel, set background (AsLS is a common choice), **Preview Background**, then use **Run Intensity Calibration** when available.
+**Standards sub-tab**
+
+1. Confirm FWHM status is green on **Calibration → Standards** (fits are more stable with locked widths).
+2. **Add Standard** — multi-select all replicate spot spectra for one standard, give it a name (e.g. `NIST 2586`), then confirm the certified wt% table (a nearby CSV pre-fills it; mg/kg values are converted).
+3. Repeat for every standard. **Add Spectra…** appends more spots; **Edit Composition…** fixes values later.
+4. Untick **Use** to leave a whole standard out of every curve. The set (paths + compositions) is auto-saved and restored next launch; **Save Set… / Load Set…** share it between machines.
+
+**Elements & Fit sub-tab**
+
+5. Tick the elements to calibrate. **Suggest** picks elements certified in ≥ 2 used standards at ≥ 100 ppm. Fewer elements → faster fitting (roughly 1–2 s per spectrum).
+6. Choose the intensity source (principal Kα/Lα line, or all lines), normalisation (counts/s by live time), background, peak shape and tube kV. **Use the same background and peak shape you use on the Analysis Fitting tab** — the Results label warns if they differ.
+7. **Fit Standard Spectra**. Every spot spectrum is fitted with the same element list in a background thread; progress is logged.
+
+**Curves sub-tab**
+
+8. The element table lists each curve with n standards / spectra, slope, R², RMSE (wt%) and mean replicate RSD (%). Select a row to see its standards below and the curve + residual plot on the right.
+9. Untick **Use** on a standard in the lower table to drop an outlier from that element only; untick **Use** on an element to keep it out of quantification. Curves rebuild instantly — spectra are not re-fitted. Switching **Curve model** (linear / through origin / quadratic) or **Weight by replicate scatter** also rebuilds instantly.
+10. **Apply Calibration** to use the curves on the Analysis tab (auto-saved). **Export CSV…** writes curves, per-standard points and every spot intensity for reports.
 
 ### Example files
 
@@ -137,9 +149,12 @@ Standards with **known concentrations** support instrument intensity calibration
 | Spot folders | `sample_data/data/Spectrum value from standard/Nist 2586/`, `Nist2587/`, also Till / PACS / LKSD / STDS |
 | Concentrations | `sample_data/data/NIST_SRM_2586_elements.csv`, `NIST_SRM_2587_elements.csv` |
 
-### Current limitation
+### Notes and limits
 
-**Multi-standard optimization is not implemented yet.** The Standards UI can load spectra and concentration tables, and you can load a previously saved calibration JSON if you have one, but **Run Intensity Calibration** does not yet compute a new multi-standard result. Single-spectrum **Analysis Semi-Quant** and **Batch** still work without it.
+- Curves are **empirical**: no matrix correction. Standards should resemble the unknowns (same matrix class, similar preparation). Large residuals for one standard usually mean a matrix difference, not a bad measurement — exclude it for that element or calibrate matrix groups separately.
+- A curve with only two standards is an exact fit (flagged in the Note column); add standards for a meaningful R² and uncertainty.
+- The reported ±1σ combines curve scatter, coefficient uncertainty and counting statistics of the unknown. Elements outside the calibrated intensity range are flagged in the Results label.
+- Older single-spectrum intensity-scale calibration files still load and apply as before.
 
 When you only need relative intensities on unknowns, skip ahead to Part 4.
 

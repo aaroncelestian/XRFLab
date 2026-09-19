@@ -155,8 +155,9 @@ class PeakFitter:
     HYPERMET_STEP_AMP = 0.012
     TAIL_GAUSSIAN_FRAC = 0.15
     TAIL_GAUSSIAN_SIGMA_MULT = 3.0
-    USE_CALIBRATED_SHAPES = False  # If True, lock Gaussian widths to FWHM(E)
-    # Tail-Gaussian and Hypermet never use FWHM calibration (width + tails free)
+    USE_CALIBRATED_SHAPES = False  # If True, lock the Gaussian core σ to FWHM(E)
+    # For Tail-Gaussian / Hypermet / Voigt the core σ is locked while the tail
+    # (or Lorentzian) parameters stay free in the least-squares fit.
     # Max allowed center shift during LS (keV). Weak peaks otherwise wander
     # within the old ±0.2 keV window onto neighbors / noise.
     CENTER_SHIFT_FRACTION = 0.25  # fraction of local FWHM
@@ -209,17 +210,26 @@ class PeakFitter:
 
     @classmethod
     def fwhm_cal_locks_width(cls, shape) -> bool:
-        """FWHM calibration freezes width only for pure Gaussian fits."""
+        """
+        Does the FWHM calibration lock the Gaussian core width for `shape`?
+
+        True for every supported shape once a calibration is active. For a
+        pure Gaussian this fixes the whole profile; for Tail-Gaussian,
+        Hypermet, Voigt and pseudo-Voigt only σ is fixed and the tail /
+        Lorentzian parameters remain free.
+        """
         shape = normalize_peak_shape(shape)
-        return bool(cls.USE_CALIBRATED_SHAPES) and shape == 'gaussian'
+        return bool(cls.USE_CALIBRATED_SHAPES) and shape in (
+            'gaussian', 'tail_gaussian', 'hypermet', 'voigt', 'pseudo_voigt'
+        )
 
     @classmethod
     def set_fwhm_calibration(cls, calibration):
         """
         Apply a detector FWHM calibration for subsequent peak fits.
 
-        Gaussian fits lock width to FWHM(E). Tail-Gaussian and Hypermet
-        ignore the calibration (core width and tail parameters stay free).
+        All shapes lock their Gaussian core σ to FWHM(E)/2.355. Tail-Gaussian
+        and Hypermet keep their tail parameters free; Voigt keeps γ free.
         """
         from core.instrument_state import DetectorModel
 
@@ -383,6 +393,73 @@ class PeakFitter:
         if shape == 'pseudo_voigt':
             return {'sigma': sigma, 'eta': 0.3}
         return {'sigma': sigma}
+
+    @staticmethod
+    def shape_extra_bounds(shape, sigma):
+        """
+        Free non-core parameters of `shape` when the Gaussian σ is locked.
+
+        Returns (names, p0, lower, upper). Empty for a pure Gaussian.
+        """
+        shape = normalize_peak_shape(shape)
+        sigma = max(float(sigma), 1e-6)
+        if shape == 'tail_gaussian':
+            return (
+                ['tail_fraction', 'tail_sigma'],
+                [PeakFitter.TAIL_GAUSSIAN_FRAC, sigma * PeakFitter.TAIL_GAUSSIAN_SIGMA_MULT],
+                [0.0, sigma],
+                [0.5, sigma * 10.0],
+            )
+        if shape == 'hypermet':
+            return (
+                ['tail_amplitude', 'tail_beta', 'step_amplitude'],
+                [
+                    PeakFitter.HYPERMET_TAIL_AMP,
+                    sigma * PeakFitter.HYPERMET_TAIL_BETA_SIGMA,
+                    PeakFitter.HYPERMET_STEP_AMP,
+                ],
+                [0.0, max(sigma * 0.5, 1e-4), 0.0],
+                [0.5, sigma * 15.0, 0.1],
+            )
+        if shape == 'voigt':
+            return (
+                ['gamma'],
+                [sigma * PeakFitter.VOIGT_GAMMA_RATIO],
+                [0.001],
+                [sigma * 2.0],
+            )
+        if shape == 'pseudo_voigt':
+            return (['eta'], [0.3], [0.0], [1.0])
+        return ([], [], [], [])
+
+    @staticmethod
+    def model_core_locked(x, amplitude, center, sigma, shape, extras):
+        """Profile with locked σ and explicit extra shape parameters."""
+        names, *_ = PeakFitter.shape_extra_bounds(shape, sigma)
+        sp = {'sigma': float(sigma)}
+        sp.update({n: float(v) for n, v in zip(names, extras)})
+        peak = Peak(
+            energy=float(center),
+            amplitude=float(amplitude),
+            fwhm=2.355 * float(sigma),
+            area=0.0,
+            shape=normalize_peak_shape(shape),
+            shape_params=sp,
+        )
+        return PeakFitter.evaluate_peak(peak, x)
+
+    @staticmethod
+    def fwhm_for_shape(sigma, shape, shape_params=None):
+        """FWHM of the profile (Voigt combines σ and γ; others 2.355σ)."""
+        shape = normalize_peak_shape(shape)
+        sigma = float(sigma)
+        if shape == 'voigt':
+            sp = shape_params or {}
+            gamma = float(sp.get('gamma', sigma * PeakFitter.VOIGT_GAMMA_RATIO))
+            fwhm_g = 2.355 * sigma
+            fwhm_l = 2.0 * gamma
+            return 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
+        return 2.355 * sigma
 
     @staticmethod
     def compute_peak_area(amplitude, sigma, shape, shape_params=None):
@@ -594,11 +671,15 @@ class PeakFitter:
         # Use energy-dependent FWHM for better initial guess (or locked Compton width)
         fwhm_guess = fwhm_estimate
         sigma_guess = fwhm_guess / 2.355  # Convert FWHM to sigma
-        # Lock width for Compton (fixed_fwhm) or Gaussian + FWHM calibration.
-        # Tail-Gaussian / Hypermet never lock to FWHM(E).
-        lock_width = (
-            PeakFitter.fwhm_cal_locks_width(shape) or (fixed_fwhm is not None)
-        )
+        # Three width regimes:
+        #   lock_shape – fixed_fwhm given (Compton): σ and all extras fixed
+        #   lock_core  – FWHM calibration active: σ fixed, tail/γ extras free
+        #   free       – everything fitted
+        # For a pure Gaussian lock_core and lock_shape coincide.
+        lock_shape = fixed_fwhm is not None
+        cal_locks = PeakFitter.fwhm_cal_locks_width(shape)
+        lock_core = cal_locks and not lock_shape and shape != 'gaussian'
+        lock_width = lock_shape or (shape == 'gaussian' and cal_locks)
         dE = 0.0 if fix_center else PeakFitter.center_shift_limit(
             center_guess, known_line=known_line, center_tolerance=center_tolerance
         )
@@ -607,7 +688,48 @@ class PeakFitter:
         try:
             shape_params = {}
             
-            if shape == 'gaussian':
+            if lock_core:
+                # Calibrated core width; tail / Lorentzian parameters free.
+                sigma_fixed = sigma_guess
+                names, p0_extra, lo_extra, hi_extra = PeakFitter.shape_extra_bounds(
+                    shape, sigma_fixed
+                )
+                if fix_center:
+                    def core_locked_fixed_center(x, amplitude, *extras):
+                        return PeakFitter.model_core_locked(
+                            x, amplitude, center_guess, sigma_fixed, shape, extras
+                        )
+                    p0 = [amplitude_guess, *p0_extra]
+                    if bounds is None:
+                        bounds = ([0, *lo_extra], [np.inf, *hi_extra])
+                    popt, _ = optimize.curve_fit(
+                        core_locked_fixed_center, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=8000,
+                    )
+                    amplitude = popt[0]
+                    center = center_guess
+                    extras = popt[1:]
+                else:
+                    def core_locked(x, amplitude, center, *extras):
+                        return PeakFitter.model_core_locked(
+                            x, amplitude, center, sigma_fixed, shape, extras
+                        )
+                    p0 = [amplitude_guess, center_guess, *p0_extra]
+                    if bounds is None:
+                        bounds = ([0, c_lo, *lo_extra], [np.inf, c_hi, *hi_extra])
+                    popt, _ = optimize.curve_fit(
+                        core_locked, x_fit, y_fit, p0=p0,
+                        bounds=bounds, maxfev=8000,
+                    )
+                    amplitude, center = popt[0], popt[1]
+                    extras = popt[2:]
+                sigma = sigma_fixed
+                shape_params = {'sigma': sigma}
+                shape_params.update({n: float(v) for n, v in zip(names, extras)})
+                fwhm = PeakFitter.fwhm_for_shape(sigma, shape, shape_params)
+                area = PeakFitter.compute_peak_area(amplitude, sigma, shape, shape_params)
+
+            elif shape == 'gaussian':
                 if lock_width:
                     sigma_fixed = sigma_guess
                     if fix_center:

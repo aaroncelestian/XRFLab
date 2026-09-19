@@ -331,6 +331,12 @@ class MainWindow(QMainWindow):
         # Tube profiles (may already be loaded in panel __init__)
         if self.tube_profile_panel.get_library() is not None:
             self.on_tube_profiles_changed(self.tube_profile_panel.get_library())
+
+        # Standards calibration auto-loaded from disk in panel __init__
+        if self.standards_panel.calibration_result is not None:
+            self.on_calibration_applied(
+                self.standards_panel.calibration_result, switch_tab=False
+            )
         
         layout.addWidget(self.tab_widget)
     
@@ -391,8 +397,11 @@ class MainWindow(QMainWindow):
             fwhm_color = "#b36b00"
 
         std = getattr(self.standards_panel, "calibration_result", None) if hasattr(self, "standards_panel") else None
-        if std is not None and getattr(std, "success", False):
-            std_txt = "<b>Standards</b> intensity calibration stored"
+        curves = getattr(std, "fitted_curves", None)
+        if callable(curves) and curves():
+            std_txt = f"<b>Standards</b> {len(curves())} element curve(s) → wt%"
+        elif std is not None and getattr(std, "success", False):
+            std_txt = "<b>Standards</b> legacy intensity calibration stored"
         else:
             std_txt = "<b>Standards</b> optional — not required for Semi-Quant"
 
@@ -729,7 +738,9 @@ class MainWindow(QMainWindow):
             self.tube_profile_panel.restore_library(library)
             self.on_tube_profiles_changed(library)
         if cals.get("standards"):
-            std = CalibrationResult.from_dict(cals["standards"])
+            from core.standards_calibration import load_any_standards_calibration
+
+            std = load_any_standards_calibration(cals["standards"])
             self.standards_panel.restore_calibration(std)
             self.session.instrument.standards_calibration = std
 
@@ -1345,10 +1356,20 @@ class MainWindow(QMainWindow):
                     'sample_contains_tube_element', False
                 ),
             )
-            self.session.set_concentrations(concentrations, method="semi_quant_area")
+            method = "semi_quant_area"
+            # Standards calibration curves → wt% when available
+            calibrated, method_label = self._quantify_with_standards(
+                self.fit_result.peaks, self.fit_result, fit_params
+            )
+            if calibrated:
+                concentrations = calibrated
+                method = "standards_curve"
+            self.session.set_concentrations(concentrations, method=method)
             self.results_panel.set_fp_live(False)
             self.results_panel.set_formula_summary("")
             self.results_panel.set_quantification(concentrations)
+            if method_label:
+                self.results_panel.set_method_label(method_label)
 
             identified = []
             seen = set()
@@ -1577,10 +1598,19 @@ class MainWindow(QMainWindow):
                     'sample_contains_tube_element', False
                 ),
             )
-            self.session.set_concentrations(concentrations, method="semi_quant_area")
+            method = "semi_quant_area"
+            calibrated, method_label = self._quantify_with_standards(
+                self.fit_result.peaks, self.fit_result, fit_params
+            )
+            if calibrated:
+                concentrations = calibrated
+                method = "standards_curve"
+            self.session.set_concentrations(concentrations, method=method)
             self.results_panel.set_fp_live(False)
             self.results_panel.set_formula_summary("")
             self.results_panel.set_quantification(concentrations)
+            if method_label:
+                self.results_panel.set_method_label(method_label)
             n = len(concentrations)
             
             if n == 0:
@@ -1924,18 +1954,18 @@ class MainWindow(QMainWindow):
             fwhm_0_ev = fwhm_calibration.parameters['fwhm_0'] * 1000
             epsilon_ev = fwhm_calibration.parameters['epsilon'] * 1000
             self.status_bar.showMessage(
-                f"FWHM calibration applied (Gaussian widths locked): "
+                f"FWHM calibration applied (core widths locked for all peak shapes): "
                 f"FWHM₀={fwhm_0_ev:.1f} eV, "
                 f"ε={epsilon_ev:.2f} eV/keV (R²={fwhm_calibration.r_squared:.4f}). "
-                f"Tail-Gaussian and Hypermet ignore FWHM calibration.",
+                f"Tail-Gaussian / Hypermet tails stay free.",
                 8000
             )
         else:
             self.status_bar.showMessage(
-                f"FWHM calibration applied (Gaussian widths locked): "
+                f"FWHM calibration applied (core widths locked for all peak shapes): "
                 f"{fwhm_calibration.model_type} model "
                 f"(R²={fwhm_calibration.r_squared:.4f}). "
-                f"Tail-Gaussian and Hypermet ignore FWHM calibration.",
+                f"Tail-Gaussian / Hypermet tails stay free.",
                 8000
             )
 
@@ -1947,6 +1977,8 @@ class MainWindow(QMainWindow):
         self.session.apply_instrument_to_fitter(self.fitter)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         self.element_panel.update_tube_profile_status(library)
+        if hasattr(self, "standards_panel"):
+            self.standards_panel.set_tube_profile_library(library)
         if SHOW_TUBE_PROFILE_CALIBRATION:
             n_meas = sum(1 for p in library.profiles.values() if p.source == 'measured')
             self.status_bar.showMessage(
@@ -1957,18 +1989,91 @@ class MainWindow(QMainWindow):
             )
         self._refresh_calibration_status()
     
-    def on_calibration_applied(self, calibration_result):
+    def on_calibration_applied(self, calibration_result, *, switch_tab=True):
         """Handle standards calibration being applied"""
+        from core.standards_calibration import StandardsCalibration
+
         self.session.instrument.standards_calibration = calibration_result
-        self.status_bar.showMessage(
-            f"Standards calibration stored: FWHM₀={calibration_result.fwhm_0*1000:.1f} eV, "
-            f"ε={calibration_result.epsilon*1000:.2f} eV",
-            5000
-        )
+        if isinstance(calibration_result, StandardsCalibration):
+            curves = calibration_result.fitted_curves()
+            elements = ", ".join(c.element for c in curves)
+            self.status_bar.showMessage(
+                f"Standards calibration active: {len(curves)} element curve(s) "
+                f"({elements}) — fitted spectra now report wt% for these elements",
+                8000
+            )
+        else:
+            self.status_bar.showMessage(
+                f"Legacy standards calibration stored: "
+                f"FWHM₀={calibration_result.fwhm_0*1000:.1f} eV, "
+                f"ε={calibration_result.epsilon*1000:.2f} eV",
+                5000
+            )
         
-        # Switch back to analysis tab
-        self.tab_widget.setCurrentIndex(0)
+        if switch_tab:
+            self.tab_widget.setCurrentIndex(0)
         self._refresh_calibration_status()
+
+    def _active_standards_curves(self):
+        """Return the StandardsCalibration with usable curves, or None."""
+        from core.standards_calibration import StandardsCalibration
+
+        cal = self.session.instrument.standards_calibration
+        if isinstance(cal, StandardsCalibration) and cal.fitted_curves():
+            return cal
+        return None
+
+    def _quantify_with_standards(self, peaks, fit_result=None, fit_params=None):
+        """
+        Convert fitted peaks to wt% using the active standards curves.
+
+        Returns (concentrations, method_label) or (None, None) when no
+        curve-based calibration is active.
+        """
+        from core.peak_fitting import normalize_peak_shape
+
+        cal = self._active_standards_curves()
+        if cal is None or self.current_spectrum is None:
+            return None, None
+        mismatches = []
+        if fit_params:
+            cal_fs = cal.fit_settings or {}
+            bg = str(fit_params.get('background_method', '')).lower()
+            cal_bg = str(cal_fs.get('background_method', '')).lower()
+            if cal_bg and bg and bg != cal_bg:
+                mismatches.append(f"background {bg} vs {cal_bg}")
+            shape = normalize_peak_shape(fit_params.get('peak_shape'))
+            cal_shape = normalize_peak_shape(cal_fs.get('peak_shape'))
+            if cal_shape and shape != cal_shape:
+                mismatches.append(f"peak shape {shape} vs {cal_shape}")
+        spectrum = self.current_spectrum
+        try:
+            concentrations = cal.quantify(
+                peaks,
+                spectrum.live_time,
+                real_time=spectrum.real_time,
+                fit_result=fit_result,
+                energy=spectrum.energy,
+            )
+        except Exception as exc:
+            print(f"Standards quantification failed: {exc}")
+            return None, None
+        if not concentrations:
+            return None, None
+        out_of_range = [e for e, v in concentrations.items() if not v.get("in_range", True)]
+        label = (
+            f"Method: standards calibration curves (wt%, ±1σ) — "
+            f"{len(concentrations)} element(s)"
+        )
+        if out_of_range:
+            label += f"; outside calibrated range: {', '.join(out_of_range)}"
+        if mismatches:
+            label += (
+                "; ⚠ fit settings differ from calibration ("
+                + "; ".join(mismatches)
+                + ") — match them on the Fitting tab"
+            )
+        return concentrations, label
     
     def closeEvent(self, event):
         """Handle window close event"""

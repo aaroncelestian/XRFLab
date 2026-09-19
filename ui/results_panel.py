@@ -445,7 +445,30 @@ class ResultsPanel(QWidget):
         else:
             self.results_data = list(results)
             self._populate_table(self.results_table, results, is_fp=False)
-            self._update_total_label(self.total_label, results, is_fp=False)
+            self._update_total_label(
+                self.total_label, results, is_fp=False,
+                calibrated=(method == "standards_curve"),
+            )
+            self._set_semi_quant_headers(calibrated=(method == "standards_curve"))
+            if method == "standards_curve":
+                self.set_method_label(
+                    "Method: standards calibration curves (wt%, ±1σ)"
+                )
+            else:
+                self.set_method_label(
+                    "Method: area-normalized semi-quant (not FP wt%)"
+                )
+
+    def set_method_label(self, text: str) -> None:
+        if hasattr(self, "method_label"):
+            self.method_label.setText(text)
+
+    def _set_semi_quant_headers(self, *, calibrated: bool) -> None:
+        if calibrated:
+            labels = ["Element", "wt%", "± 1σ", "Line"]
+        else:
+            labels = ["Element", "Rel. Intensity", "Uncertainty", "Line"]
+        self.results_table.setHorizontalHeaderLabels(labels)
 
     def _populate_table(self, table, results, *, is_fp: bool):
         table.setRowCount(len(results))
@@ -486,10 +509,15 @@ class ResultsPanel(QWidget):
                     if item is not None:
                         item.setBackground(assumed_brush)
 
-    def _update_total_label(self, label, results, *, is_fp: bool):
+    def _update_total_label(self, label, results, *, is_fp: bool, calibrated: bool = False):
         total = sum(float(r.get("concentration", 0.0)) for r in results)
         if is_fp:
             label.setText(f"Analytical total: {total:.2f} %")
+        elif calibrated:
+            # Only calibrated elements are listed; the total is informational
+            label.setText(f"Sum of calibrated elements: {total:.2f} wt%")
+            label.setStyleSheet("")
+            return
         else:
             label.setText(f"Sum of relative intensities: {total:.2f} %")
         if 98 <= total <= 102:
@@ -577,6 +605,7 @@ class ResultsPanel(QWidget):
         self.total_label.setStyleSheet("")
         self.fp_total_label.setText("Analytical total: -- %")
         self.fp_total_label.setStyleSheet("")
+        self._set_semi_quant_headers(calibrated=False)
         if hasattr(self, "method_label"):
             self.method_label.setText(
                 "Method: area-normalized semi-quant (not FP wt%)"

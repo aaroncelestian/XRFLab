@@ -51,6 +51,12 @@ XRFLab now includes a comprehensive spectrum fitting engine that performs:
 - Physically complete ICC model; more free parameters than Tail-Gaussian
 - Peak area is Gaussian + tail; the step is treated as a shelf, not peak counts
 
+**FWHM calibration and peak shapes**
+- With an FWHM calibration applied (Calibration → FWHM), the Gaussian *core* width of every shape is locked to FWHM(E)/2.355.
+- Gaussian: the whole profile is fixed except amplitude and centre.
+- Tail-Gaussian: tail fraction and tail width stay free; Hypermet: tail amplitude, β and step stay free; Voigt: γ stays free.
+- Without a calibration all width parameters are free in the least-squares fit.
+
 #### Peak Detection
 
 **Element-Based**

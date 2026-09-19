@@ -1078,8 +1078,8 @@ class ElementPanel(QWidget):
         Update Fitting-tab FWHM status from an applied calibration (or clear it).
 
         Pass a calibration to store it; call with no argument to refresh after
-        the peak-shape model changes. FWHM calibration locks widths for
-        Gaussian only — Tail-Gaussian and Hypermet ignore it.
+        the peak-shape model changes. The calibration locks the Gaussian core
+        width for every shape; Tail-Gaussian / Hypermet keep tails free.
         """
         if fwhm_calibration is not _FWHM_STATUS_UNSET:
             self._fwhm_calibration = fwhm_calibration
@@ -1128,13 +1128,19 @@ class ElementPanel(QWidget):
             return
 
         shape_label = peak_shape_ui_label(shape)
+        if shape == 'hypermet':
+            free_txt = "tail amplitude / β / step free"
+        elif shape == 'tail_gaussian':
+            free_txt = "tail fraction / tail width free"
+        elif shape == 'voigt':
+            free_txt = "Lorentzian γ free"
+        else:
+            free_txt = "shape extras free"
         self.fwhm_status_label.setText(
-            f"FWHM calibration is not applied to {shape_label}. "
-            f"Width and tail parameters are free in LS. "
-            f"Switch to Gaussian to lock widths to FWHM(E) "
-            f"({cal_summary}{fe_txt})."
+            f"FWHM core locked for {shape_label} ({free_txt}): "
+            f"{cal_summary}{fe_txt}"
         )
-        self.fwhm_status_label.setStyleSheet(warn_style)
+        self.fwhm_status_label.setStyleSheet(ok_style)
 
     def update_tube_profile_status(self, library=None):
         """Show which per-kV tube profiles are available for Analysis."""

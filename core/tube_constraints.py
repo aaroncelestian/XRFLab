@@ -183,11 +183,15 @@ def fit_peak_with_amplitude_prior(
     prior = float(amplitude_prior)
     w = float(prior_weight)
 
-    # Gaussian (and Compton fixed_fwhm): lock width to FWHM(E).
-    # Tail-Gaussian / Hypermet: FWHM calibration does not apply — free LS.
+    # Width regimes (see PeakFitter.fit_single_peak):
+    #   fixed_fwhm (Compton)      → σ and all extras fixed to defaults
+    #   FWHM calibration active   → σ fixed; tail / γ extras free
+    #   otherwise                 → no prior fit possible without a locked
+    #                               width; fall back to the plain LS fit.
     shape = normalize_peak_shape(shape)
-    lock_width = (shape == 'gaussian') or (fixed_fwhm is not None)
-    if not lock_width:
+    lock_shape = fixed_fwhm is not None
+    cal_locks = PeakFitter.fwhm_cal_locks_width(shape)
+    if not (lock_shape or cal_locks):
         return PeakFitter.fit_single_peak(
             energy, counts, initial_center,
             shape=shape,
@@ -196,9 +200,19 @@ def fit_peak_with_amplitude_prior(
             fixed_fwhm=fixed_fwhm,
         )
 
+    if lock_shape or shape == 'gaussian':
+        names, p0_extra, lo_extra, hi_extra = [], [], [], []
+    else:
+        names, p0_extra, lo_extra, hi_extra = PeakFitter.shape_extra_bounds(shape, sigma)
+
+    def _model(amp, extras):
+        if names:
+            return PeakFitter.model_core_locked(x, amp, center, sigma, shape, extras)
+        return PeakFitter.model_with_defaults(x, amp, center, sigma, shape)
+
     def residual(params):
         amp = params[0]
-        model = PeakFitter.model_with_defaults(x, amp, center, sigma, shape)
+        model = _model(amp, params[1:])
         data_resid = (model - y) / sigma_data
         prior_resid = np.array([w * (amp - prior) / max(prior, 1.0)])
         return np.concatenate([data_resid, prior_resid])
@@ -206,11 +220,12 @@ def fit_peak_with_amplitude_prior(
     try:
         result = optimize.least_squares(
             residual,
-            x0=np.array([amp0]),
-            bounds=([0.0], [np.inf]),
+            x0=np.array([amp0, *p0_extra]),
+            bounds=([0.0, *lo_extra], [np.inf, *hi_extra]),
             max_nfev=5000,
         )
         amp = float(result.x[0])
+        extras = [float(v) for v in result.x[1:]]
     except Exception as e:
         print(f"Prior fit failed at {initial_center:.3f} keV: {e}")
         return PeakFitter.fit_single_peak(
@@ -219,13 +234,12 @@ def fit_peak_with_amplitude_prior(
             fix_center=fix_center, fixed_fwhm=fixed_fwhm,
         )
 
-    fwhm = 2.355 * sigma
-    sp = PeakFitter.default_shape_params(shape, sigma)
-    if shape == 'voigt':
-        gamma = sp['gamma']
-        fwhm_g = fwhm
-        fwhm_l = 2.0 * gamma
-        fwhm = 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
+    if names:
+        sp = {'sigma': sigma}
+        sp.update(dict(zip(names, extras)))
+    else:
+        sp = PeakFitter.default_shape_params(shape, sigma)
+    fwhm = PeakFitter.fwhm_for_shape(sigma, shape, sp)
     area = PeakFitter.compute_peak_area(amp, sigma, shape, sp)
 
     return Peak(
@@ -279,9 +293,11 @@ def fit_overlap_doublet(
         a_t0 = float(tube_amplitude_prior)
 
     shape = normalize_peak_shape(shape)
-    # Joint locked-FWHM doublet is Gaussian-only. Other shapes fall back to
-    # sequential free-width fits in the caller (FWHM calibration does not apply).
-    if shape != 'gaussian':
+    # The joint doublet needs a locked detector width: always true for a
+    # Gaussian, and for other shapes once an FWHM calibration is active
+    # (core σ locked, default tails). Otherwise the caller falls back to
+    # sequential free-width fits.
+    if shape != 'gaussian' and not PeakFitter.fwhm_cal_locks_width(shape):
         return None, None
 
     def model(a_t, a_s):
@@ -313,12 +329,7 @@ def fit_overlap_doublet(
         return None, None
 
     sp = PeakFitter.default_shape_params(shape, sigma)
-    fwhm_out = fwhm
-    if shape == 'voigt':
-        gamma = sp['gamma']
-        fwhm_g = fwhm
-        fwhm_l = 2.0 * gamma
-        fwhm_out = 0.5346 * fwhm_l + np.sqrt(0.2166 * fwhm_l**2 + fwhm_g**2)
+    fwhm_out = PeakFitter.fwhm_for_shape(sigma, shape, sp)
     area_t = PeakFitter.compute_peak_area(a_t, sigma, shape, sp)
     area_s = PeakFitter.compute_peak_area(a_s, sigma, shape, sp)
 

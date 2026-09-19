@@ -121,8 +121,8 @@ def test_fwhm_calibration_locks_gaussian_only():
         PeakFitter._fwhm_calibration = cal
 
         assert PeakFitter.fwhm_cal_locks_width("gaussian")
-        assert not PeakFitter.fwhm_cal_locks_width("tail_gaussian")
-        assert not PeakFitter.fwhm_cal_locks_width("hypermet")
+        assert PeakFitter.fwhm_cal_locks_width("tail_gaussian")
+        assert PeakFitter.fwhm_cal_locks_width("hypermet")
 
         locked = PeakFitter.fit_single_peak(
             energy, counts, 6.40, shape="gaussian", known_line=True
@@ -130,12 +130,29 @@ def test_fwhm_calibration_locks_gaussian_only():
         assert locked is not None
         assert abs(locked.fwhm - 0.30) < 0.01
 
+        # Non-Gaussian shapes lock the core σ too, but keep tails free
+        for shape in ("tail_gaussian", "hypermet"):
+            for fix_center in (False, True):
+                peak = PeakFitter.fit_single_peak(
+                    energy, counts, 6.40, shape=shape,
+                    known_line=True, fix_center=fix_center,
+                )
+                assert peak is not None
+                assert abs(peak.fwhm - 0.30) < 0.01
+                assert abs(peak.shape_params["sigma"] - 0.30 / 2.355) < 1e-9
+                if shape == "tail_gaussian":
+                    assert "tail_fraction" in peak.shape_params
+                    assert 0.0 <= peak.shape_params["tail_fraction"] <= 0.5
+                else:
+                    assert "tail_beta" in peak.shape_params
+
+        # Without calibration the same shapes recover the true (narrower) width
+        PeakFitter.USE_CALIBRATED_SHAPES = False
         for shape in ("tail_gaussian", "hypermet"):
             peak = PeakFitter.fit_single_peak(
                 energy, counts, 6.40, shape=shape, known_line=True
             )
             assert peak is not None
-            assert abs(peak.fwhm - 0.30) > 0.05
             assert abs(peak.fwhm - 2.355 * true_sigma) < 0.05
     finally:
         PeakFitter._active = prev_active
