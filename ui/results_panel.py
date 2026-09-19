@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QColor, QBrush
 
 from core.matrix_model import MatrixAssumptions, MatrixKind, coerce_matrix_kind
+from core.standards_calibration import crm_concentration_tooltip, crm_display_concentration
 
 
 class ResultsPanel(QWidget):
@@ -18,6 +19,7 @@ class ResultsPanel(QWidget):
     
     element_selected = Signal(str)  # Element symbol clicked in results table
     quantify_requested = Signal()  # Emitted when Run Quant is clicked
+    standards_quantify_requested = Signal()
     fp_quantify_requested = Signal()
     export_fp_requested = Signal()
     matrix_assumptions_changed = Signal()
@@ -56,13 +58,24 @@ class ResultsPanel(QWidget):
         self.quantify_button = QPushButton("Semi-Quant")
         self.quantify_button.setObjectName("primaryButton")
         self.quantify_button.setToolTip(
-            "Area-normalized relative intensities (semi-quantitative).\n"
-            "Not fundamental-parameters concentrations."
+            "Area-normalized relative intensities of labeled peaks.\n"
+            "Not wt% and not a closed assay."
         )
         self.quantify_button.clicked.connect(
             lambda _checked=False: self.quantify_requested.emit()
         )
         button_row.addWidget(self.quantify_button)
+
+        self.standards_quantify_button = QPushButton("Standards wt%")
+        self.standards_quantify_button.setToolTip(
+            "Targeted CRM-curve wt% for elements marked Report on\n"
+            "Calibration → Standards. Independent determinations —\n"
+            "not a closed assay. Use FP Composition for a survey."
+        )
+        self.standards_quantify_button.clicked.connect(
+            lambda _checked=False: self.standards_quantify_requested.emit()
+        )
+        button_row.addWidget(self.standards_quantify_button)
         
         self.export_button = QPushButton("Export Results")
         button_row.addWidget(self.export_button)
@@ -81,10 +94,10 @@ class ResultsPanel(QWidget):
 
         self.fp_button = QPushButton("FP Composition")
         self.fp_button.setToolTip(
-            "Fundamental-parameters wt% using the matrix model above.\n"
-            "Excitation is a polychromatic tube spectrum (continuum + anode\n"
-            "K/L lines) at the kV setting, not a single energy. K lines are\n"
-            "preferred over L/M. H2O, OH, and CO2 are user assumptions.\n"
+            "Standardless FP survey using the matrix model above.\n"
+            "Only fitted measured elements plus H2O/OH/CO2 assumptions.\n"
+            "Not CRM-traceable and not a certified bulk assay —\n"
+            "use Standards wt% to check bias on target elements.\n"
             "After the first run, changing knobs recomputes live."
         )
         self.fp_button.clicked.connect(
@@ -231,6 +244,7 @@ class ResultsPanel(QWidget):
     def _create_semi_quant_group(self):
         """Semi-quantitative relative intensities (Results tab)."""
         group = QGroupBox("Semi-Quant (relative intensity)")
+        self.semi_quant_group = group
         layout = QVBoxLayout(group)
         
         self.results_table = QTableWidget()
@@ -386,18 +400,19 @@ class ResultsPanel(QWidget):
         else:
             self.results_data = list(results)
             self._populate_table(self.results_table, results, is_fp=False)
+            calibrated = method in {"standards_curve", "standards_overlap"}
             self._update_total_label(
                 self.total_label, results, is_fp=False,
-                calibrated=(method == "standards_curve"),
+                calibrated=calibrated,
             )
-            self._set_semi_quant_headers(calibrated=(method == "standards_curve"))
-            if method == "standards_curve":
+            self._set_semi_quant_headers(calibrated=calibrated)
+            if method in {"standards_curve", "standards_overlap"}:
                 self.set_method_label(
-                    "Method: standards calibration curves (wt%, ±1σ)"
+                    "CRM curve wt% — independent determinations, not a closed assay"
                 )
             else:
                 self.set_method_label(
-                    "Method: area-normalized semi-quant (not FP wt%)"
+                    "Method: area-normalized semi-quant (not wt%)"
                 )
 
     def set_method_label(self, text: str) -> None:
@@ -407,8 +422,12 @@ class ResultsPanel(QWidget):
     def _set_semi_quant_headers(self, *, calibrated: bool) -> None:
         if calibrated:
             labels = ["Element", "wt%", "± 1σ", "Line"]
+            title = "Standards wt% (targeted CRM curves)"
         else:
             labels = ["Element", "Rel. Intensity", "Uncertainty", "Line"]
+            title = "Semi-Quant (relative intensity)"
+        if hasattr(self, "semi_quant_group"):
+            self.semi_quant_group.setTitle(title)
         self.results_table.setHorizontalHeaderLabels(labels)
 
     def _populate_table(self, table, results, *, is_fp: bool):
@@ -424,7 +443,15 @@ class ResultsPanel(QWidget):
             table.setItem(i, 0, element_item)
 
             conc = result['concentration']
-            conc_item = QTableWidgetItem(f"{conc:.3f} %")
+            if not is_fp and result.get("method") in {
+                "standards_curve", "standards_overlap",
+            }:
+                conc_item = QTableWidgetItem(crm_display_concentration(result))
+                tip = crm_concentration_tooltip(result)
+                if tip:
+                    conc_item.setToolTip(tip)
+            else:
+                conc_item = QTableWidgetItem(f"{conc:.3f} %")
             conc_item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
@@ -477,9 +504,15 @@ class ResultsPanel(QWidget):
         if is_fp:
             label.setText(f"Analytical total: {total:.2f} %")
         elif calibrated:
-            # Only calibrated elements are listed; the total is informational
-            label.setText(f"Sum of calibrated elements: {total:.2f} wt%")
-            label.setStyleSheet("")
+            n_q = sum(1 for r in results if not r.get("not_quantified"))
+            n_nq = len(results) - n_q
+            text = (
+                f"{n_q} CRM determination(s) — independent, not a closed assay"
+            )
+            if n_nq:
+                text += f"; {n_nq} detected, not quantified"
+            label.setText(text)
+            label.setStyleSheet("color: #555;")
             return
         else:
             label.setText(f"Sum of relative intensities: {total:.2f} %")
@@ -555,6 +588,12 @@ class ResultsPanel(QWidget):
                 'method': data.get('method', 'semi_quant_area'),
                 'role': role,
                 'line_checks': list(data.get('line_checks') or []),
+                'not_quantified': bool(data.get('not_quantified')),
+                'quant_flag': data.get('quant_flag'),
+                'mdc': data.get('mdc'),
+                'raw_concentration': data.get('raw_concentration', data.get('concentration')),
+                'intensity_cps': data.get('intensity_cps'),
+                'in_range': data.get('in_range', True),
             })
         
         self.set_results(results)

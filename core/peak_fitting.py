@@ -545,7 +545,8 @@ class PeakFitter:
             counts: Counts array (background-subtracted recommended)
             prominence: Absolute minimum peak prominence (counts)
             distance: Minimum distance between peaks (in indices)
-            height: Minimum peak height
+            height: Minimum height above the local background, in counts.
+                Applied as a prominence floor (not an absolute y-value from 0).
             prominence_percent: If set, prominence = percent/100 * max(counts)
             min_separation_ev: If set, convert to channel distance using energy spacing
             min_energy_kev: Ignore detections below this energy (default
@@ -567,6 +568,10 @@ class PeakFitter:
             else:
                 # Auto-calculate prominence as 2% of max (more sensitive default)
                 prominence = np.max(counts) * 0.02
+
+        # Min height is the rise above the surrounding baseline, not y=0.
+        if height is not None:
+            prominence = max(float(prominence), float(height))
         
         if distance is None:
             if min_separation_ev is not None and len(energy) > 1:
@@ -584,7 +589,6 @@ class PeakFitter:
             counts,
             prominence=prominence,
             distance=distance,
-            height=height
         )
         
         # Extract peak information (skip electronic zero/noise below floor)

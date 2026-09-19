@@ -732,6 +732,30 @@ def test_site_contents_tags():
     ]
 
 
+def test_find_peaks_min_height_is_above_background():
+    from core.peak_fitting import PeakFitter
+
+    energy = np.linspace(1.0, 10.0, 900)
+    baseline = 2000.0 + 50.0 * energy
+    weak = 80.0 * np.exp(-((energy - 3.0) ** 2) / (2 * 0.04**2))
+    strong = 800.0 * np.exp(-((energy - 6.4) ** 2) / (2 * 0.05**2))
+    counts = baseline + weak + strong
+
+    peaks = PeakFitter.find_peaks(
+        energy, counts, prominence_percent=0.1, height=200
+    )
+    peak_e = [e for e, _ in peaks]
+    assert any(abs(e - 6.4) < 0.1 for e in peak_e)
+    assert not any(abs(e - 3.0) < 0.15 for e in peak_e)
+
+    peaks_all = PeakFitter.find_peaks(
+        energy, counts, prominence_percent=0.1, height=None
+    )
+    peak_e_all = [e for e, _ in peaks_all]
+    assert any(abs(e - 3.0) < 0.15 for e in peak_e_all)
+    assert any(abs(e - 6.4) < 0.1 for e in peak_e_all)
+
+
 def test_find_peaks_rejects_below_min_energy():
     from core.peak_fitting import PeakFitter
 

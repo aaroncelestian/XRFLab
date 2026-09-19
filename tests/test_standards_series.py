@@ -22,9 +22,13 @@ from core.standards_calibration import (
     StandardPoint,
     StandardRecord,
     StandardsCalibration,
+    annotate_curve_prediction,
     choose_line_group,
+    condition_warnings,
+    crm_display_concentration,
     extract_spot_intensities,
     line_matches_group,
+    recipe_mismatches,
     suggest_outlier_exclusions,
 )
 
@@ -342,3 +346,76 @@ def test_mdc_undefined_when_slope_is_not_positive():
     assert failed.minimum_detectable_concentration() is None
     zero_slope = _mdc_curve(0.01, 0.0)
     assert zero_slope.minimum_detectable_concentration() is None
+
+
+def test_quantify_can_filter_to_one_element():
+    PeakFitter.activate(PeakFitter())
+    fitter = SpectrumFitter()
+    energy = np.arange(0.5, 12.0, 0.01)
+    cal = StandardsCalibration()
+    truth = {"S1": (20.0, 5.0), "S2": (40.0, 10.0), "S3": (60.0, 15.0)}
+    spectra = {}
+    for i, (name, (fe, ca)) in enumerate(truth.items()):
+        cal.add_standard(StandardRecord(
+            name=name, concentrations={"Fe": fe, "Ca": ca},
+            spectrum_paths=[f"{name}.txt"],
+        ))
+        spectra[name] = [(
+            f"{name}.txt",
+            _synth_std(energy, 100.0 * fe, 60.0 * ca, fitter, i),
+        )]
+    cal.fit_spectra(
+        spectra, fitter, elements=["Fe", "Ca"],
+        fit_kwargs={"background_method": "linear", "peak_shape": "gaussian",
+                    "include_tube_lines": False, "grouped_lines": True},
+        line_selection=LINE_SERIES, normalise="live_time",
+    )
+    cal.build_curves(model=MODEL_THROUGH_ORIGIN, weighted=True)
+    unknown = _synth_std(energy, 100.0 * 30.0, 60.0 * 8.0, fitter, 99)
+    res = fitter.fit_spectrum(
+        energy, unknown.counts,
+        elements=[{"symbol": "Fe", "z": 26}, {"symbol": "Ca", "z": 20}],
+        background_method="linear", peak_shape="gaussian", auto_find_peaks=False,
+        include_tube_lines=False, grouped_lines=True,
+    )
+    q = cal.quantify(
+        res.peaks, unknown.live_time, fit_result=res, energy=energy,
+        elements=["Fe"],
+    )
+    assert list(q) == ["Fe"]
+    assert q["Fe"]["concentration"] == pytest.approx(30.0, rel=0.05)
+
+
+def test_negative_prediction_is_detected_not_quantified():
+    curve = _mdc_curve(-2.0, 0.1)
+    # C = -2 + 0.1 * I; I=5 → C=-1.5, below MDC 0.6
+    flags = annotate_curve_prediction(curve, -1.5, 5.0)
+    assert flags["not_quantified"] is True
+    assert flags["quant_flag"] in {"negative", "below_mdc"}
+    row = {"concentration": -1.5, "not_quantified": True, "quant_flag": "negative"}
+    assert crm_display_concentration(row) == "n.q."
+
+
+def test_recipe_mismatches_and_condition_warnings():
+    settings = {
+        "background_method": "snip",
+        "peak_shape": "tail_gaussian",
+        "grouped_lines": True,
+        "excitation_kv": 50.0,
+        "tube_current": 1.0,
+    }
+    ok = {
+        "background_method": "SNIP",
+        "peak_shape": "tail_gaussian",
+        "grouped_lines": True,
+        "excitation_kv": 50.0,
+        "tube_current": 1.0,
+    }
+    assert recipe_mismatches(settings, ok) == []
+    bad = dict(ok, background_method="linear", grouped_lines=False)
+    mismatches = recipe_mismatches(settings, bad)
+    assert any("background" in m for m in mismatches)
+    assert any("line ratios" in m for m in mismatches)
+    assert condition_warnings(settings, ok) == []
+    assert condition_warnings(settings, {**ok, "excitation_kv": 40.0})
+    assert condition_warnings(settings, {**ok, "tube_current": 2.0})

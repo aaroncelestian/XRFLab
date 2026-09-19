@@ -15,7 +15,8 @@ Empirical element calibration from certified reference standards:
                     "Exclude outliers") and the curves are rebuilt instantly
                     without re-fitting spectra.
 
-The resulting StandardsCalibration converts fitted peaks of unknowns to wt%.
+The resulting StandardsCalibration converts fitted peaks of unknowns to
+targeted CRM wt% for Report-marked elements (not a closed full-spectrum assay).
 """
 
 from __future__ import annotations
@@ -493,11 +494,13 @@ class StandardsPanel(QWidget):
         self.curves_summary.setWordWrap(True)
         layout.addWidget(self.curves_summary)
 
-        el_group = QGroupBox("Element curves (untick Use to drop an element from quantification)")
+        el_group = QGroupBox(
+            "Element curves (untick Report to omit an element from targeted CRM wt%)"
+        )
         el = QVBoxLayout(el_group)
         el.setContentsMargins(5, 8, 5, 5)
         self.curves_table = QTableWidget()
-        cols = ["Use", "El", "Line", "Std", "Spec", "Slope wt%/cps", "R²", "RMSE wt%", "RSD %", "MDC wt%", "Note"]
+        cols = ["Report", "El", "Line", "Std", "Spec", "Slope wt%/cps", "R²", "RMSE wt%", "RSD %", "MDC wt%", "Note"]
         self.curves_table.setColumnCount(len(cols))
         self.curves_table.setHorizontalHeaderLabels(cols)
         mdc_hdr = self.curves_table.horizontalHeaderItem(9)
@@ -553,7 +556,10 @@ class StandardsPanel(QWidget):
 
         row = QHBoxLayout()
         self.apply_btn = QPushButton("Apply Calibration")
-        self.apply_btn.setToolTip("Use these curves to report wt% on the Analysis tab; auto-saved")
+        self.apply_btn.setToolTip(
+            "Activate these CRM curves for targeted Standards wt% "
+            "(Report-marked elements only). Not a full-spectrum assay."
+        )
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self._apply_calibration)
         row.addWidget(self.apply_btn)

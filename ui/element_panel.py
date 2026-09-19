@@ -40,6 +40,7 @@ class ElementPanel(QWidget):
     peak_list_changed = Signal()  # Emitted when peak list is edited (delete/clear)
     identify_on_plot_toggled = Signal(bool)  # Click-spectrum identify mode
     identify_add_element = Signal(str)  # Add candidate element from identify list
+    identify_preview_element = Signal(str, int)  # Preview candidate lines (symbol, Z)
     tube_guides_changed = Signal()  # Tube overlay settings (anode / kV / Compton)
     scatter_angle_fit_requested = Signal()  # Fit θ from the loaded spectrum's Compton hump
     ree_select_requested = Signal()  # Select REEs + spectroscopic overlaps
@@ -215,8 +216,9 @@ class ElementPanel(QWidget):
         self.identify_on_plot_btn.setCheckable(True)
         self.identify_on_plot_btn.setToolTip(
             "When on, click the spectrum plot to list the most likely\n"
-            "emission-line candidates at that energy. Double-click a\n"
-            "candidate (or use Add) to select it on the periodic table."
+            "emission-line candidates at that energy. Select a candidate\n"
+            "to preview its lines; double-click (or use Add) to select it\n"
+            "on the periodic table."
         )
         self.identify_on_plot_btn.setStyleSheet("""
             QPushButton {
@@ -240,6 +242,7 @@ class ElementPanel(QWidget):
         self.identify_candidates_list.setMinimumHeight(100)
         self.identify_candidates_list.setToolTip(
             "Candidates ranked by |ΔE| from the clicked energy.\n"
+            "Select a row to show that element’s emission lines on the plot.\n"
             "Double-click to add the element to the selection."
         )
         self.identify_candidates_list.itemDoubleClicked.connect(
@@ -258,9 +261,7 @@ class ElementPanel(QWidget):
         identify_layout.addLayout(add_row)
 
         self.identify_candidates_list.itemSelectionChanged.connect(
-            lambda: self.identify_add_btn.setEnabled(
-                self.identify_candidates_list.currentItem() is not None
-            )
+            self._on_identify_selection_changed
         )
 
         layout.addWidget(identify_group)
@@ -308,7 +309,18 @@ class ElementPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, hit)
             self.identify_candidates_list.addItem(item)
         self.identify_candidates_list.setCurrentRow(0)
-        self.identify_add_btn.setEnabled(True)
+
+    def _on_identify_selection_changed(self):
+        """Enable Add and preview the highlighted candidate’s emission lines."""
+        item = self.identify_candidates_list.currentItem()
+        hit = item.data(Qt.ItemDataRole.UserRole) if item else None
+        self.identify_add_btn.setEnabled(bool(hit))
+        if not hit:
+            return
+        symbol = hit.get('symbol')
+        z = hit.get('z')
+        if symbol and z:
+            self.identify_preview_element.emit(str(symbol), int(z))
 
     def _on_identify_candidate_activated(self, item):
         hit = item.data(Qt.ItemDataRole.UserRole) if item else None
@@ -393,8 +405,9 @@ class ElementPanel(QWidget):
         self.min_height_spin.setValue(0)
         self.min_height_spin.setSpecialValueText("Off")
         self.min_height_spin.setToolTip(
-            "Minimum absolute peak height in counts (after background subtraction).\n"
-            "0 / Off disables this filter."
+            "Minimum peak height above the background, in counts.\n"
+            "A peak on a high continuum must rise by this many counts\n"
+            "above the surrounding baseline. 0 / Off disables this filter."
         )
         detect_layout.addRow("Min height:", self.min_height_spin)
 
@@ -1403,3 +1416,40 @@ class ElementPanel(QWidget):
         self.smart_id_apply_check.setChecked(bool(state.get("smart_id_apply", False)))
         peaks = state.get("peak_list") or []
         self.set_peak_list(peaks, enable_use_list=bool(state.get("use_peak_list")))
+
+    def apply_fit_recipe(self, fit_settings: dict) -> None:
+        """Match Analysis extract settings to a stored CRM fit recipe."""
+        if not fit_settings:
+            return
+        bg = str(fit_settings.get("background_method") or "").lower()
+        bg_ui = {
+            "snip": "SNIP",
+            "polynomial": "Polynomial",
+            "linear": "Linear",
+            "none": "None",
+            "adaptive": "Adaptive",
+            "als": "ALS",
+            "asls": "ALS",
+        }.get(bg)
+        if bg_ui:
+            idx = self.background_combo.findText(bg_ui)
+            if idx >= 0:
+                self.background_combo.setCurrentIndex(idx)
+        if fit_settings.get("peak_shape"):
+            label = peak_shape_ui_label(fit_settings["peak_shape"])
+            idx = self.peak_shape_combo.findText(label)
+            if idx >= 0:
+                self.peak_shape_combo.setCurrentIndex(idx)
+        if "grouped_lines" in fit_settings:
+            self.release_ratios_check.setChecked(
+                not bool(fit_settings.get("grouped_lines", True))
+            )
+        if fit_settings.get("tube_element"):
+            self.tube_element_combo.setCurrentText(str(fit_settings["tube_element"]))
+        kv = fit_settings.get("excitation_kv")
+        if kv is not None:
+            self.excitation_spin.setValue(float(kv))
+        current = fit_settings.get("tube_current")
+        if current is not None:
+            self.current_spin.setValue(float(current))
+        self.auto_find_check.setChecked(False)

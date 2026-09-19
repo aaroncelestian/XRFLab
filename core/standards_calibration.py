@@ -989,6 +989,8 @@ class StandardsCalibration:
             "excitation_kv": excitation,
             "elements": symbols,
         }
+        if fit_kwargs.get("tube_current") is not None:
+            self.fit_settings["tube_current"] = float(fit_kwargs["tube_current"])
         self.calibration_date = datetime.now().isoformat()
 
     # ---- curve building --------------------------------------------------- #
@@ -1161,12 +1163,14 @@ class StandardsCalibration:
         real_time: Optional[float] = None,
         fit_result=None,
         energy=None,
+        elements: Optional[Iterable[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Convert fitted peaks of an unknown into wt% using the element curves.
+        Convert fitted peaks of an unknown into targeted CRM wt%.
 
-        Returns the same dict shape the Results panel expects:
-        {element: {'concentration', 'error', 'lines', 'method', 'intensity_cps'}}
+        Independent per-element determinations — not a closed assay.
+        `elements` limits output to those symbols (Report-marked curves).
+        When omitted, every fitted and enabled curve is used.
         """
         normalise = self.settings.get("normalise", "live_time")
         if normalise == "live_time":
@@ -1207,10 +1211,14 @@ class StandardsCalibration:
                 return None
             return area / t, math.sqrt(var) / t, lines, group
 
+        wanted = {str(s) for s in elements} if elements is not None else None
+
         out: Dict[str, Dict[str, Any]] = {}
         overlap_done = set()
         for model in self.overlap_models or []:
             if not getattr(model, "usable", False):
+                continue
+            if wanted is not None and not any(el in wanted for el in model.elements):
                 continue
             cps_map = {}
             lines_map = {}
@@ -1226,6 +1234,8 @@ class StandardsCalibration:
                 continue
             preds = model.predict(cps_map)
             for el, (conc, err) in preds.items():
+                if wanted is not None and el not in wanted:
+                    continue
                 overlap_done.add(el)
                 group = group_map.get(el, self.line_groups.get(el, LINE_ALL))
                 lines = lines_map.get(el) or []
@@ -1236,7 +1246,7 @@ class StandardsCalibration:
                     label = f"{group} ({'+'.join(fams)})"
                 else:
                     label = group
-                out[el] = {
+                row = {
                     "concentration": conc,
                     "error": err,
                     "lines": lines,
@@ -1247,11 +1257,15 @@ class StandardsCalibration:
                     "in_range": True,
                     "overlap": "+".join(model.elements),
                 }
+                row.update(annotate_curve_prediction(None, conc, cps_map[el]))
+                out[el] = row
 
         for sym, curve in self.curves.items():
             if sym in overlap_done:
                 continue
             if not (curve.fitted and curve.enabled):
+                continue
+            if wanted is not None and sym not in wanted:
                 continue
             spot = _spot_cps(sym)
             if spot is None:
@@ -1265,7 +1279,7 @@ class StandardsCalibration:
                 label = f"{group} ({'+'.join(fams)})"
             else:
                 label = group
-            out[sym] = {
+            row = {
                 "concentration": conc,
                 "error": err,
                 "lines": lines,
@@ -1275,6 +1289,8 @@ class StandardsCalibration:
                 "intensity_cps_err": cps_err,
                 "in_range": _in_range(curve, cps),
             }
+            row.update(annotate_curve_prediction(curve, conc, cps))
+            out[sym] = row
         return out
 
     # ---- summaries ---------------------------------------------------------- #
@@ -1430,6 +1446,178 @@ def _in_range(curve: ElementCurve, cps: float) -> bool:
     hi = max(p.intensity for p in pts)
     span = hi - lo
     return (lo - 0.1 * span) <= cps <= (hi + 0.1 * span)
+
+
+def _intensity_bounds(curve: ElementCurve) -> Optional[Tuple[float, float]]:
+    pts = curve.included_points()
+    if not pts:
+        return None
+    lo = min(p.intensity for p in pts)
+    hi = max(p.intensity for p in pts)
+    span = hi - lo
+    return lo - 0.1 * span, hi + 0.1 * span
+
+
+def annotate_curve_prediction(
+    curve: Optional[ElementCurve],
+    conc: float,
+    cps: float,
+) -> Dict[str, Any]:
+    """
+    Mark whether a CRM prediction is a usable wt% or only a detection.
+
+    Below MDC, below the lowest standard, or a negative intercept mapping
+    are 'detected, not quantified'. Above the highest standard is still
+    shown but flagged as extrapolated.
+    """
+    raw = float(conc) if conc is not None else float("nan")
+    mdc = None
+    if curve is not None:
+        mdc = curve.minimum_detectable_concentration()
+    bounds = _intensity_bounds(curve) if curve is not None else None
+    below_range = bool(bounds and cps < bounds[0])
+    above_range = bool(bounds and cps > bounds[1])
+
+    not_quantified = False
+    quant_flag = None
+    if not math.isfinite(raw):
+        not_quantified = True
+        quant_flag = "invalid"
+    elif raw < 0:
+        not_quantified = True
+        quant_flag = "negative"
+    elif mdc is not None and raw < mdc:
+        not_quantified = True
+        quant_flag = "below_mdc"
+    elif below_range:
+        not_quantified = True
+        quant_flag = "below_range"
+    elif above_range:
+        quant_flag = "extrapolated"
+
+    return {
+        "not_quantified": not_quantified,
+        "quant_flag": quant_flag,
+        "mdc": mdc,
+        "raw_concentration": raw,
+        "in_range": not (below_range or above_range),
+    }
+
+
+def crm_display_concentration(row: Dict[str, Any]) -> str:
+    """Table text for a CRM row: n.q. or wt%, never a negative percent."""
+    if row.get("not_quantified"):
+        return "n.q."
+    conc = row.get("concentration")
+    try:
+        value = float(conc)
+    except (TypeError, ValueError):
+        return "n.q."
+    if not math.isfinite(value) or value < 0:
+        return "n.q."
+    text = f"{value:.3f} %"
+    if row.get("quant_flag") == "extrapolated":
+        text += " ⚠"
+    return text
+
+
+def crm_concentration_tooltip(row: Dict[str, Any]) -> str:
+    raw = row.get("raw_concentration", row.get("concentration"))
+    err = row.get("error")
+    cps = row.get("intensity_cps")
+    mdc = row.get("mdc")
+    flag = row.get("quant_flag")
+    lines = []
+    if row.get("not_quantified"):
+        reason = {
+            "negative": "Curve maps this intensity below 0 wt% (intercept / range).",
+            "below_mdc": "Predicted wt% is below the curve MDC.",
+            "below_range": "Intensity is below the lowest included standard.",
+            "invalid": "Prediction is not a finite wt%.",
+        }.get(str(flag), "Detected, not quantified by this CRM curve.")
+        lines.append(reason)
+        lines.append("A fitted peak can still be present.")
+    elif flag == "extrapolated":
+        lines.append("Intensity is above the highest included standard (extrapolated).")
+    if raw is not None:
+        try:
+            raw_f = float(raw)
+            if err is not None:
+                lines.append(f"Raw curve prediction: {raw_f:.3f} ± {float(err):.3f} wt%")
+            else:
+                lines.append(f"Raw curve prediction: {raw_f:.3f} wt%")
+        except (TypeError, ValueError):
+            pass
+    if cps is not None:
+        try:
+            lines.append(f"Intensity: {float(cps):.4g} cps")
+        except (TypeError, ValueError):
+            pass
+    if mdc is not None:
+        try:
+            lines.append(f"MDC: {float(mdc):.3g} wt%")
+        except (TypeError, ValueError):
+            pass
+    return "\n".join(lines)
+
+
+def recipe_mismatches(
+    fit_settings: Optional[Dict[str, Any]],
+    fit_params: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Compare unknown extract settings to the CRM fit recipe."""
+    from core.peak_fitting import normalize_peak_shape
+
+    if not fit_settings or not fit_params:
+        return []
+    mismatches: List[str] = []
+    bg = str(fit_params.get("background_method") or "").lower()
+    cal_bg = str(fit_settings.get("background_method") or "").lower()
+    if cal_bg and bg and bg != cal_bg:
+        mismatches.append(f"background {bg} vs {cal_bg}")
+    shape = normalize_peak_shape(fit_params.get("peak_shape"))
+    cal_shape = normalize_peak_shape(fit_settings.get("peak_shape"))
+    if cal_shape and shape != cal_shape:
+        mismatches.append(f"peak shape {shape} vs {cal_shape}")
+    if "grouped_lines" in fit_settings:
+        g = bool(fit_params.get("grouped_lines", True))
+        cg = bool(fit_settings.get("grouped_lines", True))
+        if g != cg:
+            mismatches.append(
+                f"line ratios {'grouped' if g else 'released'} vs "
+                f"{'grouped' if cg else 'released'}"
+            )
+    return mismatches
+
+
+def condition_warnings(
+    fit_settings: Optional[Dict[str, Any]],
+    fit_params: Optional[Dict[str, Any]],
+) -> List[str]:
+    """kV / tube-current differences that scale all CRM intensities."""
+    if not fit_settings or not fit_params:
+        return []
+    warnings: List[str] = []
+    cal_kv = fit_settings.get("excitation_kv")
+    kv = fit_params.get("excitation_kv")
+    if kv is None:
+        kv = fit_params.get("excitation_energy")
+    if cal_kv is not None and kv is not None:
+        try:
+            if abs(float(kv) - float(cal_kv)) > 0.25:
+                warnings.append(f"tube kV {float(kv):g} vs calibration {float(cal_kv):g}")
+        except (TypeError, ValueError):
+            pass
+    cal_i = fit_settings.get("tube_current")
+    cur = fit_params.get("tube_current")
+    if cal_i is not None and cur is not None:
+        try:
+            ci, ui = float(cal_i), float(cur)
+            if ci > 0 and abs(ui - ci) / ci > 0.10:
+                warnings.append(f"tube current {ui:g} mA vs calibration {ci:g} mA")
+        except (TypeError, ValueError):
+            pass
+    return warnings
 
 
 def _z_sort_key(sym: str) -> int:

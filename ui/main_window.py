@@ -175,9 +175,17 @@ class MainWindow(QMainWindow):
         self.quantify_action = QAction("&Semi-Quant (Relative Intensities)", self)
         self.quantify_action.setShortcut("Ctrl+I")
         self.quantify_action.setStatusTip(
-            "Area-normalized relative intensities (not FP wt%)."
+            "Area-normalized relative intensities (not wt%)."
         )
         self.quantify_action.triggered.connect(self.quantify)
+
+        self.standards_quantify_action = QAction("S&tandards wt% (CRM curves)", self)
+        self.standards_quantify_action.setShortcut("Ctrl+Shift+S")
+        self.standards_quantify_action.setStatusTip(
+            "Targeted CRM-curve wt% for Report-marked elements. "
+            "Independent determinations, not a closed assay."
+        )
+        self.standards_quantify_action.triggered.connect(self.quantify_standards)
 
         self.fp_quantify_action = QAction("&FP Composition (wt%)", self)
         self.fp_quantify_action.setShortcut("Ctrl+Shift+Q")
@@ -286,6 +294,7 @@ class MainWindow(QMainWindow):
         analysis_menu.addAction(self.fit_spectrum_action)
         analysis_menu.addAction(self.quantify_rees_action)
         analysis_menu.addAction(self.quantify_action)
+        analysis_menu.addAction(self.standards_quantify_action)
         analysis_menu.addAction(self.fp_quantify_action)
         
         # View menu
@@ -495,7 +504,10 @@ class MainWindow(QMainWindow):
         std = getattr(self.standards_panel, "calibration_result", None) if hasattr(self, "standards_panel") else None
         curves = getattr(std, "fitted_curves", None)
         if callable(curves) and curves():
-            std_txt = f"<b>Standards</b> {len(curves())} element curve(s) → wt%"
+            std_txt = (
+                f"<b>Standards</b> {len(curves())} CRM curve(s) ready "
+                f"for targeted wt%"
+            )
         elif std is not None and getattr(std, "success", False):
             std_txt = "<b>Standards</b> legacy intensity calibration stored"
         else:
@@ -572,12 +584,14 @@ class MainWindow(QMainWindow):
         self.element_panel.element_clicked.connect(self.on_element_clicked)
         self.element_panel.identify_on_plot_toggled.connect(self.on_identify_on_plot_toggled)
         self.element_panel.identify_add_element.connect(self.on_identify_add_element)
+        self.element_panel.identify_preview_element.connect(self.on_identify_preview_element)
         self.element_panel.tube_guides_changed.connect(self.refresh_tube_guides)
         self.element_panel.scatter_angle_fit_requested.connect(
             self.fit_scatter_angle_from_spectrum
         )
         self.results_panel.element_selected.connect(self.on_result_element_selected)
         self.results_panel.quantify_requested.connect(self.quantify)
+        self.results_panel.standards_quantify_requested.connect(self.quantify_standards)
         self.results_panel.fp_quantify_requested.connect(self.quantify_fp)
         self.results_panel.matrix_assumptions_changed.connect(
             lambda: self.quantify_fp(live=True)
@@ -630,7 +644,7 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "Review auto-ID selections from Peak Find, or use "
             "“Click Spectrum to Identify” to pick peaks on the plot. "
-            "Then continue to Fitting."
+            "Select a candidate to preview its lines. Then continue to Fitting."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #555; padding: 4px;")
@@ -1478,7 +1492,7 @@ class MainWindow(QMainWindow):
                 current = self.results_panel.peaks_text.toPlainText()
                 self.results_panel.peaks_text.setPlainText(current + extra)
             
-            # Semi-quant relative intensities (area-normalized; needs labeled sample peaks)
+            # Relative semi-quant only. CRM curves are an explicit Standards wt% action.
             exp_params = self.element_panel.get_experimental_params()
             concentrations = self.fitter.quantify_elements(
                 self.fit_result.peaks,
@@ -1489,13 +1503,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             method = "semi_quant_area"
-            # Standards calibration curves → wt% when available
-            calibrated, method_label = self._quantify_with_standards(
-                self.fit_result.peaks, self.fit_result, fit_params
-            )
-            if calibrated:
-                concentrations = calibrated
-                method = "standards_curve"
+            method_label = None
             concentrations, method_label = self._apply_ree_quant_roles(
                 concentrations, method_label
             )
@@ -1736,12 +1744,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             method = "semi_quant_area"
-            calibrated, method_label = self._quantify_with_standards(
-                self.fit_result.peaks, self.fit_result, fit_params
-            )
-            if calibrated:
-                concentrations = calibrated
-                method = "standards_curve"
+            method_label = None
             concentrations, method_label = self._apply_ree_quant_roles(
                 concentrations, method_label
             )
@@ -1787,7 +1790,131 @@ class MainWindow(QMainWindow):
                 f"An error occurred during semi-quantification:\n{str(e)}"
             )
             self.status_bar.showMessage("Semi-quant failed", 5000)
-    
+
+    def quantify_standards(self, checked=False, *, elements=None, _retried=False):
+        """Targeted CRM-curve wt% for Report-marked elements."""
+        from core.standards_calibration import (
+            condition_warnings,
+            recipe_mismatches,
+        )
+
+        if self.fit_result is None or not getattr(self.fit_result, "peaks", None):
+            QMessageBox.warning(
+                self,
+                "No Fit Results",
+                "Please fit a spectrum first before running Standards wt%.",
+            )
+            return
+
+        cal = self._active_standards_curves()
+        if cal is None:
+            QMessageBox.information(
+                self,
+                "No CRM curves",
+                "No Report-marked standards curves are active.\n\n"
+                "Fit and Apply a calibration on Calibration → Standards, "
+                "then tick Report for the elements you want to quantify.",
+            )
+            return
+
+        fit_params = self.element_panel.get_fitting_params()
+        exp_params = self.element_panel.get_experimental_params()
+        fit_params = {
+            **fit_params,
+            "tube_current": exp_params.get("tube_current"),
+            "excitation_kv": (
+                fit_params.get("excitation_kv")
+                or exp_params.get("excitation_energy")
+            ),
+        }
+        mismatches = recipe_mismatches(cal.fit_settings, fit_params)
+        if mismatches and not _retried:
+            reply = QMessageBox.question(
+                self,
+                "Fit recipe does not match calibration",
+                "CRM intensities were extracted with a different recipe:\n\n"
+                + "\n".join(f"  • {m}" for m in mismatches)
+                + "\n\nRe-fit this spectrum with the calibration recipe "
+                "before applying the curves?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self.element_panel.apply_fit_recipe(cal.fit_settings)
+            self.fit_spectrum(auto_find_peaks=False)
+            if self.fit_result is None:
+                return
+            self.quantify_standards(elements=elements, _retried=True)
+            return
+
+        warnings = condition_warnings(cal.fit_settings, fit_params)
+        if warnings:
+            QMessageBox.warning(
+                self,
+                "Instrument conditions differ",
+                "Tube settings differ from the CRM fit. "
+                "All targeted wt% will scale with intensity.\n\n"
+                + "\n".join(f"  • {w}" for w in warnings),
+            )
+
+        if hasattr(self, "analysis_left_tabs"):
+            self.analysis_left_tabs.setCurrentIndex(self.TAB_RESULTS)
+
+        targets = elements
+        if targets is None:
+            targets = [c.element for c in cal.fitted_curves()]
+        if not targets:
+            QMessageBox.information(
+                self,
+                "Nothing to report",
+                "No fitted curves are marked Report.",
+            )
+            return
+
+        self.status_bar.showMessage("Computing targeted CRM wt%...", 0)
+        try:
+            calibrated, method_label = self._quantify_with_standards(
+                self.fit_result.peaks,
+                self.fit_result,
+                fit_params,
+                elements=targets,
+            )
+            if not calibrated:
+                QMessageBox.warning(
+                    self,
+                    "No CRM wt%",
+                    "None of the Report-marked elements have fitted sample "
+                    "peaks that match the curve line group.",
+                )
+                self.status_bar.showMessage("Standards wt%: no matching peaks", 5000)
+                return
+            calibrated, method_label = self._apply_ree_quant_roles(
+                calibrated, method_label
+            )
+            self.session.set_concentrations(calibrated, method="standards_curve")
+            self.results_panel.set_fp_live(False)
+            self.results_panel.set_formula_summary("")
+            self.results_panel.set_quantification(calibrated)
+            if method_label:
+                self.results_panel.set_method_label(method_label)
+            n = len(calibrated)
+            n_nq = sum(1 for v in calibrated.values() if v.get("not_quantified"))
+            msg = (
+                f"CRM wt% for {n} element{'s' if n != 1 else ''} "
+                f"(independent determinations, not a closed assay)"
+            )
+            if n_nq:
+                msg += f"; {n_nq} detected, not quantified"
+            self.status_bar.showMessage(msg, 8000)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Standards wt% Error",
+                f"An error occurred during CRM quantification:\n{str(e)}",
+            )
+            self.status_bar.showMessage("Standards wt% failed", 5000)
+
     def quantify_fp(self, live=False):
         """Standardless FP wt% using the current matrix assumptions."""
         live = live is True
@@ -2005,6 +2132,10 @@ class MainWindow(QMainWindow):
             return
         # Unknown auto-find peaks in the L-line region steal REE area.
         self.fit_spectrum(auto_find_peaks=False)
+        fit_set = self._ree_fit_set
+        self.quantify_standards(
+            elements=list(fit_set.symbols) if fit_set else None,
+        )
 
     def _apply_ree_quant_roles(self, concentrations, method_label):
         """Tag REE vs overlap rows when the current selection is a REE suite."""
@@ -2059,12 +2190,23 @@ class MainWindow(QMainWindow):
         self.element_panel.add_selected_element(symbol)
         self.session.set_elements(self.element_panel.get_selected_elements())
         self.status_bar.showMessage(f"Added {symbol} to element selection", 4000)
-        # Overlay that element's lines for confirmation
-        from core.advanced_peak_fitting import get_element_z
-        z = get_element_z(symbol)
-        if z:
-            self._displayed_element_lines = None
-            self.on_element_clicked(symbol, z)
+        self._show_element_emission_lines(symbol)
+
+    def on_identify_preview_element(self, symbol, z):
+        """Show emission lines for the candidate highlighted in the identify list."""
+        self._show_element_emission_lines(symbol, z)
+
+    def _show_element_emission_lines(self, symbol, z=None):
+        """Overlay an element's emission lines on the spectrum (always show)."""
+        if z is None:
+            from core.advanced_peak_fitting import get_element_z
+            z = get_element_z(symbol)
+        if not z:
+            return
+        self.spectrum_widget.clear_peak_markers()
+        self.spectrum_widget.show_element_lines(symbol, int(z))
+        self._displayed_element_lines = symbol
+        self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
     
     def on_element_clicked(self, symbol, z):
         """Handle element click — show emission lines, or clear if already shown"""
@@ -2073,11 +2215,7 @@ class MainWindow(QMainWindow):
             self._displayed_element_lines = None
             self.status_bar.showMessage(f"Cleared emission lines for {symbol}", 3000)
             return
-        
-        self.spectrum_widget.clear_peak_markers()
-        self.spectrum_widget.show_element_lines(symbol, z)
-        self._displayed_element_lines = symbol
-        self.status_bar.showMessage(f"Showing emission lines for {symbol} (Z={z})", 3000)
+        self._show_element_emission_lines(symbol, z)
 
     def fit_scatter_angle_from_spectrum(self):
         """Fit the tube→sample→detector angle from the Compton Kα hump."""
@@ -2248,9 +2386,9 @@ class MainWindow(QMainWindow):
             curves = calibration_result.fitted_curves()
             elements = ", ".join(c.element for c in curves)
             self.status_bar.showMessage(
-                f"Standards calibration active: {len(curves)} element curve(s) "
-                f"({elements}) — fitted spectra now report wt% for these elements",
-                8000
+                f"{len(curves)} CRM curve(s) ready for targeted wt% "
+                f"({elements})",
+                8000,
             )
         else:
             self.status_bar.showMessage(
@@ -2273,37 +2411,22 @@ class MainWindow(QMainWindow):
             return cal
         return None
 
-    def _quantify_with_standards(self, peaks, fit_result=None, fit_params=None):
+    def _quantify_with_standards(
+        self, peaks, fit_result=None, fit_params=None, *, elements=None
+    ):
         """
-        Convert fitted peaks to wt% using the active standards curves.
+        Targeted CRM-curve wt% for Report-marked (or caller-listed) elements.
 
         Returns (concentrations, method_label) or (None, None) when no
         curve-based calibration is active.
         """
-        from core.peak_fitting import normalize_peak_shape
+        from core.standards_calibration import condition_warnings, recipe_mismatches
 
         cal = self._active_standards_curves()
         if cal is None or self.current_spectrum is None:
             return None, None
-        mismatches = []
-        if fit_params:
-            cal_fs = cal.fit_settings or {}
-            bg = str(fit_params.get('background_method', '')).lower()
-            cal_bg = str(cal_fs.get('background_method', '')).lower()
-            if cal_bg and bg and bg != cal_bg:
-                mismatches.append(f"background {bg} vs {cal_bg}")
-            shape = normalize_peak_shape(fit_params.get('peak_shape'))
-            cal_shape = normalize_peak_shape(cal_fs.get('peak_shape'))
-            if cal_shape and shape != cal_shape:
-                mismatches.append(f"peak shape {shape} vs {cal_shape}")
-            if 'grouped_lines' in cal_fs:
-                g = bool(fit_params.get('grouped_lines', True))
-                cg = bool(cal_fs.get('grouped_lines', True))
-                if g != cg:
-                    mismatches.append(
-                        f"line ratios {'grouped' if g else 'released'} vs "
-                        f"{'grouped' if cg else 'released'}"
-                    )
+        mismatches = recipe_mismatches(cal.fit_settings, fit_params)
+        warnings = condition_warnings(cal.fit_settings, fit_params)
         spectrum = self.current_spectrum
         try:
             concentrations = cal.quantify(
@@ -2312,25 +2435,37 @@ class MainWindow(QMainWindow):
                 real_time=spectrum.real_time,
                 fit_result=fit_result,
                 energy=spectrum.energy,
+                elements=elements,
             )
         except Exception as exc:
             print(f"Standards quantification failed: {exc}")
             return None, None
         if not concentrations:
             return None, None
-        out_of_range = [e for e, v in concentrations.items() if not v.get("in_range", True)]
+        names = ", ".join(concentrations.keys())
         label = (
-            f"Method: standards calibration curves (wt%, ±1σ) — "
-            f"{len(concentrations)} element(s)"
+            f"CRM curve wt% for {names} — "
+            f"independent determinations, not a closed assay"
         )
-        if out_of_range:
-            label += f"; outside calibrated range: {', '.join(out_of_range)}"
+        nq = [
+            e for e, v in concentrations.items() if v.get("not_quantified")
+        ]
+        extra = [
+            e for e, v in concentrations.items()
+            if v.get("quant_flag") == "extrapolated"
+        ]
+        if nq:
+            label += f"; detected, not quantified: {', '.join(nq)}"
+        if extra:
+            label += f"; extrapolated: {', '.join(extra)}"
         if mismatches:
             label += (
-                "; ⚠ fit settings differ from calibration ("
+                "; ⚠ extract recipe still differs from calibration ("
                 + "; ".join(mismatches)
-                + ") — match them on the Fitting tab"
+                + ")"
             )
+        if warnings:
+            label += "; ⚠ " + "; ".join(warnings)
         return concentrations, label
     
     def closeEvent(self, event):
