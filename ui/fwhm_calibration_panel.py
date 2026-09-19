@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QCheckBox, QToolButton,
     QAbstractItemView,
 )
-from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths
+from PySide6.QtCore import Qt, Signal, QThread, QStandardPaths, QSettings
 from PySide6.QtGui import QFont
 from pathlib import Path
 import re
@@ -130,7 +130,7 @@ class FWHMCalibrationPanel(QWidget):
 
         self._init_ui()
         self._auto_load_calibration()
-        self._try_default_standards_dir()
+        self._restore_data_dir()
 
     @staticmethod
     def get_default_calibration_path():
@@ -183,7 +183,7 @@ class FWHMCalibrationPanel(QWidget):
         layout.setSpacing(6)
 
         hint = QLabel(
-            "Point at a folder of foil spectra. Elements come from the "
+            "Choose a folder of foil spectra. Elements come from the "
             "filename and the line database — no CSV needed."
         )
         hint.setWordWrap(True)
@@ -202,7 +202,7 @@ class FWHMCalibrationPanel(QWidget):
 
         example_btn = QPushButton("Examples")
         example_btn.setFixedWidth(88)
-        example_btn.setToolTip("Use the shipped foil spectra in sample_data/data")
+        example_btn.setToolTip("Load the shipped foil spectra in sample_data/data")
         example_btn.clicked.connect(self._use_example_standards)
         row.addWidget(example_btn)
 
@@ -482,10 +482,11 @@ class FWHMCalibrationPanel(QWidget):
         layout.addWidget(self.plot_widget)
         return widget
 
-    def _try_default_standards_dir(self):
-        example = example_standards_dir()
-        if example is not None:
-            self._set_data_dir(example, announce="Example foils")
+    def _restore_data_dir(self):
+        """Reopen the last folder the user chose, if it still exists."""
+        saved = QSettings().value("fwhm/data_dir", "")
+        if saved and Path(str(saved)).is_dir():
+            self._set_data_dir(Path(str(saved)))
 
     def _use_example_standards(self):
         example = example_standards_dir()
@@ -496,7 +497,7 @@ class FWHMCalibrationPanel(QWidget):
                 "Could not find sample_data/data next to the application.",
             )
             return
-        self._set_data_dir(example, announce="Example foils")
+        self._set_data_dir(example)
 
     def _browse_data_dir(self):
         start = str(self.data_dir) if self.data_dir else str(Path.home())
@@ -509,10 +510,10 @@ class FWHMCalibrationPanel(QWidget):
         if dir_path:
             self._set_data_dir(Path(dir_path))
 
-    def _set_data_dir(self, path: Path, announce: str = None):
+    def _set_data_dir(self, path: Path):
         self.data_dir = Path(path)
-        label = announce or self.data_dir.name
-        self.data_dir_label.setText(label)
+        QSettings().setValue("fwhm/data_dir", str(self.data_dir))
+        self.data_dir_label.setText(str(self.data_dir))
         self.data_dir_label.setToolTip(str(self.data_dir))
         self.data_dir_label.setStyleSheet("color: #222;")
         self._rescan_folder()

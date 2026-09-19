@@ -75,8 +75,8 @@ Pure-element spectra give clean peaks across a useful energy range. Apply FWHM b
 
 ### Steps
 
-1. Open **Calibration → FWHM**.
-2. Click **Browse…** and select a **folder** of pure-element spectra (not a single file).
+1. Open **Calibration → FWHM**. The file list stays empty until you pick a folder (the last folder you chose is restored next launch).
+2. Click **Browse…** and select a **folder** of pure-element spectra (not a single file). **Examples** loads the shipped foils in `sample_data/data`.
 3. Choose model **Detector** (recommended). Linear / Quadratic / etc. are available for comparison.
 4. Optional: tag tube voltage (Mixed / 15 / 30 / 50) for bookkeeping — FWHM remains one curve.
 5. Click **Run**. You need enough resolvable peaks (aim for several across ~1–16 keV).

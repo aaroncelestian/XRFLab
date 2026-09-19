@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self._project_path = None
         self.analysis_splitter = None
         
-        # Setup UI (status bar before central widget — FWHM auto-load may message it)
+        # Setup UI (status bar before central widget)
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
