@@ -622,6 +622,21 @@ class ElementPanel(QWidget):
         shape_layout.addWidget(self.peak_shape_combo)
         layout.addLayout(shape_layout)
 
+        self.release_ratios_check = QCheckBox("Release line ratios (per-line fit)")
+        self.release_ratios_check.setChecked(False)
+        self.release_ratios_check.setToolTip(
+            "Off (default): each element sub-shell (K, L1, L2, L3, M) is ONE free\n"
+            "amplitude with its line pattern fixed to tabulated branching ratios\n"
+            "(× detector efficiency). All groups, tube lines and Compton are solved\n"
+            "jointly by linear least squares, so overlaps like As Kα / Pb Lα are\n"
+            "resolved by each element's clean lines. Widths come from the detector\n"
+            "model; a global tail shape and energy zero/gain are refined.\n\n"
+            "On: legacy sequential per-line fit with free amplitudes, centres and\n"
+            "tails. Use for diagnostics — e.g. to see whether a Kβ/Kα ratio\n"
+            "disagrees with theory (unknown overlap) before trusting a group."
+        )
+        layout.addWidget(self.release_ratios_check)
+
         self.fwhm_status_label = QLabel(
             "FWHM: no calibration — widths free in LS"
         )
@@ -1235,6 +1250,7 @@ class ElementPanel(QWidget):
         return {
             'background_method': self.background_combo.currentText(),
             'peak_shape': peak_shape_map.get(peak_shape, peak_shape.lower()),
+            'grouped_lines': not self.release_ratios_check.isChecked(),
             'include_escape_peaks': self.escape_peaks_check.isChecked(),
             'pileup_correction': self.pileup_check.isChecked(),
             'include_tube_lines': self.tube_lines_check.isChecked(),
@@ -1283,6 +1299,7 @@ class ElementPanel(QWidget):
             "peak_list": list(self._peak_list_data or []),
             "background": self.background_combo.currentText(),
             "peak_shape": self.peak_shape_combo.currentText(),
+            "release_ratios": self.release_ratios_check.isChecked(),
             "escape_peaks": self.escape_peaks_check.isChecked(),
             "pileup": self.pileup_check.isChecked(),
             "tube_lines": self.tube_lines_check.isChecked(),
@@ -1334,6 +1351,7 @@ class ElementPanel(QWidget):
             if idx >= 0:
                 self.peak_shape_combo.setCurrentIndex(idx)
         self.update_fwhm_status()
+        self.release_ratios_check.setChecked(bool(state.get("release_ratios", False)))
         self.escape_peaks_check.setChecked(bool(state.get("escape_peaks", True)))
         self.pileup_check.setChecked(bool(state.get("pileup", False)))
         self.tube_lines_check.setChecked(bool(state.get("tube_lines", True)))

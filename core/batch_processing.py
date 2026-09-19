@@ -210,6 +210,7 @@ class BatchProcessingConfig:
     # Fitting parameters (aligned with SpectrumFitter.fit_spectrum)
     background_method: str = "snip"
     peak_shape: str = "tail_gaussian"
+    grouped_lines: bool = True  # shared-amplitude sub-shell groups (False = per-line)
     include_escape_peaks: bool = True
     include_pileup: bool = False
     tube_element: str = "Rh"
@@ -397,6 +398,7 @@ class BatchProcessor:
             scatter_angle_deg=self.config.scatter_angle_deg,
             compton_fwhm_kev=self.config.compton_fwhm_kev,
             sample_contains_tube_element=self.config.sample_contains_tube_element,
+            grouped_lines=self.config.grouped_lines,
         )
 
         stats = fit_result.statistics or {}

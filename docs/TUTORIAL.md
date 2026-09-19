@@ -133,7 +133,7 @@ Standards with **known concentrations** build **empirical calibration curves, on
 **Elements & Fit sub-tab**
 
 5. Tick the elements to calibrate. **Suggest** picks elements certified in ≥ 2 used standards at ≥ 100 ppm. Fewer elements → faster fitting (roughly 1–2 s per spectrum).
-6. Choose the intensity source (principal Kα/Lα line, or all lines), normalisation (counts/s by live time), background, peak shape and tube kV. **Use the same background and peak shape you use on the Analysis Fitting tab** — the Results label warns if they differ.
+6. Choose the intensity source, normalisation (counts/s by live time), background, peak shape, grouped/released ratios and tube kV. The default intensity source is the **principal series** (Kα+Kβ, or all L lines when K is not excited): with grouped fitting that is the element's sub-shell amplitude, and with released ratios it is much less sensitive to an overlap on a single line. **Use the same background, peak shape and ratio mode you use on the Analysis Fitting tab** — the Results label warns if they differ.
 7. **Fit Standard Spectra**. Every spot spectrum is fitted with the same element list in a background thread; progress is logged.
 
 **Curves sub-tab**
@@ -193,9 +193,10 @@ Peaks are marked on the spectrum, listed for editing, and matched to common XRF 
 
 1. Open **Fitting**.
 2. Typical starting point: peak shape **Tail-Gaussian**; post-fit Smart ID on for overlap review.
-3. Click **Fit Spectrum** (`Ctrl+F`).
+3. Leave **Release line ratios** off. Each element sub-shell is then one amplitude with its Kα/Kβ (or Lα/Lβ…) pattern fixed to theory and all peaks are solved together, so overlaps are split by the clean lines. Turn it on only to diagnose a suspicious ratio.
+4. Click **Fit Spectrum** (`Ctrl+F`).
 
-Watch the main plot and residuals. Tube-overlap flags (if any) appear under Results.
+Watch the main plot and residuals. A peak left in the residual usually means an element missing from the list — add it and re-fit. Tube-overlap flags (if any) and the per-group fit notes appear under Results.
 
 ### Step E — Semi-Quant, FP composition, and export
 
@@ -203,6 +204,7 @@ Watch the main plot and residuals. Tube-overlap flags (if any) appear under Resu
 2. Review fit statistics and the peak list.
 3. Click **Semi-Quant** for area-normalized relative intensities.
 4. For wt%, choose a **matrix model** (Measured only / Oxide / Carbonate / Hydroxide), leave H₂O / OH / CO₂ at 0 unless the sample needs them, then click **FP Composition**. After that, the knobs recompute live so you can try water contents.
+   FP uses every fitted K and L line of each element (e.g. `Kα+Kβ`); hover the **Line** cell to see observed/predicted per line. A ⚠ means one line disagrees with the others by > 25 % — check the residual there.
 5. Click **Export Results** when you want a table out.
 
 ### Checklist if Semi-Quant is empty

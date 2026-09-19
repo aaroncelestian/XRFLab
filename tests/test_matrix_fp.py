@@ -396,3 +396,133 @@ def test_poly_nias_ratio_between_mono_and_pure_continuum():
         result.element_wt["As"] / atomic_weight("As")
     )
     assert 0.80 < moles < 1.25
+
+
+# --- multi-line FP -------------------------------------------------------
+
+def _fp_intensity(fp, el, line, frac):
+    import xraylib as xrl
+
+    return fp.calculate_intensity(el, xrl.SymbolToAtomicNumber(el), line, frac[el], frac)
+
+
+def test_observed_lines_keeps_all_k_and_l_lines_and_drops_m():
+    from core.fp_quantification import observed_lines_from_peaks
+
+    peaks = [
+        _peak("Fe", "Kα1", 1000, 6.40),
+        _peak("Fe", "Kβ1", 130, 7.06),
+        _peak("Ba", "Lα1", 300, 4.47),
+        _peak("Ba", "Lβ1", 200, 4.83),
+        _peak("Ba", "Kα1", 90, 32.19),
+        _peak("Pb", "Lα1", 400, 10.55),
+        _peak("Pb", "Mα1", 50, 2.35),
+        _peak("U", "Mα1", 40, 3.17),  # M only → kept
+        _peak("Rh", "Kα1", 500, 20.2, tube=True),
+    ]
+    obs = observed_lines_from_peaks(peaks, tube_element="Rh")
+    assert [o.line for o in obs["Fe"]] == ["Kα1", "Kβ1"]
+    assert [o.line for o in obs["Ba"]] == ["Kα1", "Lα1", "Lβ1"]  # K first, then L
+    assert [o.line for o in obs["Pb"]] == ["Lα1"]  # M dropped when L exists
+    assert [o.line for o in obs["U"]] == ["Mα1"]
+    assert "Rh" not in obs
+
+
+def test_fp_multiline_roundtrip_matches_single_line():
+    """Consistent Kα+Kβ areas invert to the same composition as Kα alone."""
+    assumptions = MatrixAssumptions(kind=MatrixKind.OXIDE)
+    true_el, _ = expand_composition({"Fe": 60.0, "Ca": 40.0}, assumptions)
+    frac = {k: v / 100.0 for k, v in true_el.items()}
+    fp = FundamentalParameters(excitation_energy=50.0)
+    peaks_single = [
+        _peak("Fe", "Kα1", _fp_intensity(fp, "Fe", "Kα1", frac), 6.40),
+        _peak("Ca", "Kα1", _fp_intensity(fp, "Ca", "Kα1", frac), 3.69),
+    ]
+    peaks_multi = peaks_single + [
+        _peak("Fe", "Kβ1", _fp_intensity(fp, "Fe", "Kβ1", frac), 7.06),
+        _peak("Ca", "Kβ1", _fp_intensity(fp, "Ca", "Kβ1", frac), 4.01),
+    ]
+    params = {"excitation_energy": 50.0, "incident_angle": 45.0}
+    r1 = quantify_from_peaks(peaks_single, assumptions, params)
+    r2 = quantify_from_peaks(peaks_multi, assumptions, params)
+    assert r1.success and r2.success
+    assert abs(r2.element_wt["Fe"] - true_el["Fe"]) < 0.5
+    assert abs(r2.element_wt["Fe"] - r1.element_wt["Fe"]) < 0.3
+    assert r2.lines_used["Fe"] == "Kα1+Kβ1"
+    assert r2.concentrations["Fe"]["lines"] == ["Kα1", "Kβ1"]
+    assert not r2.line_warnings
+    # obs/pred ≈ 1 for every line when the data are self-consistent
+    for chk in r2.concentrations["Fe"]["line_checks"]:
+        assert abs(chk["ratio"] - 1.0) < 0.02
+        assert not chk["flag"]
+
+
+def test_fp_multiline_flags_inconsistent_kbeta_and_stays_near_truth():
+    """A Kβ inflated by an overlap is flagged; pooled wt% barely moves."""
+    assumptions = MatrixAssumptions(kind=MatrixKind.OXIDE)
+    true_el, _ = expand_composition({"Fe": 60.0, "Ca": 40.0}, assumptions)
+    frac = {k: v / 100.0 for k, v in true_el.items()}
+    fp = FundamentalParameters(excitation_energy=50.0)
+    i_ka = _fp_intensity(fp, "Fe", "Kα1", frac)
+    i_kb = _fp_intensity(fp, "Fe", "Kβ1", frac)
+    peaks = [
+        _peak("Fe", "Kα1", i_ka, 6.40),
+        _peak("Fe", "Kβ1", 2.5 * i_kb, 7.06),  # e.g. Co Kα hiding under Fe Kβ
+        _peak("Ca", "Kα1", _fp_intensity(fp, "Ca", "Kα1", frac), 3.69),
+    ]
+    r = quantify_from_peaks(
+        peaks, assumptions, {"excitation_energy": 50.0, "incident_angle": 45.0}
+    )
+    assert r.success
+    kb = [c for c in r.concentrations["Fe"]["line_checks"] if c["line"] == "Kβ1"][0]
+    assert kb["flag"] and kb["ratio"] > 1.5
+    assert any("Fe Kβ1" in w for w in r.line_warnings)
+    # Kα carries most of the counts → dominates the weighted estimate
+    assert abs(r.element_wt["Fe"] - true_el["Fe"]) < 0.15 * true_el["Fe"]
+
+
+def test_fp_k_and_l_series_are_independent_observations():
+    """Ba K and L both present: each predicted separately, both used."""
+    assumptions = MatrixAssumptions(kind=MatrixKind.OXIDE)
+    true_el, _ = expand_composition({"Ba": 70.0, "Si": 30.0}, assumptions)
+    frac = {k: v / 100.0 for k, v in true_el.items()}
+    fp = FundamentalParameters(excitation_energy=50.0)
+    peaks = [
+        _peak("Ba", "Kα1", _fp_intensity(fp, "Ba", "Kα1", frac), 32.19),
+        _peak("Ba", "Lα1", _fp_intensity(fp, "Ba", "Lα1", frac), 4.47),
+        _peak("Si", "Kα1", _fp_intensity(fp, "Si", "Kα1", frac), 1.74),
+    ]
+    r = quantify_from_peaks(
+        peaks, assumptions, {"excitation_energy": 50.0, "incident_angle": 45.0}
+    )
+    assert r.success
+    assert r.lines_used["Ba"] == "Kα1+Lα1"
+    assert abs(r.element_wt["Ba"] - true_el["Ba"]) < 1.0
+
+
+def test_fp_result_line_warnings_roundtrip_dict():
+    r = FPQuantResult(success=True, line_warnings=["Fe Kβ1: 2.0×"])
+    back = FPQuantResult.from_dict(r.to_dict())
+    assert back.line_warnings == ["Fe Kβ1: 2.0×"]
+    legacy = FPQuantResult.from_dict({"success": True})
+    assert legacy.line_warnings == []
+
+
+def test_observed_lines_pools_unresolved_sublines_and_fills_energy():
+    from core.fp_quantification import observed_lines_from_peaks
+
+    peaks = [
+        _peak("Fe", "Kα1", 900, 6.404),
+        _peak("Fe", "Kα2", 100, 6.391),   # 13 eV apart → pooled as "Kα"
+        _peak("Fe", "Kβ1", 120, 7.058),
+        _peak("Fe", "Kβ3", 60, 7.058),    # same energy → pooled as "Kβ"
+        _peak("Fe", "Lα1", 300, 0.705),   # < 1 keV → dropped
+        _peak("Cu", "Kα1", 500, 0.0),     # unknown centre → tabulated 8.05 keV
+    ]
+    obs = observed_lines_from_peaks(peaks)
+    fe = obs["Fe"]
+    assert [o.line for o in fe] == ["Kα", "Kβ"]
+    assert fe[0].lines == ["Kα2", "Kα1"] or fe[0].lines == ["Kα1", "Kα2"]
+    assert fe[0].area == 1000
+    assert abs(fe[0].energy - 6.4027) < 1e-3  # area-weighted centre
+    assert abs(obs["Cu"][0].energy - 8.05) < 0.02

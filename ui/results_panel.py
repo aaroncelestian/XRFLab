@@ -501,6 +501,25 @@ class ResultsPanel(QWidget):
 
             line_item = QTableWidgetItem(result.get('line', 'K'))
             line_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            checks = result.get('line_checks') or []
+            if is_fp and checks:
+                rows = []
+                flagged = False
+                for chk in checks:
+                    ratio = chk.get('ratio')
+                    ratio_txt = "—" if ratio is None else f"{ratio:.2f}×"
+                    mark = "  ⚠" if chk.get('flag') else ""
+                    flagged = flagged or bool(chk.get('flag'))
+                    rows.append(
+                        f"{chk.get('line')}  {chk.get('energy', 0.0):.2f} keV  "
+                        f"area {chk.get('area', 0.0):.0f}  obs/pred {ratio_txt}{mark}"
+                    )
+                line_item.setToolTip(
+                    "Per-line consistency vs. pooled FP prediction\n" + "\n".join(rows)
+                )
+                if flagged and len(checks) > 1:
+                    line_item.setForeground(QBrush(QColor("#b36b00")))
+                    line_item.setText(line_item.text() + " ⚠")
             table.setItem(i, 3, line_item)
 
             if role == "assumed":
@@ -573,7 +592,7 @@ class ResultsPanel(QWidget):
         if not notes:
             return
         current = self.peaks_text.toPlainText()
-        block = "\n\n--- Tube constraints ---\n" + "\n".join(f"• {n}" for n in notes)
+        block = "\n\n--- Fit constraints ---\n" + "\n".join(f"• {n}" for n in notes)
         self.peaks_text.setPlainText(current + block)
     
     def set_quantification(self, concentrations):
@@ -591,9 +610,22 @@ class ResultsPanel(QWidget):
                 'line': line,
                 'method': data.get('method', 'semi_quant_area'),
                 'role': role,
+                'line_checks': list(data.get('line_checks') or []),
             })
         
         self.set_results(results)
+
+    def set_fp_line_warnings(self, warnings):
+        """Append FP per-line consistency warnings to the peaks text."""
+        marker = "\n\n--- FP line consistency ---\n"
+        current = self.peaks_text.toPlainText()
+        if marker in current:
+            current = current.split(marker)[0]  # replace a previous block
+        if not warnings:
+            self.peaks_text.setPlainText(current)
+            return
+        block = marker + "\n".join(f"⚠ {w}" for w in warnings)
+        self.peaks_text.setPlainText(current + block)
     
     def clear_results(self):
         self.results_table.setRowCount(0)

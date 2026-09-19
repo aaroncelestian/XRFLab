@@ -61,6 +61,26 @@ XRFLab now includes a comprehensive spectrum fitting engine that performs:
 - The anode Compton humps are seeded at E' = E₀ / (1 + (E₀/511)(1 − cos θ)). θ is the tube→sample→detector angle; for Rh Kα it moves the hump from 19.45 keV (90°) to 18.8 keV (150°) — more than a full hump width.
 - Default θ is 155° (near-backscatter, typical of benchtop / micro-XRF). Fit the true instrument value with **Fit θ** on the Fitting tab or by measuring a blank on the Tube Profiles tab; a measured profile overrides the Fitting-tab θ and Compton FWHM.
 
+#### Grouped lines (default) vs. released ratios
+
+**Grouped** — each element *sub-shell* (K; L1, L2, L3; M) is one free amplitude. Within a sub-shell the line pattern is fixed to the tabulated radiative rates (×detector efficiency, and ×matrix absorption when a composition is passed as `ratio_matrix`). Between sub-shells and between series nothing is tied — those populations depend on the excitation spectrum. Tube lines, Compton humps and unlabeled peaks are single free components with soft tube-profile ratio priors. Because centres come from the tables and core widths from the detector model, every component is linear in amplitude and the whole spectrum is solved in **one non-negative linear least squares** (AXIL / PyMca style). A small outer search refines spectrum-wide nuisance parameters: energy zero/gain (±40 eV, ±0.4 %) and the peak-shape extras shared by all peaks (tail fraction and width for Tail-Gaussian, etc.).
+
+Consequences:
+- Overlaps such as As Kα / Pb Lα or Ba L / Ti K are resolved by each element's *clean* lines (As Kβ, Pb Lβ …) instead of by whichever peak the sequential fitter reached first.
+- Unresolved pairs (Kα1/Kα2, Kβ1/Kβ3, Lα1/Lα2) are split at the theoretical ratio rather than lumped into the first line.
+- An element that is not in the list cannot be absorbed by a neighbour's free centre: the misfit stays in the residual where you can see it (e.g. an unfit Zr Kα at 15.7 keV shows up instead of being eaten by a shifted Sr Kβ). Add the element and re-fit.
+- Fitted peaks carry a `group` tag (`Fe K`, `Pb L3`); the Results peak list shows each group's amplitude, fixed pattern, the energy refinement and the fitted global shape.
+
+**Released ratios** (Fitting tab check-box, also on the Standards fit tab) — the legacy per-line sequential fit with free amplitudes, centres and tails. Use it for diagnostics: if a released Kβ/Kα ratio is far from theory, something is hiding under one of the lines. FP Composition reports the same check as obs/pred per line (see below). The Standards calibration stores which mode was used and warns if you quantify with the other.
+
+#### Multi-line FP quantification
+
+FP Composition uses *every* predictable K and L line of each element as an observation. The element's scale is the weighted least-squares slope of fitted area vs. FP-predicted intensity across its lines — weights from Poisson counting statistics plus a per-series model uncertainty (K 3 %, L 15 %, M 50 %) — iterated robustly so one contaminated line cannot drag the estimate. K and L series are separate observations (their ratio depends on the tube spectrum). Lines below 1 keV, lines predicted at < 3 % of the element's strongest, and M lines when K or L exist are excluded; unresolved sub-lines are pooled (`Kα` = Kα1+Kα2).
+
+Standards calibration curves use the same idea: the default regressor is the **principal series** intensity (all K lines summed, else all L), shown as `K (Kα+Kβ)` in the Results table. Single-family (`Kα`) and all-lines modes remain available.
+
+In the FP wt% table the **Line** column lists the lines used; hover for obs/pred per line. A ⚠ marks a line more than 25 % from the pooled prediction — with released ratios that points to an overlap or absorption edge on that line; with grouped lines it means the FP-corrected pattern disagrees with the pure tabulated pattern used in the fit (strong matrix absorption between Kα and Kβ), and the residual is worth a look.
+
 #### Peak Detection
 
 **Element-Based**

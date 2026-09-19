@@ -37,8 +37,10 @@ MODEL_THROUGH_ORIGIN = "through_origin"
 MODEL_QUADRATIC = "quadratic"
 MODELS = (MODEL_LINEAR, MODEL_THROUGH_ORIGIN, MODEL_QUADRATIC)
 
-LINE_AUTO = "auto"  # Kα if excited, else Lα, else Mα
-LINE_ALL = "all"    # every fitted line of the element
+LINE_SERIES = "series"  # every line of the principal series: K if excited, else L, else M
+LINE_AUTO = "auto"      # Kα if excited, else Lα, else Mα
+LINE_ALL = "all"        # every fitted line of the element (mixes series)
+LINE_DEFAULT = LINE_SERIES
 
 # Minimum Z we try to calibrate (lighter elements are not measurable in air)
 MIN_Z = 11
@@ -374,13 +376,42 @@ def line_group_of(line_name: Optional[str]) -> str:
     return s[:2] if len(s) >= 2 else s
 
 
-def choose_line_group(groups_present: Iterable[str]) -> str:
-    """Prefer Kα, then Lα, then Mα; fall back to everything."""
-    present = set(groups_present)
+def choose_line_group(groups_present: Iterable[str], mode: str = LINE_AUTO) -> str:
+    """
+    Pick the line group key for an element from the families fitted.
+
+    mode LINE_AUTO   → 'Kα', else 'Lα', else 'Mα' (single family)
+    mode LINE_SERIES → 'K', else 'L', else 'M' (whole series summed)
+    Falls back to LINE_ALL when nothing matches.
+    """
+    present = {g for g in groups_present if g and g != "Compton"}
+    if mode == LINE_SERIES:
+        series = {g[0] for g in present if g[0] in "KLM"}
+        for s in ("K", "L", "M"):
+            if s in series:
+                return s
+        return LINE_ALL
     for g in ("Kα", "Lα", "Mα"):
         if g in present:
             return g
     return LINE_ALL
+
+
+def line_matches_group(line_name: Optional[str], group: str) -> bool:
+    """
+    Does a fitted line belong to a curve's line group?
+
+    group is LINE_ALL, a series letter ('K'), or a family ('Kα').
+    Compton humps never match.
+    """
+    g = line_group_of(line_name)
+    if g == "Compton" or g == "?":
+        return False
+    if group == LINE_ALL:
+        return True
+    if len(group) == 1:
+        return g[0] == group
+    return g == group
 
 
 def element_list_for_fit(
@@ -465,8 +496,8 @@ def extract_spot_intensities(
     """
     Sum fitted peak areas per element for the chosen line group.
 
-    line_groups maps element → 'Kα' / 'Lα' / ... / 'all'.
-    normalise: 'live_time', 'real_time' or 'none'.
+    line_groups maps element → 'K' / 'L' (whole series), 'Kα' / 'Lα' … (one
+    family) or 'all'. normalise: 'live_time', 'real_time' or 'none'.
     """
     energy = np.asarray(spectrum.energy, dtype=float)
     background = np.asarray(getattr(fit_result, "background", None), dtype=float) \
@@ -490,10 +521,7 @@ def extract_spot_intensities(
         for pk in fit_result.peaks:
             if pk.element != sym or getattr(pk, "is_tube_line", False):
                 continue
-            g = line_group_of(pk.line)
-            if g == "Compton":
-                continue
-            if group != LINE_ALL and g != group:
+            if not line_matches_group(pk.line, group):
                 continue
             a = float(pk.area or 0.0)
             area += a
@@ -618,7 +646,7 @@ class StandardsCalibration:
         *,
         fit_kwargs: Optional[Dict[str, Any]] = None,
         elements: Optional[Iterable[str]] = None,
-        line_selection: str = LINE_AUTO,
+        line_selection: str = LINE_DEFAULT,
         normalise: str = "live_time",
         progress: Optional[Callable[[str, int, int], None]] = None,
         should_stop: Optional[Callable[[], bool]] = None,
@@ -673,10 +701,14 @@ class StandardsCalibration:
                 excitation_kv=excitation,
                 include_tube_lines=fit_kwargs.get("include_tube_lines", True),
                 include_compton=fit_kwargs.get("include_compton", True),
+                grouped_lines=bool(fit_kwargs.get("grouped_lines", True)),
             )
             fit_results[(name, path)] = result
 
-        # Decide one line group per element (consistent across all spectra)
+        # Decide one line group per element (consistent across all spectra).
+        # LINE_SERIES sums every line of the principal series (Kα+Kβ …): with
+        # grouped fitting that is the sub-shell amplitude itself; with released
+        # ratios it is far less sensitive to an overlap on one line.
         line_groups: Dict[str, str] = {}
         for sym in symbols:
             if line_selection == LINE_ALL:
@@ -687,7 +719,7 @@ class StandardsCalibration:
                 for pk in res.peaks:
                     if pk.element == sym and not getattr(pk, "is_tube_line", False):
                         present.add(line_group_of(pk.line))
-            line_groups[sym] = choose_line_group(present)
+            line_groups[sym] = choose_line_group(present, line_selection)
         self.line_groups = line_groups
 
         new_intensities: Dict[str, Dict[str, Dict[str, SpotIntensity]]] = {}
@@ -712,6 +744,7 @@ class StandardsCalibration:
         self.fit_settings = {
             "background_method": fit_kwargs.get("background_method", "snip"),
             "peak_shape": fit_kwargs.get("peak_shape", "tail_gaussian"),
+            "grouped_lines": bool(fit_kwargs.get("grouped_lines", True)),
             "tube_element": fit_kwargs.get("tube_element", "Rh"),
             "excitation_kv": excitation,
             "elements": symbols,
@@ -858,8 +891,7 @@ class StandardsCalibration:
             for pk in peaks:
                 if pk.element != sym or getattr(pk, "is_tube_line", False):
                     continue
-                g = line_group_of(pk.line)
-                if g == "Compton" or (group != LINE_ALL and g != group):
+                if not line_matches_group(pk.line, group):
                     continue
                 a = float(pk.area or 0.0)
                 area += a
@@ -873,11 +905,18 @@ class StandardsCalibration:
             cps = area / t
             cps_err = math.sqrt(var) / t
             conc, err = curve.predict(cps, cps_err)
+            if group == LINE_ALL:
+                label = ", ".join(lines)
+            elif len(group) == 1:
+                fams = sorted({line_group_of(l) for l in lines})
+                label = f"{group} ({'+'.join(fams)})"
+            else:
+                label = group
             out[sym] = {
                 "concentration": conc,
                 "error": err,
                 "lines": lines,
-                "line": group if group != LINE_ALL else ", ".join(lines),
+                "line": label,
                 "method": "standards_curve",
                 "intensity_cps": cps,
                 "intensity_cps_err": cps_err,

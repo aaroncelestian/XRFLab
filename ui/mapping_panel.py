@@ -5143,6 +5143,7 @@ class MappingPanel(QWidget):
                     sample_contains_tube_element=fit_params.get(
                         "sample_contains_tube_element", False
                     ),
+                    grouped_lines=fit_params.get("grouped_lines", True),
                     experimental_params=exp_params,
                     prominence_percent=fit_params.get("prominence_percent"),
                     min_height=fit_params.get("min_height"),

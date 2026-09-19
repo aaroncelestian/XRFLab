@@ -88,6 +88,7 @@ class Peak:
     shape_params: dict = None  # Parameters specific to the shape (sigma, gamma, etc.)
     is_tube_line: bool = False  # True if this is from X-ray tube, not sample
     fixed_fwhm: float = None  # If set, width was locked (e.g. Compton)
+    group: str = None  # Shared-amplitude line group (e.g. 'Fe K') when grouped-fit
     
     def __post_init__(self):
         if self.shape_params is None:
@@ -108,6 +109,7 @@ class Peak:
             "fixed_fwhm": (
                 None if self.fixed_fwhm is None else float(self.fixed_fwhm)
             ),
+            "group": self.group,
         }
 
     @classmethod
@@ -127,6 +129,7 @@ class Peak:
                 if data.get("fixed_fwhm") is None
                 else float(data["fixed_fwhm"])
             ),
+            group=data.get("group"),
         )
     
     def __str__(self):

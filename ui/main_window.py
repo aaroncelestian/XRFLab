@@ -1270,6 +1270,7 @@ class MainWindow(QMainWindow):
                 min_height=fit_params.get('min_height'),
                 min_separation_ev=fit_params.get('min_separation_ev'),
                 peak_positions=peak_positions,
+                grouped_lines=fit_params.get('grouped_lines', True),
             )
             self.session.set_fit_result(fit_result)
             
@@ -1703,6 +1704,10 @@ class MainWindow(QMainWindow):
             self.session.set_fp_result(result)
             self.results_panel.set_fp_live(True)
             self.results_panel.set_quantification(result.concentrations)
+            if not live:
+                self.results_panel.set_fp_line_warnings(
+                    getattr(result, "line_warnings", None)
+                )
             bits = [f"As compounds: {result.formula_summary()}"]
             if result.residual < float("inf"):
                 bits.append(
@@ -2100,6 +2105,14 @@ class MainWindow(QMainWindow):
             cal_shape = normalize_peak_shape(cal_fs.get('peak_shape'))
             if cal_shape and shape != cal_shape:
                 mismatches.append(f"peak shape {shape} vs {cal_shape}")
+            if 'grouped_lines' in cal_fs:
+                g = bool(fit_params.get('grouped_lines', True))
+                cg = bool(cal_fs.get('grouped_lines', True))
+                if g != cg:
+                    mismatches.append(
+                        f"line ratios {'grouped' if g else 'released'} vs "
+                        f"{'grouped' if cg else 'released'}"
+                    )
         spectrum = self.current_spectrum
         try:
             concentrations = cal.quantify(

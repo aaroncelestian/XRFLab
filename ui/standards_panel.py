@@ -42,7 +42,7 @@ from core.reference_composition import find_composition_csv, load_composition_cs
 from core.standards_calibration import (
     StandardsCalibration, StandardRecord, ElementCurve,
     MODEL_LINEAR, MODEL_THROUGH_ORIGIN, MODEL_QUADRATIC,
-    LINE_AUTO, LINE_ALL, element_list_for_fit, suggest_elements,
+    LINE_AUTO, LINE_ALL, LINE_SERIES, element_list_for_fit, suggest_elements,
     load_any_standards_calibration,
 )
 from ui.concentration_entry_dialog import ConcentrationEntryDialog
@@ -55,6 +55,7 @@ MODEL_LABELS = [
     ("Quadratic (C = a + b·I + c·I²)", MODEL_QUADRATIC),
 ]
 LINE_LABELS = [
+    ("Principal series (all K lines, else L)", LINE_SERIES),
     ("Principal line (Kα, else Lα)", LINE_AUTO),
     ("All fitted lines of element", LINE_ALL),
 ]
@@ -364,7 +365,10 @@ class StandardsPanel(QWidget):
             self.line_combo.addItem(label, key)
         self.line_combo.setToolTip(
             "Which fitted lines are summed to the element intensity.\n"
-            "Principal line is the usual choice; Kα1+Kα2 are summed."
+            "Principal series (default): Kα+Kβ… — with grouped fitting this is the\n"
+            "sub-shell amplitude; with released ratios it is robust to an overlap\n"
+            "on one line.\n"
+            "Principal line: Kα1+Kα2 only.  All: every line, mixing K and L."
         )
         r.addWidget(self.line_combo, stretch=1)
         r.addWidget(QLabel("Normalize:"))
@@ -391,6 +395,14 @@ class StandardsPanel(QWidget):
             "curves to transfer to unknowns."
         )
         r.addWidget(self.shape_combo)
+        self.release_ratios_check = QCheckBox("Release ratios")
+        self.release_ratios_check.setChecked(False)
+        self.release_ratios_check.setToolTip(
+            "Off (default): grouped fit — one amplitude per element sub-shell with "
+            "fixed line ratios, all peaks solved jointly.\n"
+            "On: legacy per-line sequential fit. Match the Analysis Fitting tab."
+        )
+        r.addWidget(self.release_ratios_check)
         r.addStretch()
         sl.addLayout(r)
 
@@ -933,6 +945,7 @@ class StandardsPanel(QWidget):
         fit_kwargs = {
             "background_method": self.bg_combo.currentData(),
             "peak_shape": self.shape_combo.currentData(),
+            "grouped_lines": not self.release_ratios_check.isChecked(),
             "tube_element": self.tube_combo.currentText(),
             "excitation_kv": float(self.kv_spin.value()),
         }
@@ -1008,11 +1021,12 @@ class StandardsPanel(QWidget):
         try:
             _set_combo_data(self.model_combo, calibration.settings.get("model", MODEL_LINEAR))
             self.weighted_check.setChecked(bool(calibration.settings.get("weighted", True)))
-            _set_combo_data(self.line_combo, calibration.settings.get("line_selection", LINE_AUTO))
+            _set_combo_data(self.line_combo, calibration.settings.get("line_selection", LINE_SERIES))
             _set_combo_data(self.normalise_combo, calibration.settings.get("normalise", "live_time"))
             fs = calibration.fit_settings or {}
             _set_combo_data(self.bg_combo, fs.get("background_method", "snip"))
             _set_combo_data(self.shape_combo, fs.get("peak_shape", "tail_gaussian"))
+            self.release_ratios_check.setChecked(not bool(fs.get("grouped_lines", True)))
             if fs.get("tube_element"):
                 idx = self.tube_combo.findText(fs["tube_element"])
                 if idx >= 0:

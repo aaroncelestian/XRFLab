@@ -631,15 +631,27 @@ class SpectrumFitter:
                 **build_kwargs,
             )
         
-        # Step 4: Fit peaks with tube-profile priors + known overlap doublets
+        profile = None
+        if self.tube_profile_library is not None:
+            profile = self.tube_profile_library.select_for_excitation(excitation_kv)
+
+        # Step 4 (grouped): one shared amplitude per element sub-shell with
+        # fixed line ratios; every component solved jointly by linear LS.
+        if kwargs.get('grouped_lines', True):
+            return self._fit_spectrum_grouped(
+                energy, counts, background, counts_bg_subtracted,
+                peak_positions, peak_shape, profile, excitation_kv,
+                tube_element=tube_element,
+                refine_energy=bool(kwargs.get('refine_energy', True)),
+                ratio_matrix=kwargs.get('ratio_matrix'),
+            )
+
+        # Step 4 (released ratios): sequential per-line fits with
+        # tube-profile priors + known overlap doublets
         print(f"Fitting {len(peak_positions)} peaks using {peak_shape} shape...")
         fitted_peaks = []
         residual_counts = np.asarray(counts_bg_subtracted, dtype=float).copy()
         tube_constraint_notes = []
-
-        profile = None
-        if self.tube_profile_library is not None:
-            profile = self.tube_profile_library.select_for_excitation(excitation_kv)
 
         from core.tube_constraints import (
             find_overlap_pairs,
@@ -935,25 +947,111 @@ class SpectrumFitter:
         if tube_constraint_notes:
             print(f"Tube constraints applied: {len(tube_constraint_notes)}")
         
-        # Step 5: Reconstruct fitted spectrum
+        n_params = len(fitted_peaks) * 3 + 1  # 3 params per peak + background
+        return self._assemble_result(
+            energy, counts, background, fitted_peaks, n_params,
+            tube_constraint_notes, excitation_kv,
+            extra_stats={'fit_mode': 'released'},
+        )
+
+    def _fit_spectrum_grouped(
+        self,
+        energy,
+        counts,
+        background,
+        counts_bg_subtracted,
+        peak_positions,
+        peak_shape,
+        profile,
+        excitation_kv,
+        *,
+        tube_element=None,
+        refine_energy=True,
+        ratio_matrix=None,
+    ) -> FitResult:
+        """
+        Grouped fit: each element sub-shell is one free amplitude with a
+        fixed line pattern; tube lines, Compton and unlabeled peaks are
+        single columns; everything is solved in one bounded linear LS.
+
+        `ratio_matrix` ({element: weight_fraction}) lets the fixed ratios
+        include matrix absorption at each line energy (FP-corrected). Without
+        it only detector efficiency modulates the tabulated emission ratios.
+        """
+        from core.line_groups import build_line_groups, fit_grouped, make_ratio_corrector
+
+        corrector = None
+        try:
+            from core.fundamental_parameters import FundamentalParameters
+            fp = FundamentalParameters(
+                excitation_energy=float(excitation_kv),
+                tube_element=str(tube_element or 'Rh'),
+                polychromatic=False,
+            )
+            corrector = make_ratio_corrector(fp, ratio_matrix)
+        except Exception:
+            corrector = None
+
+        groups, singles = build_line_groups(
+            peak_positions, float(energy[0]), float(energy[-1]), corrector
+        )
+        n_lines = sum(len(g.lines) for g in groups)
+        print(
+            f"Grouped fit: {len(groups)} line groups ({n_lines} lines) + "
+            f"{len(singles)} single components, {peak_shape} shape..."
+        )
+        for g in groups:
+            pattern = ", ".join(
+                f"{l.name} {l.ratio:.2f}" for l in sorted(g.lines, key=lambda l: -l.ratio)
+            )
+            print(f"  {g.key}: [{pattern}]")
+
+        result = fit_grouped(
+            energy, counts_bg_subtracted, counts, groups, singles,
+            shape=peak_shape, profile=profile, refine_energy=refine_energy,
+        )
+        for note in result.notes:
+            print(f"  • {note}")
+
+        extra = {
+            'fit_mode': 'grouped',
+            'line_groups': dict(result.group_amplitudes),
+            'energy_offset_kev': float(result.energy_offset_kev),
+            'energy_gain': float(result.energy_gain),
+            'shape_globals': dict(result.shape_globals),
+        }
+        return self._assemble_result(
+            energy, counts, background, result.peaks, result.n_params + 1,
+            result.notes, excitation_kv, extra_stats=extra,
+        )
+
+    def _assemble_result(
+        self,
+        energy,
+        counts,
+        background,
+        fitted_peaks,
+        n_params,
+        tube_constraint_notes,
+        excitation_kv,
+        *,
+        extra_stats=None,
+    ) -> FitResult:
+        """Steps 5–7: rebuild the model, residuals, statistics, tube flags."""
         fitted_spectrum = np.copy(background)
-        
         for peak in fitted_peaks:
             fitted_spectrum += self.peak_fitter.evaluate_peak(peak, energy)
-        
-        # Step 6: Calculate residuals
+
         residuals = counts - fitted_spectrum
-        
-        # Step 7: Calculate fit statistics
-        n_params = len(fitted_peaks) * 3 + 1  # 3 params per peak + background
+
         statistics = self.peak_fitter.calculate_fit_statistics(
             counts, fitted_spectrum, n_params
         )
-        
-        # Add iteration count (placeholder for now)
         statistics['iterations'] = 1
         if tube_constraint_notes:
             statistics['tube_constraint_notes'] = list(tube_constraint_notes)
+        if extra_stats:
+            statistics.update(extra_stats)
 
         # Compare fitted tube line ratios to the instrument tube profile
         tube_overlap_flags = []
@@ -968,7 +1066,7 @@ class SpectrumFitter:
                 print(f"Tube profile overlap flags: {len(tube_overlap_flags)}")
                 for flag in tube_overlap_flags:
                     print(f"  ⚠ {flag['message']}")
-        
+
         return FitResult(
             background=background,
             fitted_spectrum=fitted_spectrum,

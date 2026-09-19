@@ -358,8 +358,13 @@ class BatchAnalysisPanel(QWidget):
             self.settings_excitation.setText(
                 f"{excitation:g} keV · {current:g} mA · {live_time:g} s"
             )
+            released = bool(
+                getattr(self.element_panel, "release_ratios_check", None)
+                and self.element_panel.release_ratios_check.isChecked()
+            )
             self.settings_fit.setText(
                 f"{peak_shape} · {background}"
+                + (" · released ratios" if released else " · grouped lines")
                 + (" · escape" if escape_peaks else "")
             )
             self.settings_tube.setText(tube_element)
@@ -371,6 +376,7 @@ class BatchAnalysisPanel(QWidget):
             self.config.live_time = live_time
             self.config.background_method = background.lower()
             self.config.peak_shape = normalize_peak_shape(peak_shape)
+            self.config.grouped_lines = not released
             self.config.include_escape_peaks = escape_peaks
             self.config.include_tube_lines = tube_on
             self.config.tube_element = (
