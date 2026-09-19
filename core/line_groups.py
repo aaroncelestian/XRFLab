@@ -6,10 +6,12 @@ with a fixed intra-group line pattern. Within a sub-shell the branching
 ratios are pure radiative rates (known to a few %); between sub-shells and
 between series the populations depend on the excitation spectrum, so those
 stay free. Tube lines, Compton humps and unlabeled peaks are single
-columns. Because widths come from the detector model and centres from the
-tables, every component is linear in amplitude and the whole spectrum is
-solved in one bounded linear least squares (AXIL / PyMca style). Overlaps
-such as As Kα / Pb Lα are then resolved by each element's clean lines.
+columns. Because fluorescence widths come from the detector model and centres from
+the tables, those components are linear in amplitude and the whole
+spectrum is solved in one bounded linear least squares (AXIL / PyMca
+style). Compton humps are the exception: they use a locked Compton width
+(Gaussian, no FWHM calibration / ICC tails). Overlaps such as As Kα /
+Pb Lα are then resolved by each element's clean lines.
 
 An optional global zero/gain refinement absorbs small energy-calibration
 errors so fixed-centre fitting is not penalised.
@@ -25,6 +27,7 @@ from scipy import optimize
 
 from core.peak_fitting import Peak, PeakFitter, normalize_peak_shape
 from core.smart_peak_id import line_relative_intensities
+from core.xray_data import DEFAULT_COMPTON_FWHM_KEV, is_compton_line
 
 # Lines below this fraction of the group's strongest line are dropped
 MIN_GROUP_RATIO = 0.01
@@ -176,8 +179,16 @@ def build_line_groups(
 # --- design matrix -----------------------------------------------------------
 
 def _sigma_for(energy_kev: float, seed: Optional[dict] = None) -> float:
+    """Gaussian σ for a design-matrix column.
+
+    Compton never uses the detector FWHM(E) model — inelastic scatter is
+    broader than the resolution function. Fluorescence / Rayleigh widths
+    come from the calibrated detector curve.
+    """
     if seed is not None and seed.get('fixed_fwhm') is not None:
         return float(seed['fixed_fwhm']) / 2.355
+    if is_compton_line((seed or {}).get('line')):
+        return float(DEFAULT_COMPTON_FWHM_KEV) / 2.355
     return float(PeakFitter.calculate_fwhm(float(energy_kev))) / 2.355
 
 
@@ -270,7 +281,7 @@ def _build_design(
         e_tab = float(pos['energy'])
         line = str(pos.get('line') or '')
         if pos.get('is_tube_line'):
-            kind = 'compton' if line.startswith('Compton') else 'tube'
+            kind = 'compton' if is_compton_line(line) else 'tube'
             e = obs_e(e_tab)
         elif pos.get('element'):
             kind = 'sample'
@@ -278,7 +289,12 @@ def _build_design(
         else:
             kind = 'unknown'
             e = e_tab  # detected in the observed scale already
-        col = _unit_profile(x, e, _sigma_for(e_tab, pos), shape, gshape)
+        # Compton: locked Gaussian at Compton FWHM — not the detector
+        # resolution model and not the shared fluorescence ICC tails.
+        if kind == 'compton':
+            col = _unit_profile(x, e, _sigma_for(e_tab, pos), 'gaussian', None)
+        else:
+            col = _unit_profile(x, e, _sigma_for(e_tab, pos), shape, gshape)
         if np.any(col > 0):
             cols.append(col)
             label = f"{pos.get('element') or '?'} {line}".strip() if kind != 'unknown' else f"unk {e_tab:.3f}"
@@ -386,7 +402,8 @@ def fit_grouped(
         energy, counts_bg_subtracted: spectrum with background removed
         counts_raw: original counts (Poisson weights)
         groups, singles: from build_line_groups()
-        shape: peak shape; core widths locked to the detector model
+        shape: peak shape; fluorescence core widths locked to the detector
+            model. Compton columns stay on a locked Compton FWHM Gaussian.
         profile: TubeProfile for soft tube-ratio priors (optional)
         refine_energy: fit a global zero/gain correction
         refine_shape: fit the global shape extras (else use defaults)
@@ -538,16 +555,31 @@ def fit_grouped(
             e_tab = float(pos.get('energy', 0.0))
             e_obs = e_tab if m.kind == 'unknown' else e_tab * gain + offset
             sigma = _sigma_for(e_tab, pos)
-            sp = shape_params_from_global(shape, sigma, gshape)
+            is_compton = m.kind == 'compton' or is_compton_line(pos.get('line'))
+            if is_compton:
+                peak_shape = 'gaussian'
+                sp = PeakFitter.default_shape_params('gaussian', sigma)
+                locked = (
+                    float(pos['fixed_fwhm'])
+                    if pos.get('fixed_fwhm') is not None
+                    else 2.355 * sigma
+                )
+            else:
+                peak_shape = shape
+                sp = shape_params_from_global(shape, sigma, gshape)
+                locked = (
+                    float(pos['fixed_fwhm'])
+                    if pos.get('fixed_fwhm') is not None
+                    else None
+                )
             peaks.append(Peak(
                 energy=e_obs, amplitude=a,
-                fwhm=PeakFitter.fwhm_for_shape(sigma, shape, sp),
-                area=PeakFitter.compute_peak_area(a, sigma, shape, sp),
-                element=pos.get('element'), line=pos.get('line'), shape=shape,
-                shape_params=dict(sp), is_tube_line=bool(pos.get('is_tube_line', False)),
-                fixed_fwhm=(
-                    float(pos['fixed_fwhm']) if pos.get('fixed_fwhm') is not None else None
-                ),
+                fwhm=PeakFitter.fwhm_for_shape(sigma, peak_shape, sp),
+                area=PeakFitter.compute_peak_area(a, sigma, peak_shape, sp),
+                element=pos.get('element'), line=pos.get('line'),
+                shape=peak_shape, shape_params=dict(sp),
+                is_tube_line=bool(pos.get('is_tube_line', False)),
+                fixed_fwhm=locked,
             ))
 
     n_params = int(A.shape[1]) + len(free)

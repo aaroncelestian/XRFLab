@@ -2334,13 +2334,48 @@ class MainWindow(QMainWindow):
         return concentrations, label
     
     def closeEvent(self, event):
-        """Handle window close event"""
+        """Quit the whole app: hidden figure windows used to keep Python alive."""
+        self._stop_background_work()
         for window in (
             getattr(self, "spectrum_window", None),
             getattr(self, "map_window", None),
             getattr(self, "charts_window", None),
         ):
             if window is not None:
-                window.save_geometry()
+                window.shutdown()
         self._save_settings()
         event.accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _stop_background_work(self) -> None:
+        """Stop QThreads so they cannot pin the process after exec() returns."""
+        for panel in (
+            getattr(self, "standards_panel", None),
+            getattr(self, "batch_analysis_panel", None),
+            getattr(self, "fwhm_calibration_panel", None),
+            getattr(self, "calibration_panel", None),
+        ):
+            if panel is None:
+                continue
+            worker = getattr(panel, "worker", None)
+            if worker is None:
+                continue
+            stop = getattr(worker, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception:
+                    pass
+            try:
+                worker.requestInterruption()
+                if worker.isRunning() and not worker.wait(4000):
+                    worker.terminate()
+                    worker.wait(1000)
+            except RuntimeError:
+                pass
+            try:
+                panel.worker = None
+            except Exception:
+                pass

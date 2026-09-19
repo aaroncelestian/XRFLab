@@ -833,12 +833,86 @@ def test_fit_includes_compton_tube_peaks():
         if p.is_tube_line and p.line and str(p.line).startswith("Compton")
     ]
     assert compton, "expected at least one fitted Compton peak"
+    for peak in compton:
+        assert peak.fixed_fwhm == pytest.approx(0.500)
+        assert peak.fwhm == pytest.approx(0.500, abs=0.05)
+        assert peak.shape == "gaussian"
     quant = fitter.quantify_elements(
         result.peaks,
         tube_element="Rh",
         sample_contains_tube_element=False,
     )
     assert "Rh" not in quant
+
+
+def test_fwhm_calibration_does_not_lock_compton_width():
+    from core.fitting import SpectrumFitter
+    from core.instrument_state import DetectorModel
+    from core.peak_fitting import PeakFitter
+    from core.xray_data import get_tube_compton_lines
+
+    det = DetectorModel(fwhm_0=0.08, epsilon=0.0008, use_calibrated_shapes=True)
+    PeakFitter.activate(PeakFitter(detector=det))
+    fitter = SpectrumFitter(detector=det)
+
+    energy = np.linspace(0.5, 25.0, 2500)
+    counts = np.full_like(energy, 30.0)
+    compton_fwhm = 0.700
+    seeds = get_tube_compton_lines("Rh", excitation_kv=50.0, fwhm_kev=compton_fwhm)
+    e_c = seeds[0]["energy"]
+    sigma = compton_fwhm / 2.355
+    counts = counts + 400.0 * np.exp(-((energy - e_c) ** 2) / (2 * sigma**2))
+
+    result = fitter.fit_spectrum(
+        energy=energy,
+        counts=counts,
+        elements=[],
+        background_method="none",
+        peak_shape="tail_gaussian",
+        auto_find_peaks=False,
+        include_tube_lines=True,
+        include_compton=True,
+        tube_element="Rh",
+        excitation_kv=50.0,
+        compton_fwhm_kev=compton_fwhm,
+        sample_contains_tube_element=False,
+        grouped_lines=True,
+    )
+    compton = [
+        p for p in result.peaks
+        if p.is_tube_line and p.line and str(p.line).startswith("Compton")
+    ]
+    assert compton
+    det_fwhm = float(PeakFitter.calculate_fwhm(compton[0].energy))
+    assert abs(det_fwhm - compton_fwhm) > 0.2
+    for peak in compton:
+        assert peak.fixed_fwhm == pytest.approx(compton_fwhm)
+        assert peak.fwhm == pytest.approx(compton_fwhm, abs=0.05)
+        assert peak.shape == "gaussian"
+        assert abs(peak.fwhm - det_fwhm) > 0.2
+
+
+def test_ensure_compton_positions_refreshes_locked_width():
+    from core.fitting import SpectrumFitter
+    from core.peak_fitting import PeakFitter
+
+    fitter = SpectrumFitter()
+    energy = np.linspace(0.5, 25.0, 1000)
+    stale = [{
+        "energy": 18.80,
+        "element": "Rh",
+        "line": "Compton Kα",
+        "is_tube_line": True,
+        # leftover from a detector-FWHM lock
+        "fixed_fwhm": float(PeakFitter.calculate_fwhm(18.80)),
+    }]
+    updated = fitter._ensure_compton_positions(
+        stale, energy, tube_element="Rh", excitation_kv=50.0,
+        compton_fwhm_kev=0.700,
+    )
+    compton = [p for p in updated if str(p.get("line", "")).startswith("Compton")]
+    assert compton
+    assert all(p["fixed_fwhm"] == pytest.approx(0.700) for p in compton)
 
 
 def test_sample_contains_rh_opt_in_for_quant():

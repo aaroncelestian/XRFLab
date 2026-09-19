@@ -253,6 +253,15 @@ def get_tube_lines(tube_element='Rh', excitation_kv=50.0):
 DEFAULT_SCATTER_ANGLE_DEG = 155.0
 SCATTER_ANGLE_MIN_DEG = 30.0
 SCATTER_ANGLE_MAX_DEG = 180.0
+# Compton humps are Doppler- + geometry-broadened, not detector-limited.
+# Never fall back to PeakFitter.calculate_fwhm() for these lines.
+DEFAULT_COMPTON_FWHM_KEV = 0.500
+
+
+def is_compton_line(line) -> bool:
+    """True for inelastic tube-scatter labels ('Compton Kα', 'Compton Kβ', …)."""
+    return str(line or "").startswith("Compton")
+
 
 ELECTRON_REST_KEV = 511.0
 
@@ -416,7 +425,7 @@ def get_tube_compton_lines(
     tube_element='Rh',
     excitation_kv=50.0,
     scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
-    fwhm_kev=0.250,
+    fwhm_kev=DEFAULT_COMPTON_FWHM_KEV,
 ):
     """
     Inelastic (Compton) tube scatter lines for analysis fitting.
@@ -498,7 +507,7 @@ def compton_seed_diagnostics(
     tube_element='Rh',
     excitation_kv=50.0,
     scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
-    fwhm_kev=0.500,
+    fwhm_kev=DEFAULT_COMPTON_FWHM_KEV,
     energy_min=None,
     energy_max=None,
 ):
@@ -551,7 +560,7 @@ def build_tube_guide_regions(
     *,
     include_compton: bool = True,
     scatter_angle_deg: float = DEFAULT_SCATTER_ANGLE_DEG,
-    compton_fwhm_kev: float = 0.500,
+    compton_fwhm_kev: float = DEFAULT_COMPTON_FWHM_KEV,
     energy_min=None,
     energy_max=None,
 ) -> list:

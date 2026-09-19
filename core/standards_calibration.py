@@ -921,6 +921,11 @@ class StandardsCalibration:
                 raise InterruptedError("Calibration cancelled")
             if progress:
                 progress(f"Fitting {name}: {Path(path).name}", i, total)
+            extra_geom = {}
+            if fit_kwargs.get("scatter_angle_deg") is not None:
+                extra_geom["scatter_angle_deg"] = fit_kwargs["scatter_angle_deg"]
+            if fit_kwargs.get("compton_fwhm_kev") is not None:
+                extra_geom["compton_fwhm_kev"] = fit_kwargs["compton_fwhm_kev"]
             result = fitter.fit_spectrum(
                 energy=spec.energy,
                 counts=spec.counts,
@@ -934,6 +939,7 @@ class StandardsCalibration:
                 include_compton=fit_kwargs.get("include_compton", True),
                 grouped_lines=bool(fit_kwargs.get("grouped_lines", True)),
                 reference_composition=dict(self.standards[name].concentrations),
+                **extra_geom,
             )
             fit_results[(name, path)] = result
 

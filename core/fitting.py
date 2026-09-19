@@ -13,7 +13,9 @@ from core.xray_data import (
     get_tube_lines,
     get_tube_compton_lines,
     compton_seed_diagnostics,
+    DEFAULT_COMPTON_FWHM_KEV,
     DEFAULT_SCATTER_ANGLE_DEG,
+    is_compton_line,
 )
 from core.smart_peak_id import (
     MAJOR_LINE_NAMES,
@@ -130,7 +132,22 @@ class SpectrumFitter:
             out['inferred'] = True
         if p.get('expected_relative_intensity') is not None:
             out['expected_relative_intensity'] = float(p['expected_relative_intensity'])
+        if is_compton_line(out.get('line')) and out.get('fixed_fwhm') is None:
+            out['fixed_fwhm'] = float(DEFAULT_COMPTON_FWHM_KEV)
         return out
+
+    @staticmethod
+    def _fixed_fwhm_for_pos(pos: dict):
+        """Locked width (keV) for a seed, or None if the detector model applies.
+
+        Compton is never allowed to fall through to FWHM(E): inelastic scatter
+        is broader than the resolution function.
+        """
+        if pos.get('fixed_fwhm') is not None:
+            return float(pos['fixed_fwhm'])
+        if is_compton_line(pos.get('line')):
+            return float(DEFAULT_COMPTON_FWHM_KEV)
+        return None
 
     def set_tube_profile_library(self, library):
         """Attach per-kV tube profile library for ratio constraints / flags."""
@@ -176,7 +193,7 @@ class SpectrumFitter:
                              excitation_kv=50.0, include_tube_lines=True,
                              include_compton=True,
                              scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
-                             compton_fwhm_kev=0.500,
+                             compton_fwhm_kev=DEFAULT_COMPTON_FWHM_KEV,
                              sample_contains_tube_element=False, **kwargs):
         """
         Build the list of peak seed positions (element lines, tube lines, auto-find).
@@ -329,7 +346,7 @@ class SpectrumFitter:
                         tol = match_tol
                     if abs(peak_energy - pos['energy']) < tol:
                         near_existing = True
-                        if pos.get('line') and str(pos['line']).startswith('Compton'):
+                        if is_compton_line(pos.get('line')):
                             n_skipped_compton += 1
                         break
 
@@ -502,9 +519,9 @@ class SpectrumFitter:
         tube_element='Rh',
         excitation_kv=50.0,
         scatter_angle_deg=DEFAULT_SCATTER_ANGLE_DEG,
-        compton_fwhm_kev=0.500,
+        compton_fwhm_kev=DEFAULT_COMPTON_FWHM_KEV,
     ):
-        """Add missing Compton tube seeds to an existing peak list."""
+        """Add missing Compton tube seeds and refresh their locked widths."""
         positions = list(peak_positions or [])
         e_min = max(float(energy[0]), PeakFitter.MIN_PEAK_ENERGY_KEV)
         e_max = float(energy[-1])
@@ -520,18 +537,37 @@ class SpectrumFitter:
             self.last_compton_warning = warning
             print(warning)
         n_added = 0
+        n_updated = 0
         for c in in_range:
-            already = any(
-                p.get('is_tube_line')
-                and p.get('line') == c['line']
-                and abs(float(p['energy']) - float(c['energy'])) < 0.15
-                for p in positions
-            )
-            if not already:
+            match = None
+            for p in positions:
+                if (
+                    (p.get('is_tube_line') or is_compton_line(p.get('line')))
+                    and p.get('line') == c['line']
+                    and abs(float(p['energy']) - float(c['energy'])) < 0.15
+                ):
+                    match = p
+                    break
+            if match is not None:
+                # Always re-apply Compton FWHM so a prior detector-locked
+                # seed cannot keep FWHM(E) on the next fit.
+                match['is_tube_line'] = True
+                match['fixed_fwhm'] = float(c['fixed_fwhm'])
+                if c.get('exclusion_half_width_kev') is not None:
+                    match['exclusion_half_width_kev'] = float(
+                        c['exclusion_half_width_kev']
+                    )
+                n_updated += 1
+            else:
                 positions.append(dict(c))
                 n_added += 1
         if n_added:
             print(f"Added {n_added} Compton seed(s) to peak list")
+        if n_updated:
+            print(
+                f"Updated {n_updated} Compton seed(s) "
+                f"(FWHM={float(compton_fwhm_kev)*1000:.0f} eV)"
+            )
         return positions
 
     def fit_spectrum(self, energy, counts, elements=None, 
@@ -611,7 +647,9 @@ class SpectrumFitter:
                     scatter_angle_deg=kwargs.get(
                         'scatter_angle_deg', DEFAULT_SCATTER_ANGLE_DEG
                     ),
-                    compton_fwhm_kev=kwargs.get('compton_fwhm_kev', 0.500),
+                    compton_fwhm_kev=kwargs.get(
+                        'compton_fwhm_kev', DEFAULT_COMPTON_FWHM_KEV
+                    ),
                 )
         else:
             # Avoid duplicate kwargs when sample_contains was already extracted
@@ -686,18 +724,19 @@ class SpectrumFitter:
                 bool(pos.get('is_tube_line', False))
                 if is_tube is None else bool(is_tube)
             )
-            if pos.get('fixed_fwhm') is not None:
-                peak.fixed_fwhm = float(pos['fixed_fwhm'])
+            locked = self._fixed_fwhm_for_pos(pos)
+            if locked is not None:
+                peak.fixed_fwhm = locked
             return peak
 
         # --- 4a: Fit non-overlap peaks (tube reference early when possible) ---
         tube_remaining = [
             p for p in remaining_positions
-            if p.get('is_tube_line') and not str(p.get('line', '')).startswith('Compton')
+            if p.get('is_tube_line') and not is_compton_line(p.get('line'))
         ]
         compton_remaining = [
             p for p in remaining_positions
-            if p.get('is_tube_line') and str(p.get('line', '')).startswith('Compton')
+            if p.get('is_tube_line') and is_compton_line(p.get('line'))
         ]
         sample_remaining = [
             p for p in remaining_positions if not p.get('is_tube_line')
@@ -728,7 +767,7 @@ class SpectrumFitter:
                     energy, residual_counts,
                     initial_center=pos['energy'],
                     shape=peak_shape,
-                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fixed_fwhm=self._fixed_fwhm_for_pos(pos),
                     fix_center=True,
                     amplitude_prior=amp_prior,
                     prior_weight=DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
@@ -746,7 +785,7 @@ class SpectrumFitter:
                     shape=peak_shape,
                     known_line=known_line,
                     fix_center=True,
-                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fixed_fwhm=self._fixed_fwhm_for_pos(pos),
                 )
 
             if peak is not None:
@@ -797,7 +836,7 @@ class SpectrumFitter:
                         shape=peak_shape,
                         known_line=True,
                         fix_center=True,
-                        fixed_fwhm=pos.get('fixed_fwhm'),
+                        fixed_fwhm=self._fixed_fwhm_for_pos(pos),
                     )
                     if peak is not None:
                         _label_peak(peak, pos, is_tube=is_tube)
@@ -826,7 +865,7 @@ class SpectrumFitter:
             tube_constraint_notes.append(note)
             print(f"  {note}")
 
-        # --- 4c: Compton (wide, fixed) then remaining sample / unknown ---
+        # --- 4c: Compton (wide, fixed Gaussian — not detector FWHM / ICC) ---
         for pos in sorted(compton_remaining, key=_local_height, reverse=True):
             amp_prior = None
             if tube_ref_peak is not None and profile is not None and pos.get('line'):
@@ -834,11 +873,12 @@ class SpectrumFitter:
                     profile, pos['line'], tube_ref_peak.amplitude,
                     reference_line=tube_ref_peak.line,
                 )
+            compton_width = self._fixed_fwhm_for_pos(pos)
             peak = fit_peak_with_amplitude_prior(
                 energy, residual_counts,
                 initial_center=pos['energy'],
-                shape=peak_shape,
-                fixed_fwhm=pos.get('fixed_fwhm'),
+                shape='gaussian',
+                fixed_fwhm=compton_width,
                 fix_center=True,
                 amplitude_prior=amp_prior,
                 prior_weight=DEFAULT_AMPLITUDE_PRIOR_WEIGHT,
@@ -846,10 +886,10 @@ class SpectrumFitter:
             ) if amp_prior is not None else self.peak_fitter.fit_single_peak(
                 energy, residual_counts,
                 initial_center=pos['energy'],
-                shape=peak_shape,
+                shape='gaussian',
                 known_line=True,
                 fix_center=True,
-                fixed_fwhm=pos.get('fixed_fwhm'),
+                fixed_fwhm=compton_width,
             )
             if peak is not None:
                 _label_peak(peak, pos, is_tube=True)
@@ -917,7 +957,7 @@ class SpectrumFitter:
                     energy, residual_counts,
                     initial_center=pos['energy'],
                     shape=peak_shape,
-                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fixed_fwhm=self._fixed_fwhm_for_pos(pos),
                     fix_center=True,
                     amplitude_prior=amp_prior,
                     prior_weight=SAMPLE_AMPLITUDE_PRIOR_WEIGHT,
@@ -935,7 +975,7 @@ class SpectrumFitter:
                     shape=peak_shape,
                     known_line=known_line,
                     fix_center=fix_center,
-                    fixed_fwhm=pos.get('fixed_fwhm'),
+                    fixed_fwhm=self._fixed_fwhm_for_pos(pos),
                 )
             if peak is not None:
                 _label_peak(peak, pos)
@@ -1143,7 +1183,7 @@ class SpectrumFitter:
             if peak.is_tube_line:
                 continue
             # Compton / inelastic scatter must never enter composition
-            if peak.line and str(peak.line).startswith('Compton'):
+            if is_compton_line(peak.line):
                 continue
             if peak.element and anode and peak.element == anode and not include_anode:
                 continue

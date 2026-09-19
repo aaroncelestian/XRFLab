@@ -102,7 +102,14 @@ def main():
     # Create and show main window
     window = MainWindow()
     window.show()
-    
+
+    def _quit_cleanly():
+        try:
+            window._stop_background_work()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_quit_cleanly)
     sys.exit(app.exec())
 
 

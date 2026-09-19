@@ -507,10 +507,7 @@ class StandardsPanel(QWidget):
                 "Always ≥ 0: 3·σ intensity mapped through the positive slope, "
                 "so a negative intercept cannot produce a negative MDC."
             )
-        ch = self.curves_table.horizontalHeader()
-        for i in range(len(cols) - 1):
-            ch.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-        ch.setSectionResizeMode(len(cols) - 1, QHeaderView.ResizeMode.Stretch)
+        _size_table_columns_to_contents(self.curves_table)
         self.curves_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.curves_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.curves_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -547,10 +544,7 @@ class StandardsPanel(QWidget):
         pcols = ["Use", "Standard", "Cert. wt%", "Mean cps", "SD cps", "RSD %", "n", "Pred. wt%", "Resid. wt%"]
         self.points_table.setColumnCount(len(pcols))
         self.points_table.setHorizontalHeaderLabels(pcols)
-        ph = self.points_table.horizontalHeader()
-        ph.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for i in [0] + list(range(2, len(pcols))):
-            ph.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        _size_table_columns_to_contents(self.points_table)
         self.points_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.points_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.points_table.itemChanged.connect(self._on_point_item_changed)
@@ -1315,6 +1309,7 @@ class StandardsPanel(QWidget):
             if self._selected_element is None and curves:
                 self.curves_table.selectRow(0)
                 self._selected_element = curves[0].element
+            self.curves_table.resizeColumnsToContents()
         finally:
             self._updating = False
 
@@ -1370,6 +1365,7 @@ class StandardsPanel(QWidget):
                         item = self.points_table.item(row, col)
                         if item:
                             item.setForeground(Qt.gray)
+            self.points_table.resizeColumnsToContents()
         finally:
             self._updating = False
 
@@ -1771,6 +1767,18 @@ def _app_data_dir() -> Path:
     cal_dir = Path(app_data) / "calibrations"
     cal_dir.mkdir(parents=True, exist_ok=True)
     return cal_dir
+
+
+def _size_table_columns_to_contents(table: QTableWidget) -> None:
+    """Size every column to its header/data; overflow scrolls horizontally."""
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+    table.setWordWrap(False)
+    table.setTextElideMode(Qt.TextElideMode.ElideNone)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
 
 def _num_item(value, fmt) -> QTableWidgetItem:

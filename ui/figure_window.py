@@ -56,6 +56,7 @@ class FigureWindow(QMainWindow):
         self._geo_key = f"figure/{settings_key}/geometry"
         self._vis_key = f"figure/{settings_key}/visible"
         self._order: list[str] = []
+        self._shutting_down = False
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -122,12 +123,25 @@ class FigureWindow(QMainWindow):
         self._settings.setValue(self._geo_key, self.saveGeometry())
         self._settings.setValue(self._vis_key, self.isVisible())
 
+    def shutdown(self) -> None:
+        """Really close this window — the application is exiting."""
+        self._shutting_down = True
+        self.save_geometry()
+        self.close()
+
     def _on_picker(self, index: int) -> None:
         if 0 <= index < self._stack.count():
             self._stack.setCurrentIndex(index)
 
     def closeEvent(self, event):
-        self._settings.setValue(self._vis_key, False)
-        self.save_geometry()
+        # User clicked this window's close box: hide so plots stay alive.
+        # Cmd+Q / QApplication.quit() is not spontaneous — must accept or
+        # Qt cancels the quit and Python keeps running with no UI.
+        if self._shutting_down or not event.spontaneous():
+            if not self._shutting_down:
+                self.save_geometry()
+            event.accept()
+            return
         event.ignore()
         self.hide()
+        self.save_geometry()

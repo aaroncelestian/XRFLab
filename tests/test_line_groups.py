@@ -176,6 +176,47 @@ def test_fit_spectrum_grouped_vs_released_flags_and_peaks():
     assert ka_total == pytest.approx(6000.0 * 1.51, rel=0.15)
 
 
+def test_grouped_compton_ignores_detector_fwhm():
+    """Compton width stays on the locked Compton FWHM, not FWHM(E)."""
+    from core.instrument_state import DetectorModel
+    from core.line_groups import _sigma_for
+
+    det = DetectorModel(fwhm_0=0.08, epsilon=0.0008, use_calibrated_shapes=True)
+    PeakFitter.activate(PeakFitter(detector=det))
+    compton_fwhm = 0.700
+    seed = {
+        "energy": 18.85,
+        "element": "Rh",
+        "line": "Compton Kα",
+        "is_tube_line": True,
+        "fixed_fwhm": compton_fwhm,
+    }
+    det_fwhm = float(PeakFitter.calculate_fwhm(18.85))
+    assert abs(det_fwhm - compton_fwhm) > 0.2
+
+    energy = np.arange(16.0, 21.0, 0.01)
+    groups, singles = build_line_groups([seed], energy[0], energy[-1])
+    assert groups == []
+    assert len(singles) == 1
+    counts, bg = _synth([], [(seed, 2500.0)], energy, shape="gaussian", noise=False)
+
+    res = fit_grouped(
+        energy, counts - bg, counts, groups, singles,
+        shape="tail_gaussian", refine_energy=False, refine_shape=True,
+    )
+    compton = [p for p in res.peaks if p.line == "Compton Kα"]
+    assert len(compton) == 1
+    peak = compton[0]
+    assert peak.shape == "gaussian"
+    assert peak.fixed_fwhm == pytest.approx(compton_fwhm)
+    assert peak.fwhm == pytest.approx(compton_fwhm, abs=0.02)
+    assert abs(peak.fwhm - det_fwhm) > 0.2
+    # Even a Compton seed that lost fixed_fwhm must not use FWHM(E)
+    bare = {"energy": 18.85, "element": "Rh", "line": "Compton Kα", "is_tube_line": True}
+    assert _sigma_for(18.85, bare) * 2.355 == pytest.approx(0.500, abs=0.001)
+    assert _sigma_for(18.85, seed) * 2.355 == pytest.approx(compton_fwhm)
+
+
 def test_peak_group_roundtrip_dict():
     from core.peak_fitting import Peak
 
