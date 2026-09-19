@@ -54,46 +54,17 @@ class ResultsPanel(QWidget):
         button_row.setSpacing(8)
         
         self.quantify_button = QPushButton("Semi-Quant")
+        self.quantify_button.setObjectName("primaryButton")
         self.quantify_button.setToolTip(
             "Area-normalized relative intensities (semi-quantitative).\n"
             "Not fundamental-parameters concentrations."
         )
-        self.quantify_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
         self.quantify_button.clicked.connect(
             lambda _checked=False: self.quantify_requested.emit()
         )
         button_row.addWidget(self.quantify_button)
         
         self.export_button = QPushButton("Export Results")
-        self.export_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed {
-                background-color: #0D47A1;
-            }
-        """)
         button_row.addWidget(self.export_button)
         
         main_layout.addLayout(button_row)
@@ -116,21 +87,6 @@ class ResultsPanel(QWidget):
             "preferred over L/M. H2O, OH, and CO2 are user assumptions.\n"
             "After the first run, changing knobs recomputes live."
         )
-        self.fp_button.setStyleSheet("""
-            QPushButton {
-                background-color: #00897B;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #00796B;
-            }
-            QPushButton:pressed {
-                background-color: #00695C;
-            }
-        """)
         self.fp_button.clicked.connect(
             lambda _checked=False: self.fp_quantify_requested.emit()
         )
@@ -140,21 +96,6 @@ class ResultsPanel(QWidget):
         self.export_fp_button.setToolTip(
             "Export the FP composition table (element, wt%, source, line)."
         )
-        self.export_fp_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed {
-                background-color: #0D47A1;
-            }
-        """)
         self.export_fp_button.clicked.connect(
             lambda _checked=False: self.export_fp_requested.emit()
         )

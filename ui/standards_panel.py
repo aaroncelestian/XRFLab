@@ -38,6 +38,7 @@ from core.calibration import CalibrationResult
 from core.fitting import SpectrumFitter
 from core.instrument_state import InstrumentState
 from core.peak_fitting import PEAK_SHAPE_UI_CHOICES, PEAK_SHAPE_UI_DEFAULT
+from ui.nav_rail import IndexedStack
 from core.reference_composition import find_composition_csv, load_composition_csv
 from core.standards_calibration import (
     StandardsCalibration, StandardRecord, ElementCurve,
@@ -207,22 +208,18 @@ class StandardsPanel(QWidget):
     # ------------------------------------------------------------------ #
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal)
-
-        self.left_tabs = QTabWidget()
-        self.left_tabs.setMaximumWidth(700)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.left_tabs = IndexedStack(rail_width=156)
         self.left_tabs.addTab(self._create_standards_tab(), "Standards")
-        self.left_tabs.addTab(self._create_fit_tab(), "Elements && Fit")
+        self.left_tabs.addTab(self._create_fit_tab(), "Elements & Fit")
         self.left_tabs.addTab(self._create_curves_tab(), "Curves")
         self.left_tabs.currentChanged.connect(self._on_left_tab_changed)
-        splitter.addWidget(self.left_tabs)
+        layout.addWidget(self.left_tabs)
 
         self.plot_stack = QStackedWidget()
         self.plot_stack.addWidget(self._create_spectra_plot())
         self.plot_stack.addWidget(self._create_curve_plot())
-        splitter.addWidget(self.plot_stack)
-        splitter.setSizes([600, 600])
-        layout.addWidget(splitter)
+        self.detached_plot = self.plot_stack
 
     # ---- Standards tab ------------------------------------------------- #
     def _create_standards_tab(self):

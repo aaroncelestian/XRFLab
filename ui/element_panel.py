@@ -536,17 +536,7 @@ class ElementPanel(QWidget):
         )
 
         find_button = QPushButton("Find Peaks + Auto-ID")
-        find_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #1976D2; }
-            QPushButton:pressed { background-color: #0D47A1; }
-        """)
+        find_button.setObjectName("primaryButton")
         find_button.setToolTip(
             "Detect peaks, auto-ID against common XRF lines, then open Elements\n"
             "so you can confirm labels before Fitting."
@@ -716,17 +706,7 @@ class ElementPanel(QWidget):
         layout.addWidget(smart_group)
 
         self.fit_button = QPushButton("Fit Spectrum")
-        self.fit_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #45a049; }
-            QPushButton:pressed { background-color: #3d8b40; }
-        """)
+        self.fit_button.setObjectName("primaryButton")
         self.fit_button.setToolTip(
             "Fit peaks using the Elements selection and the Peak Find list."
         )

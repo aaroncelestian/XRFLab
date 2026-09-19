@@ -30,6 +30,8 @@ from core.matrix_model import MatrixAssumptions
 from core.peak_fitting import normalize_peak_shape
 from ui.element_panel import ElementPanel
 from ui.composition_panel import CompositionPanel
+from ui.figure_window import attach_view_picker
+from ui.nav_rail import IndexedStack
 from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts, enable_box_zoom
 
 
@@ -61,6 +63,7 @@ class BatchAnalysisPanel(QWidget):
     
     results_ready = Signal()
     spectrum_selected = Signal(str, list)  # sample label, member spectrum names
+    figure_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -106,46 +109,35 @@ class BatchAnalysisPanel(QWidget):
             )
     
     def _init_ui(self):
-        """Initialize the user interface with sub-tabs"""
+        """Console pages. The fit plot and trend charts live in figure windows."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        self._main_splitter = QSplitter(Qt.Horizontal)
+        self.batch_plot_page = self._create_plot_widget()
+        self.trends_page = self._create_trends_tab()
 
-        self.left_tab_widget = QTabWidget()
-        self.left_tab_widget.setMinimumWidth(280)
-        self.left_tab_widget.setMaximumWidth(380)
-        self._narrow_tab_max_width = 380
+        open_charts = QPushButton("Open charts")
+        open_charts.setToolTip("Element trends, ternary, correlate, ratios, and matrix")
+        open_charts.clicked.connect(lambda: self.figure_requested.emit("charts"))
+        layout.addWidget(open_charts)
 
+        self.left_tab_widget = IndexedStack(rail_width=132)
         self.left_tab_widget.addTab(self._create_setup_tab(), "Setup")
         self.left_tab_widget.addTab(self._create_summary_tab(), "Summary")
         self.left_tab_widget.addTab(self._create_results_tab(), "Results")
         self.left_tab_widget.addTab(
             self.composition_panel.build_composition_view(), "Composition"
         )
-        self.left_tab_widget.addTab(self._create_trends_tab(), "Trends")
         self.left_tab_widget.currentChanged.connect(self._on_left_tab_changed)
-
-        self._main_splitter.addWidget(self.left_tab_widget)
-        self._main_splitter.addWidget(self._create_plot_widget())
-        self._main_splitter.setStretchFactor(0, 0)
-        self._main_splitter.setStretchFactor(1, 1)
-        self._main_splitter.setSizes([320, 900])
-
-        layout.addWidget(self._main_splitter)
+        layout.addWidget(self.left_tab_widget)
 
     def _on_left_tab_changed(self, index: int) -> None:
-        """Give Composition and Trends tabs the full panel width."""
-        wide = index >= 3
-        if wide:
-            self.left_tab_widget.setMaximumWidth(16777215)
-            self.plot_widget.setVisible(False)
-            self._main_splitter.setSizes([1600, 0])
+        """Results stay with the fit plot; composition opens the chart window."""
+        if index >= 3:
+            self.figure_requested.emit("charts")
         else:
-            self.left_tab_widget.setMaximumWidth(self._narrow_tab_max_width)
-            self.plot_widget.setVisible(True)
-            self._main_splitter.setSizes([320, 900])
+            self.figure_requested.emit("spectrum")
 
     def _on_composition_sample_activated(self, _sample, names):
         self.spectrum_selected.emit(_sample, list(names or []))
@@ -266,6 +258,7 @@ class BatchAnalysisPanel(QWidget):
         self.trends_tabs = QTabWidget()
         self.trends_tabs.addTab(self._create_element_trends_tab(), "Element Trends")
         self.composition_panel.transfer_plot_tabs_to(self.trends_tabs)
+        layout.addWidget(attach_view_picker(self.trends_tabs))
         layout.addWidget(self.trends_tabs)
         return widget
 
@@ -680,16 +673,7 @@ class BatchAnalysisPanel(QWidget):
         layout.addWidget(self.progress_label)
 
         self.process_btn = QPushButton("Process All")
-        self.process_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 8px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #45a049; }
-            QPushButton:disabled { background-color: #cccccc; color: #666; }
-        """)
+        self.process_btn.setObjectName("primaryButton")
         self.process_btn.setToolTip(
             "Fit every listed spectrum with the current Analysis-tab settings"
         )
@@ -780,16 +764,8 @@ class BatchAnalysisPanel(QWidget):
         layout.addLayout(btn_layout)
 
         update_btn = QPushButton("Update")
+        update_btn.setObjectName("primaryButton")
         update_btn.clicked.connect(self._update_trends_plots)
-        update_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 6px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
         layout.addWidget(update_btn)
 
         layout.addStretch()

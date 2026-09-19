@@ -104,6 +104,7 @@ from core.mapping.profiles import (
     extract_multi_element_profiles,
 )
 from ui.collapsible_section import CollapsibleSection
+from ui.figure_window import attach_view_picker
 from ui.map_canvas import MapCanvas
 from ui.pixel_spectrum_popup import PixelSpectrumPopup
 from ui.spectrum_widget import _OVERLAY_COLORS, _normalize_counts, enable_box_zoom
@@ -168,11 +169,9 @@ class MappingPanel(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
 
-        splitter = QSplitter(Qt.Horizontal)
-
-        # Left column: fixed header + scrollable collapsible tools
+        # Console column: trees and tools. The map canvas lives in a figure window.
         left = QWidget()
-        left.setMinimumWidth(260)
+        left.setMinimumWidth(300)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
@@ -202,11 +201,9 @@ class MappingPanel(QWidget):
         self.active_site_label.setWordWrap(True)
         left_layout.addWidget(self.active_site_label)
 
-        self.nav_tabs = QTabWidget()
-        self.nav_tabs.setMinimumHeight(240)
-        self.nav_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self._nav_index = 0
 
-        # Sites tab: Project → Sample → Site of Interest
+        # Sites and data are one column, not two tabs.
         sites_page = QWidget()
         sites_layout = QVBoxLayout(sites_page)
         sites_layout.setContentsMargins(0, 0, 0, 0)
@@ -244,7 +241,8 @@ class MappingPanel(QWidget):
         self.rename_site_btn.clicked.connect(self._rename_selected_sites_item)
         activate_row.addWidget(self.rename_site_btn)
         sites_layout.addLayout(activate_row)
-        self.nav_tabs.addTab(sites_page, "Sites")
+        sites_heading = QLabel("Sites")
+        sites_heading.setObjectName("sectionLabel")
 
         # Data tab: contents of the active site (SmartMap, images, spectra)
         data_page = QWidget()
@@ -293,9 +291,33 @@ class MappingPanel(QWidget):
         self.send_selected_batch_btn.clicked.connect(self._send_selected_to_batch)
         data_btn_row.addWidget(self.send_selected_batch_btn)
         data_layout.addLayout(data_btn_row)
-        self.nav_tabs.addTab(data_page, "Data")
+        nav_col = QWidget()
+        nav_layout = QVBoxLayout(nav_col)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        nav_layout.addWidget(sites_heading)
+        nav_layout.addWidget(sites_page, stretch=1)
+        data_heading = QLabel("Data")
+        data_heading.setObjectName("sectionLabel")
+        nav_layout.addWidget(data_heading)
+        nav_layout.addWidget(data_page, stretch=1)
+        left_layout.addWidget(nav_col, stretch=2)
 
-        left_layout.addWidget(self.nav_tabs, stretch=1)
+        class _NavIndex:
+            """Keeps saved nav_tab indexes working now that both trees are visible."""
+
+            def __init__(self, panel):
+                self._panel = panel
+
+            def setCurrentIndex(self, index):
+                self._panel._nav_index = int(index)
+
+            def currentIndex(self):
+                return int(self._panel._nav_index)
+
+        self.nav_tabs = _NavIndex(self)
+        self._tool_stack = QStackedWidget()
+        left_layout.addWidget(self._tool_stack, stretch=1)
 
         self.sample_dialog = self._build_sample_dialog()
 
@@ -819,8 +841,8 @@ class MappingPanel(QWidget):
         self.export_profile_btn.clicked.connect(self._export_map_profile_csv)
         quant_sec.addWidget(self.export_profile_btn)
         ls_note = QLabel(
-            "Collected line-scan semi-quant lives on the Line scan tab — "
-            "not on a transect drawn here."
+            "Collected line-scan semi-quant is the Line scan view in the Map window — "
+            "not a transect drawn on the map."
         )
         ls_note.setWordWrap(True)
         ls_note.setStyleSheet("color: #555; font-size: 11px;")
@@ -829,8 +851,7 @@ class MappingPanel(QWidget):
 
         scroll_layout.addStretch(1)
         scroll.setWidget(scroll_body)
-
-        splitter.addWidget(left)
+        self._tool_stack.addWidget(scroll)
 
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.currentChanged.connect(self._on_workspace_tab)
@@ -841,7 +862,6 @@ class MappingPanel(QWidget):
         maps_layout = QHBoxLayout(maps_page)
         maps_layout.setContentsMargins(0, 0, 0, 0)
         maps_layout.addWidget(maps_split)
-        maps_split.addWidget(scroll)
 
         center = QWidget()
         center_layout = QVBoxLayout(center)
@@ -937,22 +957,20 @@ class MappingPanel(QWidget):
         self.matrix_plot.scene().sigMouseClicked.connect(self._on_matrix_clicked)
         matrix_layout.addWidget(self.matrix_plot, stretch=1)
         self.map_plot_tabs.addTab(matrix_tab, "Matrix")
-
+        right_layout.insertWidget(1, attach_view_picker(self.map_plot_tabs))
         right_layout.addWidget(self.map_plot_tabs, stretch=1)
 
         self.info_label = QLabel("Open an .ipj mapping project to begin.")
         self.info_label.setWordWrap(True)
         right_layout.addWidget(self.info_label)
         maps_split.addWidget(right)
-        maps_split.setSizes([260, 520, 400])
+        maps_split.setSizes([640, 380])
         self.workspace_tabs.addTab(maps_page, "Maps")
 
         # ---- Line scan workspace: tools | ROI profile + semi-quant ----
         ls_page = QWidget()
-        ls_split = QSplitter(Qt.Horizontal)
-        ls_page_layout = QHBoxLayout(ls_page)
+        ls_page_layout = QVBoxLayout(ls_page)
         ls_page_layout.setContentsMargins(0, 0, 0, 0)
-        ls_page_layout.addWidget(ls_split)
 
         ls_scroll = QScrollArea()
         ls_scroll.setWidgetResizable(True)
@@ -1046,7 +1064,7 @@ class MappingPanel(QWidget):
 
         ls_layout.addStretch(1)
         ls_scroll.setWidget(ls_body)
-        ls_split.addWidget(ls_scroll)
+        self._tool_stack.addWidget(ls_scroll)
 
         self.ls_content_stack = QStackedWidget()
         ls_empty = QWidget()
@@ -1057,7 +1075,7 @@ class MappingPanel(QWidget):
             "acquired along a path. Activate a line-scan site in Sites, "
             "or select the series in Data.\n\n"
             "Drawing a line on an element map does not create that data — "
-            "use the Maps tab for intensity profiles."
+            "use the Map view for intensity profiles."
         )
         self.ls_empty_label.setWordWrap(True)
         self.ls_empty_label.setStyleSheet("color: #444;")
@@ -1118,13 +1136,20 @@ class MappingPanel(QWidget):
         ls_view.addWidget(ls_plots)
         ls_view.setSizes([440, 520])
         self.ls_content_stack.addWidget(ls_view)
-        ls_split.addWidget(self.ls_content_stack)
-        ls_split.setSizes([260, 900])
+        ls_page_layout.addWidget(self.ls_content_stack)
         self.workspace_tabs.addTab(ls_page, "Line scan")
 
-        splitter.addWidget(self.workspace_tabs)
-        splitter.setSizes([280, 920])
-        root.addWidget(splitter)
+        self.workspace_tabs.tabBar().hide()
+        self.workspace_picker = attach_view_picker(self.workspace_tabs)
+        figure = QWidget()
+        figure_layout = QVBoxLayout(figure)
+        figure_layout.setContentsMargins(0, 0, 0, 0)
+        figure_layout.setSpacing(4)
+        figure_layout.addWidget(self.workspace_picker)
+        figure_layout.addWidget(self.workspace_tabs, stretch=1)
+        self.figure_host = figure
+
+        root.addWidget(left)
 
         self._last_profiles = None  # dict name -> (dist, vals)
         self._ls_profile_hover_proxy = pg.SignalProxy(
@@ -2443,7 +2468,19 @@ class MappingPanel(QWidget):
             or fov.optical is not None
         )
 
+    def _sync_workspace_chrome(self) -> None:
+        """Keep map-window picker and console tools on the same view."""
+        index = int(self.workspace_tabs.currentIndex())
+        if self._tool_stack.currentIndex() != index and index < self._tool_stack.count():
+            self._tool_stack.setCurrentIndex(index)
+        picker = getattr(self, "workspace_picker", None)
+        if picker is not None and picker.currentIndex() != index:
+            picker.blockSignals(True)
+            picker.setCurrentIndex(index)
+            picker.blockSignals(False)
+
     def _on_workspace_tab(self, index: int) -> None:
+        self._sync_workspace_chrome()
         if index == 1:
             self._update_line_scan_page()
             ls = self._collected_line_scan()
@@ -2465,6 +2502,7 @@ class MappingPanel(QWidget):
         elif has_map and not has_ls:
             self.workspace_tabs.setCurrentIndex(0)
         self.workspace_tabs.blockSignals(False)
+        self._sync_workspace_chrome()
         self._update_line_scan_page()
 
     def _update_line_scan_page(self) -> None:
@@ -4415,7 +4453,7 @@ class MappingPanel(QWidget):
         if n_roi == 0:
             self.status_message.emit(
                 f"{line_scan.display_label()}: only total counts — "
-                "check elements on the Line scan tab"
+                "check elements in the line-scan tools"
             )
         else:
             names = ", ".join(profiles.keys())

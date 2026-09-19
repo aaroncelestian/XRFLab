@@ -5,14 +5,16 @@ Main window for XRF Fundamental Parameters Analysis Application
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QMenuBar, QMenu, QToolBar, QStatusBar, QMessageBox, QFileDialog,
-    QTabWidget, QPushButton, QLabel, QApplication
+    QPushButton, QLabel, QApplication, QScrollArea
 )
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QAction, QKeySequence, QIcon
 
 from ui.spectrum_widget import SpectrumWidget
+from ui.figure_window import FigureWindow
+from ui.nav_rail import AnalysisSteps, IndexedStack
 from ui.element_panel import ElementPanel
 from ui.results_panel import ResultsPanel
 from ui.batch_analysis_panel import BatchAnalysisPanel
@@ -54,8 +56,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("XRFLab - Fundamental Parameters Analysis")
-        self.setGeometry(100, 100, 1400, 900)
-        self.setMinimumSize(1200, 700)  # Minimum size for laptop screens
+        self.setGeometry(80, 60, 980, 760)
+        self.setMinimumSize(720, 520)
         
         # Initialize components
         self.io_handler = IOHandler()
@@ -78,6 +80,7 @@ class MainWindow(QMainWindow):
         
         # Restore window state
         self._restore_settings()
+        self._restore_figures()
 
     @property
     def current_spectrum(self):
@@ -187,6 +190,22 @@ class MainWindow(QMainWindow):
         self.toggle_grid_action.setChecked(True)
         self.toggle_grid_action.setStatusTip("Toggle grid display")
         self.toggle_grid_action.triggered.connect(self.toggle_grid)
+
+        self.show_spectrum_action = QAction("Show &Spectrum", self)
+        self.show_spectrum_action.setStatusTip("Open the spectrum window")
+        self.show_spectrum_action.triggered.connect(
+            lambda: self.spectrum_window.show_view("Spectrum", focus=True)
+        )
+        self.show_map_action = QAction("Show &Map", self)
+        self.show_map_action.setStatusTip("Open the map window")
+        self.show_map_action.triggered.connect(
+            lambda: self.map_window.show_window(focus=True)
+        )
+        self.show_charts_action = QAction("Show &Charts", self)
+        self.show_charts_action.setStatusTip("Open the charts window")
+        self.show_charts_action.triggered.connect(
+            lambda: self.charts_window.show_window(focus=True)
+        )
         
         # Tools actions — jump to Calibration sub-tabs
         self.fwhm_calibration_action = QAction("&FWHM Calibration...", self)
@@ -254,6 +273,10 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self.toggle_log_action)
         view_menu.addAction(self.toggle_grid_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.show_spectrum_action)
+        view_menu.addAction(self.show_map_action)
+        view_menu.addAction(self.show_charts_action)
         
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
@@ -282,32 +305,35 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.save_project_action)
     
     def _create_central_widget(self):
-        """Create the main layout with primary Analysis tabs and nested Calibration"""
+        """Console: activity rail and one task. Plots live in figure windows."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
+
         layout = QVBoxLayout(central_widget)
-        layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Primary workflow tabs only — calibration lives one level down
-        self.tab_widget = QTabWidget()
-        
-        # Analysis tab (main interface)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.calibration_status = QLabel()
+        self.calibration_status.setObjectName("calibrationStatus")
+        self.calibration_status.setWordWrap(True)
+        self.calibration_status.setTextFormat(Qt.RichText)
+        layout.addWidget(self.calibration_status)
+
+        self.tab_widget = IndexedStack(rail_width=96, object_name="activityRail")
+
         analysis_tab = self._create_analysis_tab()
-        self.tab_widget.addTab(analysis_tab, "Analysis")
-        
-        # Batch Analysis tab (bulk spectral fitting)
+        self.tab_widget.addTab(analysis_tab, "Analyze")
+
         self.batch_analysis_panel = BatchAnalysisPanel()
-        self.tab_widget.addTab(self.batch_analysis_panel, "Batch Analysis")
-        # Connect to Analysis tab's element panel for settings
+        self.tab_widget.addTab(self.batch_analysis_panel, "Batch")
         self.batch_analysis_panel.set_element_panel(self.element_panel)
         self.batch_analysis_panel.set_results_panel(self.results_panel)
         self.batch_analysis_panel.set_instrument_state(self.session.instrument)
         self.batch_analysis_panel.spectrum_selected.connect(
             self.on_batch_composition_spectrum_selected
         )
+        self.batch_analysis_panel.figure_requested.connect(self._on_batch_figure)
 
-        # Mapping tab: IPJ maps + collected line-scan semi-quant
         self.mapping_panel = MappingPanel()
         self.mapping_panel.set_fitter(self.fitter)
         self.mapping_panel.set_element_panel(self.element_panel)
@@ -318,68 +344,118 @@ class MainWindow(QMainWindow):
         self.mapping_panel.status_message.connect(
             lambda msg: self.status_bar.showMessage(msg, 5000)
         )
-        self.tab_widget.addTab(self.mapping_panel, "Proj Data")
-        
-        # Calibration tab: infrequent setup tools, grouped and out of the primary bar
+        self.tab_widget.addTab(self.mapping_panel, "Maps")
+
         self.calibration_tab = self._create_calibration_tab()
-        self.tab_widget.addTab(self.calibration_tab, "Calibration")
-        
-        # Auto-load emits calibration_complete during panel __init__, before this
-        # connect runs — re-apply any calibration already loaded from disk.
+        self.tab_widget.addTab(self.calibration_tab, "Setup")
+        self.tab_widget.currentChanged.connect(self._on_mode_changed)
+
         if self.fwhm_calibration_panel.fwhm_calibration is not None:
             self.on_fwhm_calibration_applied(self.fwhm_calibration_panel.fwhm_calibration)
 
-        # Tube profiles (may already be loaded in panel __init__)
         if self.tube_profile_panel.get_library() is not None:
             self.on_tube_profiles_changed(self.tube_profile_panel.get_library())
 
-        # Standards calibration auto-loaded from disk in panel __init__
         if self.standards_panel.calibration_result is not None:
             self.on_calibration_applied(
                 self.standards_panel.calibration_result, switch_tab=False
             )
-        
+
         layout.addWidget(self.tab_widget)
+        self._create_figure_windows()
+
+    def _create_figure_windows(self):
+        """Host the existing plot widgets in three secondary windows."""
+        self.spectrum_window = FigureWindow("Spectrum", "spectrum", self, offset=0)
+        self.spectrum_window.add_view("Spectrum", self.spectrum_widget)
+        self.spectrum_window.add_view("Batch fit", self.batch_analysis_panel.batch_plot_page)
+
+        self.map_window = FigureWindow("Map", "map", self, offset=36)
+        self.map_window.add_view("Map", self.mapping_panel.figure_host)
+
+        self.charts_window = FigureWindow("Charts", "charts", self, offset=72)
+        self.charts_window.add_view("Trends", self.batch_analysis_panel.trends_page)
+        self.charts_window.add_view("FWHM", self.fwhm_calibration_panel.detached_plot)
+        self.charts_window.add_view("Standards", self.standards_panel.detached_plot)
+
+    def _restore_figures(self):
+        for window in (self.spectrum_window, self.map_window, self.charts_window):
+            window.restore_geometry()
+        # Spectrum is the daily view. Remember a deliberate close.
+        if self.spectrum_window.was_visible() or self.settings.value("figure/spectrum/visible") is None:
+            self.spectrum_window.show_view("Spectrum")
+        if self.map_window.was_visible():
+            self.map_window.show_window()
+        if self.charts_window.was_visible():
+            self.charts_window.show_window()
+
+    def _on_mode_changed(self, index: int) -> None:
+        if index == 0:
+            self.spectrum_window.show_view("Spectrum")
+        elif index == 1:
+            self.spectrum_window.show_view("Batch fit")
+        elif index == 2:
+            self.map_window.show_window()
+        elif index == 3:
+            self._show_setup_chart()
+
+    def _on_batch_figure(self, kind: str) -> None:
+        if self.tab_widget.currentIndex() != 1:
+            return
+        if kind == "charts":
+            self.charts_window.show_view("Trends")
+        else:
+            self.spectrum_window.show_view("Batch fit")
+
+    def _show_setup_chart(self) -> None:
+        widget = self.calibration_tabs.currentWidget()
+        if widget is self.standards_panel:
+            self.charts_window.show_view("Standards")
+        elif widget is self.tube_profile_panel:
+            self.charts_window.show_window()
+        else:
+            self.charts_window.show_view("FWHM")
+
+    def _refresh_spectrum_title(self) -> None:
+        path = self.session.spectrum_path
+        if not path:
+            self.spectrum_window.setWindowTitle("Spectrum")
+            return
+        name = Path(str(path).split("::")[-1]).name
+        self.spectrum_window.setWindowTitle(f"Spectrum — {name}")
     
     def _create_calibration_tab(self):
-        """Nest FWHM and Standards under Calibration (Tube Profiles optional)."""
+        """FWHM, optional tube profiles, then standards. Plots open in Charts."""
         calibration_widget = QWidget()
         layout = QVBoxLayout(calibration_widget)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        self.calibration_status = QLabel()
-        self.calibration_status.setWordWrap(True)
-        self.calibration_status.setStyleSheet(
-            "QLabel { background: #f7f7f7; border: 1px solid #ddd; "
-            "border-radius: 4px; padding: 8px 10px; }"
-        )
-        layout.addWidget(self.calibration_status)
-        
-        self.calibration_tabs = QTabWidget()
-        
-        # Step 1: detector resolution
+        self.calibration_tabs = IndexedStack(rail_width=140)
+
         self.fwhm_calibration_panel = FWHMCalibrationPanel()
         self.fwhm_calibration_panel.calibration_complete.connect(
             self.on_fwhm_calibration_applied
         )
         self.calibration_tabs.addTab(self.fwhm_calibration_panel, "FWHM")
 
-        # Step 1b: per-kV tube scatter profiles (15/30/50). Panel is always
-        # built for project I/O; the tab is hidden unless the flag is on.
         self.tube_profile_panel = TubeProfilePanel()
         self.tube_profile_panel.library_changed.connect(self.on_tube_profiles_changed)
         if SHOW_TUBE_PROFILE_CALIBRATION:
-            self.calibration_tabs.addTab(self.tube_profile_panel, "Tube Profiles")
-        
-        # Step 2: intensity/response using known concentrations
+            self.calibration_tabs.addTab(self.tube_profile_panel, "Tube")
+
         self.standards_panel = StandardsPanel()
         self.standards_panel.calibration_complete.connect(self.on_calibration_applied)
         self.calibration_tabs.addTab(self.standards_panel, "Standards")
-        
+        self.calibration_tabs.currentChanged.connect(self._on_setup_step)
+
         layout.addWidget(self.calibration_tabs)
         self._refresh_calibration_status()
         return calibration_widget
+
+    def _on_setup_step(self, _index: int) -> None:
+        if self.tab_widget.currentIndex() == 3:
+            self._show_setup_chart()
 
     def _refresh_calibration_status(self):
         """Checklist at the top of Calibration: FWHM required, rest optional."""
@@ -445,56 +521,29 @@ class MainWindow(QMainWindow):
         self.calibration_tabs.setCurrentWidget(self.standards_panel)
     
     def _create_analysis_tab(self):
-        """Create the analysis tab with sub-tabs on left panel for laptop screens"""
+        """Analyze steps. The spectrum itself is a separate window."""
         analysis_widget = QWidget()
-        layout = QHBoxLayout(analysis_widget)
+        layout = QVBoxLayout(analysis_widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create main horizontal splitter (left panel | right side)
-        main_splitter = QSplitter(Qt.Horizontal)
-        self.analysis_splitter = main_splitter
-        
-        # Left panel - Tabbed interface for compact layout
-        self.analysis_left_tabs = QTabWidget()
-        self.analysis_left_tabs.setMaximumWidth(700)  # Doubled width for better usability
-        
-        # Tab order: Sample → Peak Find → Elements → Fitting → Results
+
+        self.analysis_splitter = None
+        self.analysis_left_tabs = AnalysisSteps()
+
         self.element_panel = ElementPanel()
-        sample_exp_tab = self._create_sample_exp_tab()
-        self.analysis_left_tabs.addTab(sample_exp_tab, "Sample/Exp")
+        self.analysis_left_tabs.addTab(self._create_sample_exp_tab(), "Sample")
+        self.analysis_left_tabs.addTab(self._create_peak_find_tab(), "Peaks")
+        self.analysis_left_tabs.addTab(self._create_element_selection_tab(), "Elements")
+        self.analysis_left_tabs.addTab(self._create_fitting_controls_tab(), "Fit")
 
-        peak_find_tab = self._create_peak_find_tab()
-        self.analysis_left_tabs.addTab(peak_find_tab, "Peak Find")
-        
-        element_tab = self._create_element_selection_tab()
-        self.analysis_left_tabs.addTab(element_tab, "Elements")
-        
-        fitting_tab = self._create_fitting_controls_tab()
-        self.analysis_left_tabs.addTab(fitting_tab, "Fitting")
-        
-        results_tab = self._create_results_tab()
-        self.analysis_left_tabs.addTab(results_tab, "Results")
-
-        composition_tab = QWidget()
-        composition_layout = QVBoxLayout(composition_tab)
-        composition_layout.setContentsMargins(0, 0, 0, 0)
-        composition_layout.addWidget(self.results_panel.composition_tab_widget())
-        self.analysis_left_tabs.addTab(composition_tab, "Composition")
-        
-        main_splitter.addWidget(self.analysis_left_tabs)
-        
-        # Right side - Spectrum display (keep as is)
         self.spectrum_widget = SpectrumWidget()
         self.spectrum_widget.log_scale_changed.connect(self._on_plot_log_scale_changed)
         self.spectrum_widget.energy_selected.connect(self.on_spectrum_energy_picked)
-        main_splitter.addWidget(self.spectrum_widget)
-        
-        # Set initial sizes for horizontal splitter (50% left, 50% right)
-        main_splitter.setSizes([600, 600])
-        
-        layout.addWidget(main_splitter)
-        
-        # Connect signals
+
+        results_scroll = self._create_results_tab()
+        self.analysis_left_tabs.results_scroll = results_scroll
+        self.analysis_left_tabs.addTab(results_scroll, "Results")
+        layout.addWidget(self.analysis_left_tabs)
+
         self.element_panel.elements_changed.connect(self.on_elements_changed)
         self.element_panel.fit_requested.connect(self.fit_spectrum)
         self.element_panel.peak_find_requested.connect(self.preview_peak_find)
@@ -516,7 +565,6 @@ class MainWindow(QMainWindow):
         self.results_panel.export_fp_requested.connect(self.export_fp_results)
 
         self.refresh_tube_guides()
-        
         return analysis_widget
     
     def _create_sample_exp_tab(self):
@@ -587,16 +635,27 @@ class MainWindow(QMainWindow):
         return widget
     
     def _create_results_tab(self):
-        """Create Results & Quantification tab"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        """Fit statistics, semi-quant, and composition on one scrolling page."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
         layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Create results panel
+        layout.setSpacing(8)
+
         self.results_panel = ResultsPanel()
         layout.addWidget(self.results_panel)
-        
-        return widget
+
+        heading = QLabel("Composition")
+        heading.setObjectName("sectionLabel")
+        layout.addWidget(heading)
+        layout.addWidget(self.results_panel.composition_tab_widget())
+        self.analysis_left_tabs.composition_anchor = heading
+
+        scroll.setWidget(inner)
+        return scroll
 
     # Analysis left-tab indices for navigation after actions
     TAB_SAMPLE = 0
@@ -613,13 +672,17 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Ready")
     
     def _load_stylesheet(self):
-        """Load and apply Qt stylesheet"""
+        """Load and apply Qt stylesheet to the app, including figure windows."""
         try:
             with open(resource_path("styles.qss"), "r") as f:
-                self.setStyleSheet(f.read())
+                sheet = f.read()
         except FileNotFoundError:
-            # Use default styling if stylesheet not found
-            pass
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(sheet)
+        else:
+            self.setStyleSheet(sheet)
 
     def _apply_window_icon(self):
         """Set the application window / Dock / taskbar icon."""
@@ -812,6 +875,7 @@ class MainWindow(QMainWindow):
                 ),
             )
         self.spectrum_widget.restore_state(ui.get("spectrum_widget") or {})
+        self._refresh_spectrum_title()
         if ui.get("left_tab") is not None:
             self.analysis_left_tabs.setCurrentIndex(int(ui["left_tab"]))
         self._displayed_element_lines = ui.get("displayed_element_lines")
@@ -979,6 +1043,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.status_bar.showMessage(f"Loaded: {file_path}", 5000)
+        self._refresh_spectrum_title()
+        self.spectrum_window.show_view("Spectrum")
 
     def open_spectrum_as_overlay(self):
         """Add a spectrum to the plot without replacing the current one."""
@@ -1031,6 +1097,7 @@ class MainWindow(QMainWindow):
 
         self.session.set_spectrum(spectrum, path=path_label)
         self.spectrum_widget.set_spectrum(spectrum)
+        self._refresh_spectrum_title()
 
         if hasattr(spectrum, "metadata") and spectrum.metadata:
             meta = dict(spectrum.metadata)
@@ -2144,5 +2211,12 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close event"""
+        for window in (
+            getattr(self, "spectrum_window", None),
+            getattr(self, "map_window", None),
+            getattr(self, "charts_window", None),
+        ):
+            if window is not None:
+                window.save_geometry()
         self._save_settings()
         event.accept()

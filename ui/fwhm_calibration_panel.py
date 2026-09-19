@@ -147,11 +147,7 @@ class FWHMCalibrationPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        splitter = QSplitter(Qt.Horizontal)
-
         controls = QWidget()
-        controls.setMinimumWidth(320)
-        controls.setMaximumWidth(420)
         col = QVBoxLayout(controls)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(8)
@@ -168,13 +164,8 @@ class FWHMCalibrationPanel(QWidget):
         self.progress_bar.setMaximumHeight(4)
         col.addWidget(self.progress_bar)
 
-        splitter.addWidget(controls)
-        splitter.addWidget(self._create_plot_widget())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 900])
-
-        layout.addWidget(splitter)
+        layout.addWidget(controls, stretch=1)
+        self.detached_plot = self._create_plot_widget()
 
     def _create_data_group(self):
         group = QGroupBox("Pure-element foils")

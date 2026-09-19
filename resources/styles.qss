@@ -7,8 +7,8 @@ QMainWindow {
 
 /* Group Boxes */
 QGroupBox {
-    font-weight: bold;
-    border: 2px solid #cccccc;
+    font-weight: 600;
+    border: 1px solid #e2e2e2;
     border-radius: 6px;
     margin-top: 12px;
     padding-top: 10px;
@@ -400,4 +400,81 @@ QToolTip {
     border: 1px solid #666666;
     padding: 4px;
     border-radius: 3px;
+}
+
+QLabel#sectionLabel {
+    font-weight: 600;
+    color: #333333;
+    padding: 2px 0;
+}
+
+QLabel#calibrationStatus {
+    background: #f7f7f7;
+    border-bottom: 1px solid #e2e2e2;
+    padding: 6px 12px;
+    color: #333333;
+}
+
+QPushButton#primaryButton {
+    background-color: #1f6f4a;
+    color: white;
+    font-weight: 600;
+    border: 1px solid #1a5c3d;
+    padding: 8px 14px;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #185c3c;
+}
+
+QPushButton#primaryButton:pressed {
+    background-color: #134a31;
+}
+
+QPushButton#primaryButton:disabled {
+    background-color: #d9d9d9;
+    color: #777777;
+    border-color: #c8c8c8;
+}
+
+QListWidget#activityRail {
+    background: #ececec;
+    border: none;
+    border-right: 1px solid #d5d5d5;
+    font-size: 12px;
+    outline: none;
+}
+
+QListWidget#activityRail::item {
+    padding: 8px 4px;
+    margin: 4px;
+    border-radius: 6px;
+    color: #333333;
+}
+
+QListWidget#activityRail::item:selected {
+    background: white;
+    color: #143d28;
+    border: 1px solid #d0d0d0;
+}
+
+QListWidget#stepRail {
+    background: #f7f7f7;
+    border: none;
+    border-right: 1px solid #e4e4e4;
+    outline: none;
+}
+
+QListWidget#stepRail::item {
+    padding: 8px 6px;
+    color: #333333;
+}
+
+QListWidget#stepRail::item:selected {
+    background: #e7f0ea;
+    color: #143d28;
+}
+
+QComboBox#viewPicker {
+    min-height: 24px;
 }
